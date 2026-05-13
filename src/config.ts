@@ -95,6 +95,29 @@ export function configFilePath(storageDir: string): string {
   return path.join(storageDir, "config.json");
 }
 
+export function larkChannelConfigPath(): string {
+  return path.join(os.homedir(), ".lark-channel", "config.json");
+}
+
+/**
+ * Try reading App ID / Secret from ~/.lark-channel/config.json
+ * (written by `lark-cli config bind --source lark-channel`).
+ */
+export function loadLarkChannelConfig(): { appId: string; appSecret: string } | null {
+  try {
+    const raw = fs.readFileSync(larkChannelConfigPath(), "utf-8");
+    const cfg = JSON.parse(raw) as {
+      accounts?: { app?: { id?: string; secret?: string } };
+    };
+    const id = cfg.accounts?.app?.id;
+    const secret = cfg.accounts?.app?.secret;
+    if (id && secret) return { appId: id, appSecret: secret };
+  } catch {
+    // file not present or malformed
+  }
+  return null;
+}
+
 export function loadSavedConfig(storageDir: string): Partial<FeishuAcpConfig> | null {
   const file = configFilePath(storageDir);
   if (!fs.existsSync(file)) return null;

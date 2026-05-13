@@ -15,6 +15,7 @@ import { FeishuAcpBridge } from "../src/bridge.js";
 import {
   defaultConfig,
   loadSavedConfig,
+  loadLarkChannelConfig,
   resolveAgent,
   BUILT_IN_AGENTS,
 } from "../src/config.js";
@@ -111,16 +112,23 @@ async function main(): Promise<void> {
     config.feishu.appSecret = creds.appSecret;
     if (args.command === "setup") return; // just setup, don't start
   } else {
-    // Load saved credentials
-    const saved = loadSavedConfig(storageDir);
-    if (saved?.feishu?.appId && saved?.feishu?.appSecret) {
-      config.feishu.appId = saved.feishu.appId;
-      config.feishu.appSecret = saved.feishu.appSecret;
+    // Load saved credentials — check lark-channel config first, then our own
+    const larkChannel = loadLarkChannelConfig();
+    if (larkChannel) {
+      config.feishu.appId = larkChannel.appId;
+      config.feishu.appSecret = larkChannel.appSecret;
+      log(`Using credentials from ~/.lark-channel/config.json`);
     } else {
-      // First run — prompt for credentials
-      const creds = await runSetup(storageDir);
-      config.feishu.appId = creds.appId;
-      config.feishu.appSecret = creds.appSecret;
+      const saved = loadSavedConfig(storageDir);
+      if (saved?.feishu?.appId && saved?.feishu?.appSecret) {
+        config.feishu.appId = saved.feishu.appId;
+        config.feishu.appSecret = saved.feishu.appSecret;
+      } else {
+        // First run — prompt for credentials
+        const creds = await runSetup(storageDir);
+        config.feishu.appId = creds.appId;
+        config.feishu.appSecret = creds.appSecret;
+      }
     }
   }
 
