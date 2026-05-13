@@ -5,6 +5,16 @@
 
 import * as Lark from "@larksuiteoapi/node-sdk";
 
+/** Wrap text in a Feishu interactive card with a markdown element. */
+function buildMarkdownCard(text: string): object {
+  return {
+    config: { wide_screen_mode: true },
+    elements: [
+      { tag: "markdown", content: text },
+    ],
+  };
+}
+
 export interface FeishuClientOpts {
   appId: string;
   appSecret: string;
@@ -23,32 +33,32 @@ export class FeishuClient {
     });
   }
 
-  /** Reply to a specific message with plain text. */
+  /** Reply to a specific message using a markdown card (renders bold, code, etc). */
   async replyText(messageId: string, text: string): Promise<void> {
     await this.client.im.message.reply({
       path: { message_id: messageId },
       data: {
-        content: JSON.stringify({ text }),
-        msg_type: "text",
+        content: JSON.stringify(buildMarkdownCard(text)),
+        msg_type: "interactive",
         reply_in_thread: false,
       },
     });
   }
 
-  /** Send a text message to a chat (DM or group). */
+  /** Send a markdown card message to a chat (DM or group). */
   async sendText(chatId: string, text: string): Promise<void> {
     await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId,
-        content: JSON.stringify({ text }),
-        msg_type: "text",
+        content: JSON.stringify(buildMarkdownCard(text)),
+        msg_type: "interactive",
       },
     });
   }
 
   /** Add an emoji reaction. Returns the reaction ID needed to remove it later. */
-  async addReaction(messageId: string, emoji = "EYES"): Promise<string | null> {
+  async addReaction(messageId: string, emoji = "THINKING"): Promise<string | null> {
     try {
       const res = await this.client.im.messageReaction.create({
         path: { message_id: messageId },

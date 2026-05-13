@@ -4,11 +4,19 @@
 
 Use AI coding agents (Copilot, Claude, Codex, Gemini…) directly from Feishu/Lark — no server, no webhook, runs on your machine.
 
+![alt text](image.png)
+
 ## How it works
 
 Feishu message → WebSocket long connection → ACP agent subprocess → reply back to Feishu
 
 No public endpoint needed. The bridge runs locally and connects out.
+
+## Requirements
+
+- **Node.js 20+**
+- **An ACP-compatible agent** installed and authenticated (e.g. `gh copilot`, `claude`, `gemini`)
+- **A Feishu account** — personal or enterprise, created automatically on first run via `lark-cli`
 
 ## Quick Start
 
