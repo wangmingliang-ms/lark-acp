@@ -35,6 +35,7 @@ export interface SessionManagerOpts {
   log: (msg: string) => void;
   onReply: (messageId: string, chatId: string, text: string) => Promise<void>;
   onTyping: (messageId: string) => Promise<void>;
+  onWelcome: (chatId: string) => Promise<void>;
 }
 
 export class SessionManager {
@@ -88,6 +89,9 @@ export class SessionManager {
 
   private async createSession(userId: string, firstMessage: PendingMessage): Promise<UserSession> {
     this.opts.log(`Creating session for user ${userId}`);
+
+    // Send welcome message on first contact
+    this.opts.onWelcome(firstMessage.chatId).catch(() => {});
 
     const client = new FeishuAcpClient({
       onTyping: () => this.opts.onTyping(firstMessage.messageId),
