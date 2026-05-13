@@ -59,19 +59,29 @@ async function runLarkCliSetup(log: (msg: string) => void): Promise<boolean> {
     const proc = spawn(bin, ["config", "init", "--new"], { stdio: "inherit", shell: true });
     proc.on("close", (code) => resolve(code === 0));
   });
-  if (!initOk) return false;
+  return initOk;
+}
 
-  log(`\nRunning: ${bin} config bind --source lark-channel`);
-  log("This writes your App ID and Secret to ~/.lark-channel/config.json\n");
-
-  const bindOk = await new Promise<boolean>((resolve) => {
-    const proc = spawn(bin, ["config", "bind", "--source", "lark-channel"], {
-      stdio: "inherit",
-      shell: true,
+/**
+ * After config init --new, extract the App ID from `lark-cli config show`
+ * (lark-cli never exposes the secret in plaintext — we ask the user for it).
+ */
+async function extractAppIdFromLarkCli(): Promise<string | null> {
+  const bin = resolveLarkCliBin();
+  return new Promise((resolve) => {
+    let out = "";
+    const proc = spawn(bin, ["config", "show"], { shell: true, stdio: ["ignore", "pipe", "ignore"] });
+    proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    proc.on("close", () => {
+      try {
+        // lark-cli prints JSON to stdout: { appId: "...", appSecret: "****", ... }
+        const json = JSON.parse(out.trim()) as { appId?: string };
+        resolve(json.appId ?? null);
+      } catch {
+        resolve(null);
+      }
     });
-    proc.on("close", (code) => resolve(code === 0));
   });
-  return bindOk;
 }
 
 export async function runSetup(
@@ -112,13 +122,30 @@ export async function runSetup(
       const success = await runLarkCliSetup(log);
 
       if (success) {
-        const creds = readLarkChannelConfig();
-        if (creds) {
-          log(`\n✓ Setup complete! App ID: ${creds.appId}`);
-          saveConfig(storageDir, { feishu: creds });
-          return creds;
+        // lark-cli stores the secret in the system keychain — we need to ask for it.
+        // Extract the App ID from `lark-cli config show` so the user doesn't have to type it.
+        const appId = await extractAppIdFromLarkCli();
+        if (appId) {
+          log(`\n✓ App created! App ID: ${appId}`);
+          log("lark-cli stores the App Secret in your system keychain.");
+          log("Please paste your App Secret below (visible in the Feishu Open Platform under your app's Credentials tab):\n");
+          const appSecret = await prompt(rl, "App Secret: ");
+          if (appSecret) {
+            const creds = { appId, appSecret };
+            // Write ~/.lark-channel/config.json so lark-cli can also read it
+            const larkChannelDir = path.join(os.homedir(), ".lark-channel");
+            fs.mkdirSync(larkChannelDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(larkChannelDir, "config.json"),
+              JSON.stringify({ accounts: { app: { id: appId, secret: appSecret, tenant: "feishu" } } }, null, 2),
+              "utf-8",
+            );
+            saveConfig(storageDir, { feishu: creds });
+            log(`\n✓ Setup complete! Config saved.`);
+            return creds;
+          }
         }
-        log("⚠ lark-cli setup completed but config not found — falling back to manual entry.");
+        log("⚠ Could not read App ID from lark-cli — falling back to manual entry.");
       } else {
         log("⚠ lark-cli setup failed — falling back to manual entry.");
       }
