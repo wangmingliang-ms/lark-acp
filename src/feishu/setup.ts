@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { saveConfig, loadSavedConfig } from "../config.js";
+import { FeishuClient } from "./client.js";
 
 // ~/.lark-channel/config.json schema (matches lark-cli's lark-channel-bridge format)
 interface LarkChannelConfig {
@@ -84,6 +85,19 @@ async function extractAppIdFromLarkCli(): Promise<string | null> {
   });
 }
 
+async function printBotLink(appId: string, appSecret: string, log: (msg: string) => void): Promise<void> {
+  try {
+    const client = new FeishuClient({ appId, appSecret });
+    const link = await client.getBotChatLink();
+    if (link) {
+      log(`\n🤖 Chat with your bot directly:`);
+      log(`   ${link}\n`);
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
 export async function runSetup(
   storageDir: string,
   log: (msg: string) => void = console.log,
@@ -142,6 +156,7 @@ export async function runSetup(
             );
             saveConfig(storageDir, { feishu: creds });
             log(`\n✓ Setup complete! Config saved.`);
+            await printBotLink(appId, appSecret, log);
             return creds;
           }
         }
@@ -167,6 +182,7 @@ Manual setup:
 
     saveConfig(storageDir, { feishu: { appId, appSecret } });
     log(`\n✓ Config saved to ${storageDir}/config.json`);
+    await printBotLink(appId, appSecret, log);
     return { appId, appSecret };
   } finally {
     rl.close();

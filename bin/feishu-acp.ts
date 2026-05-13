@@ -110,7 +110,18 @@ async function main(): Promise<void> {
     const creds = await runSetup(storageDir);
     config.feishu.appId = creds.appId;
     config.feishu.appSecret = creds.appSecret;
-    if (args.command === "setup") return; // just setup, don't start
+    // After setup, prompt for agent if not already specified
+    if (!args.agent) {
+      const presetList = Object.keys(BUILT_IN_AGENTS).join(", ");
+      const readline = await import("node:readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const agentAnswer = await new Promise<string>((resolve) =>
+        rl.question(`\nWhich agent to connect? (${presetList}): `, (a) => { rl.close(); resolve(a.trim()); })
+      );
+      if (!agentAnswer) { console.log("No agent selected — exiting."); return; }
+      args.agent = agentAnswer;
+    }
+    // fall through to start the bridge below
   } else {
     // Load saved credentials — check lark-channel config first, then our own
     const larkChannel = loadLarkChannelConfig();

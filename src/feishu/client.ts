@@ -59,7 +59,24 @@ export class FeishuClient {
     }
   }
 
-  /** Remove a reaction (called after reply is sent). */
+  /** Fetch bot info and return a direct chat deep-link the user can click. */
+  async getBotChatLink(): Promise<string | null> {
+    try {
+      // GET /open-apis/bot/v3/info
+      const res = await (this.client as any).request({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+      });
+      const openId: string | undefined = res?.bot?.open_id;
+      if (openId) {
+        return `https://applink.feishu.cn/client/chat/open?botId=${openId}`;
+      }
+    } catch {
+      // non-fatal
+    }
+    return null;
+  }
+
   async removeReaction(messageId: string, reactionId: string): Promise<void> {
     try {
       await this.client.im.messageReaction.delete({
