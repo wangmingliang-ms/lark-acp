@@ -46,15 +46,38 @@ export async function spawnAgent(opts: SpawnAgentOpts): Promise<AgentProcessInfo
   const connection = new acp.ClientSideConnection(() => client, stream);
 
   // Initialize protocol
-  await connection.initialize({
-    protocolVersion: acp.PROTOCOL_VERSION,
-    clientCapabilities: {
-      fs: { readTextFile: true, writeTextFile: true },
-    },
-  });
+  let initResult: Awaited<ReturnType<typeof connection.initialize>>;
+  try {
+    initResult = await connection.initialize({
+      protocolVersion: acp.PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+      },
+    });
+  } catch (err) {
+    throw new Error(`Failed to initialize agent (${command} ${args.join(" ")}). Is the agent installed?\n${err instanceof Error ? err.message : err}`);
+  }
+
+  // Authenticate if the agent advertises any auth methods.
+  // For cloud/hosted agents this is required before newSession() and prompt().
+  if (initResult.authMethods && initResult.authMethods.length > 0) {
+    const method = initResult.authMethods[0];
+    log(`Agent requires authentication (method: ${method.id} / ${method.name}), authenticating...`);
+    try {
+      await connection.authenticate({ methodId: method.id });
+    } catch (err) {
+      throw new Error(`Agent authentication failed during setup. Ensure the agent CLI is logged in before starting lark-acp.\n${err instanceof Error ? err.message : err}`);
+    }
+    log(`Authentication complete`);
+  }
 
   // Create a session
-  const sessionResult = await connection.newSession({ cwd, mcpServers: [] });
+  let sessionResult: Awaited<ReturnType<typeof connection.newSession>>;
+  try {
+    sessionResult = await connection.newSession({ cwd, mcpServers: [] });
+  } catch (err) {
+    throw new Error(`Failed to create agent session.\n${err instanceof Error ? err.message : err}`);
+  }
   log(`Agent initialized, session: ${sessionResult.sessionId}`);
 
   return { process: proc, connection, sessionId: sessionResult.sessionId };

@@ -11,6 +11,7 @@
  */
 
 import path from "node:path";
+import fs from "node:fs";
 import { select } from "@inquirer/prompts";
 import { FeishuAcpBridge } from "../src/bridge.js";
 import { FeishuClient } from "../src/feishu/client.js";
@@ -23,7 +24,7 @@ import {
 } from "../src/config.js";
 import { runSetup } from "../src/feishu/setup.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 function usage(): void {
   const presets = Object.keys(BUILT_IN_AGENTS).join(", ");
@@ -32,20 +33,28 @@ lark-acp v${VERSION} — Bridge Feishu/Lark to any ACP-compatible AI agent
 
 Usage:
   lark-acp --agent <preset|command>  [options]
-  lark-acp setup                     Configure App ID & Secret
+  lark-acp setup                     Configure Feishu App ID & Secret
   lark-acp agents                    List built-in agent presets
+  lark-acp help                      Show this help
 
 Options:
-  --agent <value>      Built-in preset or raw command
+  --agent <value>      Built-in preset or raw command string
                        Presets: ${presets}
-                       Example: "copilot", "claude", "opencode acp"
-  --cwd <dir>          Working directory for the agent (default: cwd)
-  --setup              Re-run interactive setup before starting
-  --idle-timeout <m>   Session idle timeout in minutes (default: 1440)
-  --max-sessions <n>   Max concurrent user sessions (default: 10)
-  --hide-thoughts      Don't forward agent thoughts to Feishu
-  -h, --help           Show this help
-  -v, --version        Show version
+                       Raw:     "npx my-agent --flag", "python agent.py"
+  --cwd <dir>          Working directory for the agent subprocess (default: current dir)
+  --setup              Re-run the interactive Feishu credentials setup before starting
+  --idle-timeout <m>   Evict idle sessions after <m> minutes (default: 1440, 0 = never)
+  --max-sessions <n>   Max concurrent user sessions (default: 10, min: 1)
+  --hide-thoughts      Do not forward agent thought chunks to Feishu
+  -h, --help           Show this help message and exit
+  -v, --version        Show version and exit
+
+Examples:
+  lark-acp --agent claude
+  lark-acp --agent copilot --cwd /my/project --hide-thoughts
+  lark-acp --agent "npx my-custom-agent --acp" --max-sessions 5
+  lark-acp setup
+  lark-acp agents
 `);
 }
 
@@ -71,26 +80,74 @@ function parseArgs(argv: string[]): CliArgs {
     i = 1;
   }
 
+  const requireValue = (flag: string, value: string | undefined): string => {
+    if (!value || value.startsWith("-")) {
+      console.error(`Error: ${flag} requires a value`);
+      process.exit(1);
+    }
+    return value;
+  };
+
   while (i < args.length) {
     const arg = args[i];
     switch (arg) {
-      case "--agent":         result.agent = args[++i]; break;
-      case "--cwd":           result.cwd = args[++i]; break;
+      case "--agent": {
+        result.agent = requireValue("--agent", args[++i]);
+        break;
+      }
+      case "--cwd": {
+        result.cwd = requireValue("--cwd", args[++i]);
+        break;
+      }
       case "--setup":         result.runSetup = true; break;
-      case "--idle-timeout":  result.idleTimeout = parseInt(args[++i], 10); break;
-      case "--max-sessions":  result.maxSessions = parseInt(args[++i], 10); break;
+      case "--idle-timeout": {
+        const raw = requireValue("--idle-timeout", args[++i]);
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 0) {
+          console.error(`Error: --idle-timeout must be a non-negative integer (minutes), got: ${raw}`);
+          process.exit(1);
+        }
+        result.idleTimeout = n;
+        break;
+      }
+      case "--max-sessions": {
+        const raw = requireValue("--max-sessions", args[++i]);
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          console.error(`Error: --max-sessions must be a positive integer, got: ${raw}`);
+          process.exit(1);
+        }
+        result.maxSessions = n;
+        break;
+      }
       case "--hide-thoughts": result.hideThoughts = true; break;
       case "-h": case "--help":    result.help = true; break;
       case "-v": case "--version": result.version = true; break;
       default:
         if (arg?.startsWith("-")) {
-          console.error(`Unknown option: ${arg}`);
+          console.error(`Error: Unknown option: ${arg}`);
+          console.error(`Run "lark-acp --help" for usage.`);
           process.exit(1);
         }
     }
     i++;
   }
   return result;
+}
+
+function validateArgs(args: CliArgs): void {
+  // --cwd must be an existing directory
+  if (args.cwd) {
+    try {
+      if (!fs.statSync(args.cwd).isDirectory()) {
+        console.error(`Error: --cwd "${args.cwd}" is not a directory`);
+        process.exit(1);
+      }
+    } catch {
+      console.error(`Error: --cwd "${args.cwd}" does not exist`);
+      process.exit(1);
+    }
+  }
 }
 
 function log(msg: string): void {
@@ -113,8 +170,10 @@ function printBanner(): void {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
 
-  if (args.help) { usage(); return; }
+  if (args.help || args.command === "help") { usage(); return; }
   if (args.version) { console.log(`lark-acp v${VERSION}`); return; }
+
+  validateArgs(args);
 
   printBanner();
 

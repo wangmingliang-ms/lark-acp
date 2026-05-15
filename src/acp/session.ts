@@ -38,6 +38,14 @@ export interface SessionManagerOpts {
   onStopTyping: (messageId: string, reactionId: string) => Promise<void>;
 }
 
+/** Maps agent presets to auth remediation hints. */
+const AUTH_HINTS: Record<string, string> = {
+  claude: 'Run "claude" in a terminal and complete the login flow first.',
+  copilot: 'Run "gh auth login" to authenticate GitHub Copilot CLI.',
+  codex: 'Set the OPENAI_API_KEY environment variable or run "codex" to authenticate.',
+  gemini: 'Run "gemini" in a terminal and complete the login flow first.',
+};
+
 export class SessionManager {
   private sessions = new Map<string, UserSession>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -160,16 +168,37 @@ export class SessionManager {
             await this.opts.onReply(pending.messageId, pending.chatId, reply);
           }
         } catch (err) {
-          this.opts.log(`[${session.userId}] Agent error: ${String(err)}`);
+          const errMsg = formatAgentError(err);
 
-          // If the process died, drop the session
-          if (session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
+          // Drop the session if the process died or authentication failed
+          const isAuthError = isAuthenticationError(err);
+          if (isAuthError || session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
+            killAgent(session.agentInfo.process);
             this.sessions.delete(session.userId);
+
+            if (isAuthError) {
+              const preset = this.opts.agentPreset ?? "";
+              const hint = AUTH_HINTS[preset] ?? `Ensure the agent (${this.opts.agentCommand}) is authenticated before starting lark-acp.`;
+              this.opts.log(`[${session.userId}] Agent authentication failed. ${hint}`);
+              await this.opts.onReply(
+                pending.messageId,
+                pending.chatId,
+                `⚠️ Agent authentication failed.\n${hint}`,
+              ).catch(() => {});
+            } else {
+              this.opts.log(`[${session.userId}] Agent crashed: ${errMsg}`);
+              await this.opts.onReply(
+                pending.messageId,
+                pending.chatId,
+                `⚠️ Agent crashed: ${errMsg}`,
+              ).catch(() => {});
+            }
             return;
           }
 
+          this.opts.log(`[${session.userId}] Agent error: ${errMsg}`);
           await this.opts
-            .onReply(pending.messageId, pending.chatId, `⚠️ Agent error: ${String(err)}`)
+            .onReply(pending.messageId, pending.chatId, `⚠️ Agent error: ${errMsg}`)
             .catch(() => {});
         }
       }
@@ -205,4 +234,25 @@ export class SessionManager {
       this.sessions.delete(oldest.userId);
     }
   }
+}
+
+/** Extract a human-readable message from any thrown value. */
+function formatAgentError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    if (typeof e["message"] === "string") return e["message"];
+    return JSON.stringify(err);
+  }
+  return String(err);
+}
+
+/** Returns true if the error is a JSON-RPC "Authentication required" error. */
+function isAuthenticationError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  // ACP SDK throws RequestError (extends Error) with code -32000 for auth failures
+  if (typeof e["code"] === "number" && e["code"] === -32000) return true;
+  if (typeof e["message"] === "string" && /auth(entication)? required/i.test(e["message"])) return true;
+  return false;
 }

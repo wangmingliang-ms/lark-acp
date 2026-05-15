@@ -2,6 +2,8 @@
 
 [![npm](https://img.shields.io/npm/v/feishu-acp)](https://www.npmjs.com/package/feishu-acp)
 
+> If you find this project useful, please consider giving it a ⭐ — it helps others discover it!
+
 Use AI coding agents (Copilot, Claude, Codex, Gemini…) directly from Feishu/Lark — no server, no webhook, runs on your machine.
 
 ![alt text](image.png)
