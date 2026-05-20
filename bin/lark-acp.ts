@@ -23,6 +23,7 @@ import {
   BUILT_IN_AGENTS,
 } from "../src/config.js";
 import { runSetup } from "../src/feishu/setup.js";
+import { createStorageBackend } from "../src/storage/index.js";
 
 const VERSION = "0.3.0";
 
@@ -44,8 +45,9 @@ Options:
   --cwd <dir>          Working directory for the agent subprocess (default: current dir)
   --setup              Re-run the interactive Feishu credentials setup before starting
   --idle-timeout <m>   Evict idle sessions after <m> minutes (default: 1440, 0 = never)
-  --max-sessions <n>   Max concurrent user sessions (default: 10, min: 1)
+  --max-sessions <n>   Max concurrent chat sessions (default: 10, min: 1)
   --hide-thoughts      Do not forward agent thought chunks to Feishu
+  --storage <backend>  Storage backend: "file" (default) or "postgres://user:pass@host/db"
   -h, --help           Show this help message and exit
   -v, --version        Show version and exit
 
@@ -66,6 +68,7 @@ interface CliArgs {
   idleTimeout?: number;
   maxSessions?: number;
   hideThoughts: boolean;
+  storage?: string;
   help: boolean;
   version: boolean;
 }
@@ -121,6 +124,10 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       }
       case "--hide-thoughts": result.hideThoughts = true; break;
+      case "--storage": {
+        result.storage = requireValue("--storage", args[++i]);
+        break;
+      }
       case "-h": case "--help":    result.help = true; break;
       case "-v": case "--version": result.version = true; break;
       default:
@@ -246,8 +253,18 @@ async function main(): Promise<void> {
   if (args.idleTimeout !== undefined) config.session.idleTimeoutMs = args.idleTimeout * 60_000;
   if (args.maxSessions !== undefined) config.session.maxConcurrentUsers = args.maxSessions;
   if (args.hideThoughts) config.agent.showThoughts = false;
+  if (args.storage) {
+    if (args.storage.startsWith("postgres://")) {
+      config.storage.backend = "postgres";
+      config.storage.url = args.storage;
+    }
+    // "file" or other unrecognized values default to file
+  }
 
-  const bridge = new FeishuAcpBridge(config, log);
+  const storage = createStorageBackend(config.storage);
+  await storage.init();
+
+  const bridge = new FeishuAcpBridge(config, storage, log);
 
   const shutdown = async (): Promise<void> => {
     await bridge.stop();

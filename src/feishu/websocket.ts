@@ -37,6 +37,12 @@ export class FeishuWsConnection {
           this.opts.log(`[ws] error handling message event: ${String(err)}`);
         }
       },
+      "im.message.message_read_v1": async () => {
+        // no-op: suppress SDK warning noise
+      },
+      "im.message.reaction.created_v1": async () => {
+        // no-op: suppress SDK warning noise
+      },
       "card.action.trigger": async (data: Lark.RawCardActionEvent) => {
         try {
           const normalized = Lark.normalizeCardAction(data);
@@ -46,6 +52,7 @@ export class FeishuWsConnection {
         } catch (err) {
           this.opts.log(`[ws] error handling card action: ${String(err)}`);
         }
+        return { toast: { type: "success", content: "已确认" } };
       },
     });
 

@@ -9,20 +9,20 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
-/** Timeout for waiting on user's card action response before auto-allowing. */
-const PERMISSION_TIMEOUT_MS = 60_000;
-
 interface PendingPermission {
   requestId: string;
   resolve: (value: acp.RequestPermissionResponse) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
 export interface FeishuAcpClientOpts {
   onTyping: () => Promise<void>;
   onThought: (text: string) => Promise<void>;
   showThoughts: boolean;
-  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string) => Promise<void>;
+  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string, chatId: string) => Promise<void>;
+  sendThinkingCard: (replyToMessageId: string) => Promise<string | null>;
+  updateThinkingCard: (cardMessageId: string, thoughtText: string, isDone: boolean) => Promise<void>;
+  sendToolCard: (replyToMessageId: string, title: string, kind: string) => Promise<string | null>;
+  updateToolCard: (cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean) => Promise<void>;
   log: (msg: string) => void;
 }
 
@@ -32,10 +32,20 @@ export class FeishuAcpClient implements acp.Client {
   private opts: FeishuAcpClientOpts;
   private lastTypingAt = 0;
   private currentMessageId = "";
+  private currentChatId = "";
   private static readonly TYPING_INTERVAL_MS = 5_000;
 
-  /** Tracks the single in-flight permission request (one per prompt turn). */
-  private pendingPermission: PendingPermission | null = null;
+  /** Tracks all in-flight permission requests (supports concurrent requests). */
+  private pendingPermissions: Map<string, PendingPermission> = new Map();
+
+  /** Tracks the thinking card message ID for incremental updates. */
+  private thinkingCardId: string | null = null;
+
+  /** Prevents concurrent thinking card creation (race condition guard). */
+  private thinkingCardCreating: Promise<string | null> | null = null;
+
+  /** Maps toolCallId → card info for tool card updates (caches title/kind from initial call). */
+  private toolCards: Map<string, { cardId: string; title: string; kind: string }> = new Map();
 
   constructor(opts: FeishuAcpClientOpts) {
     this.opts = opts;
@@ -46,8 +56,9 @@ export class FeishuAcpClient implements acp.Client {
   }
 
   /** Store the current message context so requestPermission knows where to send the card. */
-  setContext(messageId: string): void {
+  setContext(messageId: string, chatId: string): void {
     this.currentMessageId = messageId;
+    this.currentChatId = chatId;
   }
 
   async requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
@@ -62,22 +73,13 @@ export class FeishuAcpClient implements acp.Client {
     const requestId = crypto.randomUUID();
 
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
-      const timer = setTimeout(() => {
-        this.opts.log(`[permission] timeout, auto-allow: ${params.toolCall?.title ?? "unknown"}`);
-        if (this.pendingPermission?.requestId === requestId) {
-          this.pendingPermission = null;
-        }
-        resolve({ outcome: { outcome: "selected", optionId: defaultOptionId } });
-      }, PERMISSION_TIMEOUT_MS);
+      const pp: PendingPermission = { requestId, resolve };
+      this.pendingPermissions.set(requestId, pp);
 
-      this.pendingPermission = { requestId, resolve, timer };
-
-      this.opts.sendInterruptCard(this.currentMessageId, params, requestId).catch((err) => {
+      this.opts.sendInterruptCard(this.currentMessageId, params, requestId, this.currentChatId).catch((err) => {
         this.opts.log(`[permission] failed to send card: ${String(err)}`);
-        // Fall back to auto-allow on send failure
-        clearTimeout(timer);
-        if (this.pendingPermission?.requestId === requestId) {
-          this.pendingPermission = null;
+        if (this.pendingPermissions.get(requestId)?.requestId === requestId) {
+          this.pendingPermissions.delete(requestId);
         }
         resolve({ outcome: { outcome: "selected", optionId: defaultOptionId } });
       });
@@ -86,61 +88,84 @@ export class FeishuAcpClient implements acp.Client {
 
   /** Resolve a pending permission request from a card action event. */
   handleCardAction(requestId: string, optionId: string): boolean {
-    const pp = this.pendingPermission;
-    if (!pp || pp.requestId !== requestId) return false;
+    const pp = this.pendingPermissions.get(requestId);
+    if (!pp) return false;
 
-    clearTimeout(pp.timer);
-    this.pendingPermission = null;
+    this.pendingPermissions.delete(requestId);
     pp.resolve({ outcome: { outcome: "selected", optionId } });
     return true;
   }
 
-  /** Cancel any pending permission request (e.g. on /cancel). Resolves with cancelled outcome. */
+  /** Cancel all pending permission requests (e.g. on /cancel). Resolves with cancelled outcome. */
   cancelPendingPermission(): void {
-    const pp = this.pendingPermission;
-    if (!pp) return;
-
-    clearTimeout(pp.timer);
-    this.pendingPermission = null;
-    pp.resolve({ outcome: { outcome: "cancelled" } });
+    for (const [requestId, pp] of this.pendingPermissions) {
+      pp.resolve({ outcome: { outcome: "cancelled" } });
+    }
+    this.pendingPermissions.clear();
   }
 
   async sessionUpdate(params: acp.SessionNotification): Promise<void> {
     const u = params.update;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        await this.flushThoughts();
-        if (u.content.type === "text") this.chunks.push(u.content.text);
+        if (u.content.type === "text") {
+          const snippet = u.content.text.substring(0, 60).replace(/\n/g, "\\n");
+          this.opts.log(`[event] message_chunk len=${u.content.text.length} "${snippet}..."`);
+          this.chunks.push(u.content.text);
+        }
         await this.maybeSendTyping();
         break;
 
       case "agent_thought_chunk":
         if (u.content.type === "text") {
-          this.opts.log(`[thought] ${u.content.text.substring(0, 80)}`);
-          if (this.opts.showThoughts) this.thoughtChunks.push(u.content.text);
-        }
-        await this.maybeSendTyping();
-        break;
-
-      case "tool_call":
-        await this.flushThoughts();
-        this.opts.log(`[tool] ${u.title} (${u.status})`);
-        await this.maybeSendTyping();
-        break;
-
-      case "tool_call_update":
-        if (u.status === "completed" && u.content) {
-          for (const c of u.content) {
-            if (c.type === "diff") {
-              const diff = c as acp.Diff;
-              const lines: string[] = [`--- ${diff.path}`];
-              diff.oldText?.split("\n").forEach((l) => lines.push(`- ${l}`));
-              diff.newText?.split("\n").forEach((l) => lines.push(`+ ${l}`));
-              this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
-            }
+          this.opts.log(`[event] thought_chunk len=${u.content.text.length}`);
+          if (this.opts.showThoughts) {
+            this.thoughtChunks.push(u.content.text);
+            this.createThinkingCardIfNeeded().catch((err) => {
+              this.opts.log(`[think-card] create failed: ${String(err)}`);
+            });
           }
         }
+        await this.maybeSendTyping();
         break;
+
+      case "tool_call": {
+        const title = u.title ?? "unknown";
+        const kind = u.kind ?? "tool";
+        const toolCallId = (u as Record<string, unknown>).toolCallId as string | undefined;
+        this.opts.log(`[event] tool_call id=${toolCallId ?? "?"} title="${title}" kind=${kind} status=${u.status}`);
+        this.sendToolCardIfNeeded(title, kind, toolCallId).catch((err) => {
+          this.opts.log(`[tool-card] create failed: ${String(err)}`);
+        });
+        await this.maybeSendTyping();
+        break;
+      }
+
+      case "tool_call_update": {
+        const toolCallId = (u as Record<string, unknown>).toolCallId as string;
+        this.opts.log(`[event] tool_call_update id=${toolCallId} status=${u.status}`);
+        if (u.status === "completed" || u.status === "failed") {
+          const title = u.title ?? "unknown";
+          const kind = u.kind ?? "tool";
+          let diffText: string | undefined;
+          if (u.content) {
+            for (const c of u.content) {
+              if (c.type === "diff") {
+                const diff = c as acp.Diff;
+                const lines: string[] = [`--- ${diff.path}`];
+                diff.oldText?.split("\n").forEach((l) => lines.push(`- ${l}`));
+                diff.newText?.split("\n").forEach((l) => lines.push(`+ ${l}`));
+                diffText = lines.join("\n");
+                this.chunks.push("\n```diff\n" + diffText + "\n```\n");
+              }
+            }
+          }
+          this.updateToolCardIfExists(toolCallId, title, kind, diffText, u.status === "failed").catch((err) => {
+            this.opts.log(`[tool-card] update failed: ${String(err)}`);
+          });
+        }
+        break;
+      }
     }
   }
 
@@ -156,20 +181,87 @@ export class FeishuAcpClient implements acp.Client {
 
   /** Flush accumulated text (and thoughts) — resets internal buffers. */
   async flush(): Promise<string> {
-    await this.flushThoughts();
+    await this.finalizeThinkingCard();
     const text = this.chunks.join("");
     this.chunks = [];
     this.lastTypingAt = 0;
     return text;
   }
 
-  private async flushThoughts(): Promise<void> {
-    if (!this.thoughtChunks.length) return;
+  private async createThinkingCardIfNeeded(): Promise<void> {
+    if (this.thinkingCardId) return;
+    if (this.thinkingCardCreating) {
+      // Another call is already creating the card; wait for its result
+      this.opts.log(`[think-card] waiting for in-flight creation`);
+      const id = await this.thinkingCardCreating;
+      if (id) this.thinkingCardId = id;
+      return;
+    }
+    if (!this.currentMessageId) return;
+
+    this.opts.log(`[think-card] creating...`);
+    const promise = this.opts.sendThinkingCard(this.currentMessageId);
+    this.thinkingCardCreating = promise;
+    try {
+      const id = await promise;
+      if (id) {
+        this.thinkingCardId = id;
+        this.opts.log(`[think-card] created id=${id}`);
+      } else {
+        this.opts.log(`[think-card] create returned null`);
+      }
+    } finally {
+      this.thinkingCardCreating = null;
+    }
+  }
+
+  /** Update the thinking card with final content and mark it done. Called only at end of prompt. */
+  private async finalizeThinkingCard(): Promise<void> {
+    const id = this.thinkingCardId;
+    if (!id) return;
+    this.thinkingCardId = null;
     const text = this.thoughtChunks.join("");
     this.thoughtChunks = [];
-    if (text.trim()) {
-      await this.opts.onThought(`💭 Thinking...\n${text}`).catch(() => {});
+    this.opts.log(`[think-card] finalize id=${id} text_len=${text.length} chunks=${this.thoughtChunks.length}`);
+    await this.opts.updateThinkingCard(id, text || "（空）", true).catch((err) => {
+      this.opts.log(`[think-card] finalize update failed: ${String(err)}`);
+    });
+  }
+
+  private async sendToolCardIfNeeded(title: string, kind: string, toolCallId?: string): Promise<void> {
+    if (!this.currentMessageId) {
+      this.opts.log(`[tool-card] skip: no currentMessageId`);
+      return;
     }
+    this.opts.log(`[tool-card] creating for id=${toolCallId ?? "?"} title="${title}"`);
+    const id = await this.opts.sendToolCard(this.currentMessageId, title, kind);
+    if (id && toolCallId) {
+      this.toolCards.set(toolCallId, { cardId: id, title, kind });
+      this.opts.log(`[tool-card] created id=${id} toolCallId=${toolCallId}`);
+    } else {
+      this.opts.log(`[tool-card] create returned null or no toolCallId (id=${id})`);
+    }
+  }
+
+  private async updateToolCardIfExists(
+    toolCallId: string,
+    title: string,
+    kind: string,
+    diffText?: string,
+    isFailed?: boolean,
+  ): Promise<void> {
+    const entry = this.toolCards.get(toolCallId);
+    if (!entry) {
+      this.opts.log(`[tool-card] update skipped: no cached entry for toolCallId=${toolCallId}`);
+      return;
+    }
+    this.toolCards.delete(toolCallId);
+    const finalTitle = title !== "unknown" ? title : entry.title;
+    const finalKind = kind !== "tool" ? kind : entry.kind;
+    this.opts.log(`[tool-card] updating id=${entry.cardId} toolCallId=${toolCallId} title="${finalTitle}" failed=${isFailed ?? false} diff=${diffText ? "yes" : "no"}`);
+    await this.opts.updateToolCard(entry.cardId, finalTitle, finalKind, diffText, isFailed).catch((err) => {
+      this.opts.log(`[tool-card] update API failed: ${String(err)}`);
+    });
   }
 
   private async maybeSendTyping(): Promise<void> {

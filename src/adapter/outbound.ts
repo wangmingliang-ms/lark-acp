@@ -1,7 +1,7 @@
 /**
  * Outbound adapter — format ACP reply text for Feishu.
- * Feishu plain text messages support Unicode but not Markdown natively,
- * so we keep the text as-is (code blocks, diffs are readable in monospace).
+ * Replies are sent as interactive cards with a markdown element,
+ * so code blocks, bold, lists etc. render natively.
  */
 
 const MAX_MESSAGE_LENGTH = 4000; // Feishu text message limit

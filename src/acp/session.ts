@@ -1,22 +1,22 @@
 /**
- * Per-user ACP session manager.
- * Each Feishu user gets their own agent subprocess + ACP session.
- * Messages are serialized per user via a queue.
+ * Per-chat ACP session manager.
+ * Each Feishu chat gets its own agent subprocess + ACP session.
+ * Supports multiple sessions per chat; defaults to the latest one.
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
 import { FeishuAcpClient } from "./client.js";
 import { spawnAgent, spawnAndResumeAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
-import { SessionStore } from "./session-store.js";
+import type { StorageBackend } from "../storage/types.js";
 
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
-  messageId: string; // Feishu message ID for reply threading
+  messageId: string;
   chatId: string;
 }
 
-interface UserSession {
-  userId: string;
+interface ChatSession {
+  chatId: string;
   client: FeishuAcpClient;
   agentInfo: AgentProcessInfo;
   queue: PendingMessage[];
@@ -30,18 +30,21 @@ export interface SessionManagerOpts {
   agentCwd: string;
   agentEnv?: Record<string, string>;
   agentPreset?: string;
-  storageDir: string;
+  storage: StorageBackend;
   idleTimeoutMs: number;
-  maxConcurrentUsers: number;
+  maxConcurrentChats: number;
   showThoughts: boolean;
   log: (msg: string) => void;
   onReply: (messageId: string, chatId: string, text: string) => Promise<void>;
   onTyping: (messageId: string) => Promise<string | null>;
   onStopTyping: (messageId: string, reactionId: string) => Promise<void>;
-  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string) => Promise<void>;
+  sendInterruptCard: (messageId: string, params: acp.RequestPermissionRequest, requestId: string, chatId: string) => Promise<void>;
+  sendThinkingCard: (replyToMessageId: string) => Promise<string | null>;
+  updateThinkingCard: (cardMessageId: string, thoughtText: string, isDone: boolean) => Promise<void>;
+  sendToolCard: (replyToMessageId: string, title: string, kind: string) => Promise<string | null>;
+  updateToolCard: (cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean) => Promise<void>;
 }
 
-/** Maps agent presets to auth remediation hints. */
 const AUTH_HINTS: Record<string, string> = {
   claude: 'Run "claude" in a terminal and complete the login flow first.',
   copilot: 'Run "gh auth login" to authenticate GitHub Copilot CLI.',
@@ -50,15 +53,13 @@ const AUTH_HINTS: Record<string, string> = {
 };
 
 export class SessionManager {
-  private sessions = new Map<string, UserSession>();
+  private sessions = new Map<string, ChatSession>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private aborted = false;
   private opts: SessionManagerOpts;
-  private store: SessionStore;
 
   constructor(opts: SessionManagerOpts) {
     this.opts = opts;
-    this.store = new SessionStore(opts.storageDir);
   }
 
   start(): void {
@@ -69,20 +70,21 @@ export class SessionManager {
   async stop(): Promise<void> {
     this.aborted = true;
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-    for (const [userId, s] of this.sessions) {
-      this.opts.log(`Stopping session for ${userId}`);
+    for (const [chatId, s] of this.sessions) {
+      this.opts.log(`Stopping session for chat ${chatId}`);
       killAgent(s.agentInfo.process);
     }
     this.sessions.clear();
+    await this.opts.storage.close();
   }
 
-  async enqueue(userId: string, message: PendingMessage): Promise<void> {
-    let session = this.sessions.get(userId);
+  async enqueue(chatId: string, message: PendingMessage): Promise<void> {
+    let session = this.sessions.get(chatId);
 
     if (!session) {
-      if (this.sessions.size >= this.opts.maxConcurrentUsers) this.evictOldest();
-      session = await this.createSession(userId, message);
-      this.sessions.set(userId, session);
+      if (this.sessions.size >= this.opts.maxConcurrentChats) this.evictOldest();
+      session = await this.createSession(chatId, message);
+      this.sessions.set(chatId, session);
     }
 
     session.lastActivity = Date.now();
@@ -91,7 +93,7 @@ export class SessionManager {
     if (!session.processing) {
       session.processing = true;
       this.processQueue(session).catch((err) => {
-        this.opts.log(`[${userId}] queue error: ${String(err)}`);
+        this.opts.log(`[${chatId}] queue error: ${String(err)}`);
       });
     }
   }
@@ -100,43 +102,43 @@ export class SessionManager {
     return this.sessions.size;
   }
 
-  /** Cancel the current agent prompt and clear the queue for a user. */
-  async cancelSession(userId: string): Promise<void> {
-    const session = this.sessions.get(userId);
+  async cancelSession(chatId: string): Promise<void> {
+    const session = this.sessions.get(chatId);
     if (!session) return;
 
-    this.opts.log(`[${userId}] Cancelling current task`);
+    this.opts.log(`[${chatId}] Cancelling current task`);
 
-    // Cancel any in-flight permission request first (so requestPermission returns)
     session.client.cancelPendingPermission();
 
-    // Notify the agent to cancel
     try {
       await session.agentInfo.connection.cancel({ sessionId: session.agentInfo.sessionId });
     } catch (err) {
-      this.opts.log(`[${userId}] cancel notification error: ${String(err)}`);
+      this.opts.log(`[${chatId}] cancel notification error: ${String(err)}`);
     }
 
-    // Clear remaining messages in queue
     session.queue.length = 0;
   }
 
-  /** Handle a card action event — resolve the pending permission request. */
-  handleCardAction(openId: string, requestId: string, optionId: string): boolean {
-    const session = this.sessions.get(openId);
+  handleCardAction(chatId: string, requestId: string, optionId: string): boolean {
+    const session = this.sessions.get(chatId);
     if (!session) return false;
     return session.client.handleCardAction(requestId, optionId);
   }
 
-  private async createSession(userId: string, firstMessage: PendingMessage): Promise<UserSession> {
-    this.opts.log(`Creating session for user ${userId}`);
+  private async createSession(chatId: string, firstMessage: PendingMessage): Promise<ChatSession> {
+    this.opts.log(`Creating session for chat ${chatId}`);
 
     const client = new FeishuAcpClient({
       onTyping: () => this.opts.onTyping(firstMessage.messageId).then(() => {}),
       onThought: (text) => this.opts.onReply(firstMessage.messageId, firstMessage.chatId, text),
       showThoughts: this.opts.showThoughts,
-      sendInterruptCard: this.opts.sendInterruptCard,
-      log: (msg) => this.opts.log(`[${userId}] ${msg}`),
+      sendInterruptCard: (messageId, params, requestId) =>
+        this.opts.sendInterruptCard(messageId, params, requestId, chatId),
+      sendThinkingCard: this.opts.sendThinkingCard,
+      updateThinkingCard: this.opts.updateThinkingCard,
+      sendToolCard: this.opts.sendToolCard,
+      updateToolCard: this.opts.updateToolCard,
+      log: (msg) => this.opts.log(`[${chatId}] ${msg}`),
     });
 
     const spawnOpts = {
@@ -145,42 +147,46 @@ export class SessionManager {
       cwd: this.opts.agentCwd,
       env: this.opts.agentEnv,
       client,
-      log: (msg: string) => this.opts.log(`[${userId}] ${msg}`),
+      log: (msg: string) => this.opts.log(`[${chatId}] ${msg}`),
     };
 
-    // Try to resume a previous session from the store
+    // Try to resume the latest session for this chat
     let agentInfo: AgentProcessInfo;
-    const previous = this.store.get(userId);
-    if (previous) {
-      this.opts.log(`[${userId}] Found previous session ${previous.sessionId}, attempting resume...`);
-      const result = await spawnAndResumeAgent(spawnOpts, previous.sessionId);
+    const latest = await this.opts.storage.getLatest(chatId);
+    if (latest) {
+      this.opts.log(`[${chatId}] Found previous session ${latest.sessionId}, attempting resume...`);
+      const result = await spawnAndResumeAgent(spawnOpts, latest.sessionId);
       agentInfo = result.agentInfo;
       if (result.resumed) {
-        this.opts.log(`[${userId}] Resumed previous session ${previous.sessionId}`);
+        this.opts.log(`[${chatId}] Resumed previous session ${latest.sessionId}`);
       } else {
-        this.opts.log(`[${userId}] Could not resume, started new session ${agentInfo.sessionId}`);
+        this.opts.log(`[${chatId}] Could not resume, started new session ${agentInfo.sessionId}`);
       }
     } else {
       agentInfo = await spawnAgent(spawnOpts);
     }
 
-    // Persist the session mapping
-    this.store.set(userId, {
+    // Persist to storage
+    this.opts.storage.save({
+      chatId,
       sessionId: agentInfo.sessionId,
+      agentCommand: this.opts.agentCommand,
+      agentArgs: this.opts.agentArgs,
       cwd: this.opts.agentCwd,
+      createdAt: Date.now(),
       updatedAt: Date.now(),
-    });
+    }).catch((err) => this.opts.log(`[${chatId}] storage save error: ${String(err)}`));
 
     agentInfo.process.on("exit", () => {
-      const s = this.sessions.get(userId);
+      const s = this.sessions.get(chatId);
       if (s?.agentInfo.process === agentInfo.process) {
-        this.opts.log(`Agent for ${userId} exited, cleaning up session`);
-        this.sessions.delete(userId);
+        this.opts.log(`Agent for chat ${chatId} exited, cleaning up session`);
+        this.sessions.delete(chatId);
       }
     });
 
     return {
-      userId,
+      chatId,
       client,
       agentInfo,
       queue: [],
@@ -189,31 +195,28 @@ export class SessionManager {
     };
   }
 
-  private async processQueue(session: UserSession): Promise<void> {
+  private async processQueue(session: ChatSession): Promise<void> {
     try {
       while (session.queue.length > 0 && !this.aborted) {
         const pending = session.queue.shift()!;
 
-        // Point callbacks at current message
         session.client.updateCallbacks({
           onTyping: () => this.opts.onTyping(pending.messageId).then(() => {}),
           onThought: (text) => this.opts.onReply(pending.messageId, pending.chatId, text),
         });
 
-        await session.client.flush(); // reset buffers
+        await session.client.flush();
 
-        // Set current message context for permission card routing
-        session.client.setContext(pending.messageId);
+        session.client.setContext(pending.messageId, pending.chatId);
 
         try {
           const reactionId = await this.opts.onTyping(pending.messageId).catch(() => null);
-          this.opts.log(`[${session.userId}] Sending prompt to agent`);
+          this.opts.log(`[${session.chatId}] Sending prompt to agent`);
           const result = await session.agentInfo.connection.prompt({
             sessionId: session.agentInfo.sessionId,
             prompt: pending.prompt,
           });
 
-          // Remove the thinking reaction now that we have a reply
           if (reactionId) {
             this.opts.onStopTyping(pending.messageId, reactionId).catch(() => {});
           }
@@ -222,31 +225,42 @@ export class SessionManager {
           if (result.stopReason === "cancelled") reply += "\n[cancelled]";
           else if (result.stopReason === "refusal") reply += "\n[agent refused]";
 
-          this.opts.log(`[${session.userId}] Done (${result.stopReason}), ${reply.length} chars`);
+          this.opts.log(`[${session.chatId}] Done (${result.stopReason}), reply=${reply.length} chars`);
 
           if (reply.trim()) {
+            this.opts.log(`[${session.chatId}] Sending reply to chat ${pending.chatId}`);
             await this.opts.onReply(pending.messageId, pending.chatId, reply);
           }
+
+          // Update last activity timestamp in storage
+          this.opts.storage.save({
+            chatId: session.chatId,
+            sessionId: session.agentInfo.sessionId,
+            agentCommand: this.opts.agentCommand,
+            agentArgs: this.opts.agentArgs,
+            cwd: this.opts.agentCwd,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          }).catch(() => {});
         } catch (err) {
           const errMsg = formatAgentError(err);
 
-          // Drop the session if the process died or authentication failed
           const isAuthError = isAuthenticationError(err);
           if (isAuthError || session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
             killAgent(session.agentInfo.process);
-            this.sessions.delete(session.userId);
+            this.sessions.delete(session.chatId);
 
             if (isAuthError) {
               const preset = this.opts.agentPreset ?? "";
               const hint = AUTH_HINTS[preset] ?? `Ensure the agent (${this.opts.agentCommand}) is authenticated before starting lark-acp.`;
-              this.opts.log(`[${session.userId}] Agent authentication failed. ${hint}`);
+              this.opts.log(`[${session.chatId}] Agent authentication failed. ${hint}`);
               await this.opts.onReply(
                 pending.messageId,
                 pending.chatId,
                 `⚠️ Agent authentication failed.\n${hint}`,
               ).catch(() => {});
             } else {
-              this.opts.log(`[${session.userId}] Agent crashed: ${errMsg}`);
+              this.opts.log(`[${session.chatId}] Agent crashed: ${errMsg}`);
               await this.opts.onReply(
                 pending.messageId,
                 pending.chatId,
@@ -256,7 +270,7 @@ export class SessionManager {
             return;
           }
 
-          this.opts.log(`[${session.userId}] Agent error: ${errMsg}`);
+          this.opts.log(`[${session.chatId}] Agent error: ${errMsg}`);
           await this.opts
             .onReply(pending.messageId, pending.chatId, `⚠️ Agent error: ${errMsg}`)
             .catch(() => {});
@@ -270,33 +284,32 @@ export class SessionManager {
   private cleanupIdle(): void {
     if (this.opts.idleTimeoutMs <= 0) return;
     const now = Date.now();
-    for (const [userId, s] of this.sessions) {
+    for (const [chatId, s] of this.sessions) {
       if (!s.processing && now - s.lastActivity > this.opts.idleTimeoutMs) {
         const idleMin = Math.round((now - s.lastActivity) / 60_000);
-        this.opts.log(`Session ${userId} idle ${idleMin}min, evicting`);
+        this.opts.log(`Session ${chatId} idle ${idleMin}min, evicting`);
         killAgent(s.agentInfo.process);
-        this.sessions.delete(userId);
+        this.sessions.delete(chatId);
       }
     }
   }
 
   private evictOldest(): void {
-    let oldest: { userId: string; lastActivity: number } | null = null;
-    for (const [userId, s] of this.sessions) {
+    let oldest: { chatId: string; lastActivity: number } | null = null;
+    for (const [chatId, s] of this.sessions) {
       if (!s.processing && (!oldest || s.lastActivity < oldest.lastActivity)) {
-        oldest = { userId, lastActivity: s.lastActivity };
+        oldest = { chatId, lastActivity: s.lastActivity };
       }
     }
     if (oldest) {
-      this.opts.log(`Max sessions reached, evicting ${oldest.userId}`);
-      const s = this.sessions.get(oldest.userId);
+      this.opts.log(`Max sessions reached, evicting chat ${oldest.chatId}`);
+      const s = this.sessions.get(oldest.chatId);
       if (s) killAgent(s.agentInfo.process);
-      this.sessions.delete(oldest.userId);
+      this.sessions.delete(oldest.chatId);
     }
   }
 }
 
-/** Extract a human-readable message from any thrown value. */
 function formatAgentError(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === "object") {
@@ -307,11 +320,9 @@ function formatAgentError(err: unknown): string {
   return String(err);
 }
 
-/** Returns true if the error is a JSON-RPC "Authentication required" error. */
 function isAuthenticationError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as Record<string, unknown>;
-  // ACP SDK throws RequestError (extends Error) with code -32000 for auth failures
   if (typeof e["code"] === "number" && e["code"] === -32000) return true;
   if (typeof e["message"] === "string" && /auth(entication)? required/i.test(e["message"])) return true;
   return false;

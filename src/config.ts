@@ -32,7 +32,9 @@ export interface FeishuAcpConfig {
     maxConcurrentUsers: number;
   };
   storage: {
+    backend: "file" | "postgres";
     dir: string;
+    url?: string;
   };
 }
 
@@ -87,7 +89,7 @@ export function defaultConfig(): FeishuAcpConfig {
       idleTimeoutMs: 1440 * 60_000, // 24h
       maxConcurrentUsers: 10,
     },
-    storage: { dir: defaultStorageDir() },
+    storage: { backend: "file", dir: defaultStorageDir() },
   };
 }
 

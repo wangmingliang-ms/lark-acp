@@ -6,9 +6,6 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import type * as acp from "@agentclientprotocol/sdk";
 
-/** Maximum time a permission card stays active before auto-closing. */
-const PERMISSION_TIMEOUT_SEC = 60;
-
 /** Wrap text in a Feishu interactive card with a markdown element. */
 function buildMarkdownCard(text: string): object {
   return {
@@ -19,15 +16,16 @@ function buildMarkdownCard(text: string): object {
   };
 }
 
-/** Map ACP permission option kind to button style. */
+/** Map ACP permission option kind to button style.
+ *  allow_always uses primary (blue fill) to visually distinguish from allow_once (default). */
 function buttonTypeForKind(kind: string): "primary" | "danger" | "default" {
-  if (kind === "allow_once") return "primary";
+  if (kind === "allow_always") return "primary";
   if (kind === "reject_once" || kind === "reject_always") return "danger";
   return "default";
 }
 
-/** Build a permission request interactive card with action buttons. */
-function buildPermissionCard(params: acp.RequestPermissionRequest, requestId: string): object {
+/** Build a permission request interactive card with vertically-stacked action buttons. */
+function buildPermissionCard(params: acp.RequestPermissionRequest, requestId: string, chatId: string): object {
   const toolTitle = params.toolCall?.title ?? "unknown";
   const toolKind = params.toolCall?.kind ?? "tool";
 
@@ -36,23 +34,112 @@ function buildPermissionCard(params: acp.RequestPermissionRequest, requestId: st
     template: "blue" as const,
   };
 
-  const actions: Lark.InteractiveCardActionItem[] = params.options.map((opt) => ({
-    tag: "button" as const,
-    text: { tag: "plain_text" as const, content: opt.name },
-    type: buttonTypeForKind(opt.kind),
-    value: { r: requestId, o: opt.optionId },
-  }));
+  const elements: object[] = [
+    {
+      tag: "markdown",
+      content: `**${toolKind}**: \`${toolTitle}\``,
+    },
+  ];
 
+  // One action block per button → vertical layout
+  for (const opt of params.options) {
+    elements.push({
+      tag: "action",
+      layout: "flow",
+      actions: [
+        {
+          tag: "button",
+          text: { tag: "plain_text", content: opt.name },
+          type: buttonTypeForKind(opt.kind),
+          value: { r: requestId, o: opt.optionId, n: opt.name, k: toolKind, t: toolTitle, c: chatId },
+        },
+      ],
+    });
+  }
+
+  return { config: { wide_screen_mode: true }, header, elements };
+}
+
+/** Build a resolved permission card confirming the user's selection. */
+function buildResolvedCard(toolKind: string, toolTitle: string, selectedName: string): object {
   return {
     config: { wide_screen_mode: true },
-    header,
+    header: {
+      title: { tag: "plain_text" as const, content: "已确认" },
+      template: "green" as const,
+    },
     elements: [
       {
         tag: "markdown",
-        content: `**${toolKind}**: ${toolTitle}\n\n${params.options.length} 个选项，请在 ${PERMISSION_TIMEOUT_SEC}s 内选择`,
+        content: `**${toolKind}**: \`${toolTitle}\`\n\n已选择: **${selectedName}**`,
       },
-      { tag: "action" as const, actions },
     ],
+  };
+}
+
+/** Build a "thinking" card. Uses compact note element for thought content. */
+function buildThinkingCard(text?: string, isDone?: boolean): object {
+  const header = {
+    title: { tag: "plain_text" as const, content: isDone ? "💭 思考完成" : "💭 思考中..." },
+    template: (isDone ? "purple" : "wathet") as string,
+  };
+  if (!text) {
+    return {
+      config: { wide_screen_mode: true },
+      header,
+      elements: [{ tag: "markdown", content: "正在分析..." }],
+    };
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header,
+    elements: [{ tag: "note" as const, elements: [{ tag: "plain_text" as const, content: text }] }],
+  };
+}
+
+/** Build a "tool running" card. */
+function buildToolCard(title: string, kind: string): object {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text" as const, content: "🔧 运行工具" },
+      template: "blue" as const,
+    },
+    elements: [
+      { tag: "markdown", content: `**${kind}**: \`${title}\`\n\n⏳ 执行中...` },
+    ],
+  };
+}
+
+/** Build a "tool done" card, optionally with diff output. */
+function buildToolDoneCard(title: string, kind: string, diffText?: string): object {
+  let content = `**${kind}**: \`${title}\``;
+  if (diffText) {
+    content += `\n\n\`\`\`diff\n${diffText}\n\`\`\``;
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text" as const, content: "✅ 工具完成" },
+      template: "green" as const,
+    },
+    elements: [{ tag: "markdown", content }],
+  };
+}
+
+/** Build a "tool failed" card, optionally with diff output. */
+function buildToolFailedCard(title: string, kind: string, diffText?: string): object {
+  let content = `**${kind}**: \`${title}\``;
+  if (diffText) {
+    content += `\n\n\`\`\`diff\n${diffText}\n\`\`\``;
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text" as const, content: "❌ 工具失败" },
+      template: "red" as const,
+    },
+    elements: [{ tag: "markdown", content }],
   };
 }
 
@@ -63,6 +150,8 @@ export interface FeishuClientOpts {
 
 export class FeishuClient {
   private client: Lark.Client;
+  private userNameCache = new Map<string, string>();
+  private chatNameCache = new Map<string, string>();
 
   constructor(opts: FeishuClientOpts) {
     this.client = new Lark.Client({
@@ -72,6 +161,47 @@ export class FeishuClient {
       // Suppress internal SDK logs
       loggerLevel: Lark.LoggerLevel.error,
     });
+  }
+
+  /** Fetch and cache user display name by open_id. */
+  async getUserName(openId: string): Promise<string> {
+    const cached = this.userNameCache.get(openId);
+    if (cached) return cached;
+
+    try {
+      const res = await (this.client as any).request({
+        method: "GET",
+        url: `/open-apis/contact/v3/users/${openId}`,
+        params: { user_id_type: "open_id" },
+      });
+      const name: string = res?.data?.user?.name ?? openId;
+      this.userNameCache.set(openId, name);
+      return name;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[lark-acp] getUserName failed for ${openId}: ${msg}`);
+      this.userNameCache.set(openId, openId);
+      return openId;
+    }
+  }
+
+  /** Fetch and cache chat name by chat_id. Returns empty string for P2P chats. */
+  async getChatName(chatId: string): Promise<string> {
+    const cached = this.chatNameCache.get(chatId);
+    if (cached !== undefined) return cached;
+
+    try {
+      const res = await (this.client as any).request({
+        method: "GET",
+        url: `/open-apis/im/v1/chats/${chatId}`,
+      });
+      const name: string = res?.data?.name ?? "";
+      this.chatNameCache.set(chatId, name);
+      return name;
+    } catch {
+      this.chatNameCache.set(chatId, "");
+      return "";
+    }
   }
 
   /** Reply to a specific message using a markdown card (renders bold, code, etc). */
@@ -144,8 +274,9 @@ export class FeishuClient {
     messageId: string,
     params: acp.RequestPermissionRequest,
     requestId: string,
+    chatId: string,
   ): Promise<void> {
-    const card = buildPermissionCard(params, requestId);
+    const card = buildPermissionCard(params, requestId, chatId);
     await this.client.im.message.reply({
       path: { message_id: messageId },
       data: {
@@ -154,5 +285,83 @@ export class FeishuClient {
         reply_in_thread: false,
       },
     });
+  }
+
+  /** Replace the permission card with a confirmation card showing the user's selection. */
+  async updatePermissionCard(
+    messageId: string,
+    toolKind: string,
+    toolTitle: string,
+    selectedName: string,
+  ): Promise<void> {
+    const card = buildResolvedCard(toolKind, toolTitle, selectedName);
+    await (this.client as any).request({
+      method: "PATCH",
+      url: `/open-apis/im/v1/messages/${messageId}`,
+      data: {
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+      },
+    });
+  }
+
+  /** Create a "thinking" card as a reply. Returns the card's message_id. */
+  async sendThinkingCard(replyToMessageId: string): Promise<string | null> {
+    try {
+      const res = await this.client.im.message.reply({
+        path: { message_id: replyToMessageId },
+        data: {
+          content: JSON.stringify(buildThinkingCard()),
+          msg_type: "interactive",
+          reply_in_thread: false,
+        },
+      });
+      return (res as any)?.data?.message_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Update a thinking card with content and optional done status. */
+  async updateThinkingCard(cardMessageId: string, thoughtText: string, isDone: boolean): Promise<void> {
+    const card = buildThinkingCard(thoughtText, isDone);
+    await (this.client as any).request({
+      method: "PATCH",
+      url: `/open-apis/im/v1/messages/${cardMessageId}`,
+      data: {
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+      },
+    }).catch(() => {});
+  }
+
+  /** Create a "tool running" card as a reply. Returns the card's message_id. */
+  async sendToolCard(replyToMessageId: string, title: string, kind: string): Promise<string | null> {
+    try {
+      const res = await this.client.im.message.reply({
+        path: { message_id: replyToMessageId },
+        data: {
+          content: JSON.stringify(buildToolCard(title, kind)),
+          msg_type: "interactive",
+          reply_in_thread: false,
+        },
+      });
+      return (res as any)?.data?.message_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Update a tool card with completion/failure status and optional diff output. */
+  async updateToolCard(cardMessageId: string, title: string, kind: string, diffText?: string, isFailed?: boolean): Promise<void> {
+    const card = isFailed ? buildToolFailedCard(title, kind, diffText) : buildToolDoneCard(title, kind, diffText);
+    await (this.client as any).request({
+      method: "PATCH",
+      url: `/open-apis/im/v1/messages/${cardMessageId}`,
+      data: {
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+      },
+    }).catch(() => {});
   }
 }
