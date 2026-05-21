@@ -95,7 +95,10 @@ function buildActivityCard(items: ToolItem[]): object {
   const lines: string[] = [];
   for (const item of items) {
     const mark = STATUS_MARKS[item.status] ?? STATUS_MARKS["pending"];
-    lines.push(`- ${mark} \`${item.title}\` (${item.kind})`);
+    const line = item.detail
+      ? `- ${mark} \`${item.title}\` (${item.kind}): ${item.detail}`
+      : `- ${mark} \`${item.title}\` (${item.kind})`;
+    lines.push(line);
   }
   return {
     config: { wide_screen_mode: true },
@@ -123,6 +126,7 @@ export interface ToolItem {
   title: string;
   kind: string;
   status: "pending" | "in_progress" | "completed" | "failed";
+  detail?: string;
 }
 
 export class FeishuClient {
@@ -318,14 +322,20 @@ export class FeishuClient {
   /** Update a thinking card with content and optional done status. */
   async updateThinkingCard(cardMessageId: string, thoughtText: string, isDone: boolean): Promise<void> {
     const card = buildThinkingCard(thoughtText, isDone);
-    await (this.client as any).request({
-      method: "PATCH",
-      url: `/open-apis/im/v1/messages/${cardMessageId}`,
-      data: {
-        content: JSON.stringify(card),
-        msg_type: "interactive",
-      },
-    }).catch(() => {});
+    try {
+      const res = await (this.client as any).request({
+        method: "PATCH",
+        url: `/open-apis/im/v1/messages/${cardMessageId}`,
+        data: {
+          content: JSON.stringify(card),
+          msg_type: "interactive",
+        },
+      });
+      console.error(`[lark-acp] think-card update response: ${JSON.stringify(res?.data ?? res)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[lark-acp] think-card update failed for ${cardMessageId}: ${msg}`);
+    }
   }
 
   /** Create the unified activity card. Returns the card's message_id. */

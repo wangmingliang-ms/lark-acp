@@ -137,9 +137,11 @@ export class FeishuAcpClient implements acp.Client {
         const title = u.title ?? "unknown";
         const kind = u.kind ?? "tool";
         const toolCallId = (u as Record<string, unknown>).toolCallId as string | undefined;
+        const rawInput = (u as Record<string, unknown>).rawInput;
+        const detail = typeof rawInput === "string" ? rawInput : undefined;
         const status = (u.status ?? "in_progress") as ToolItem["status"];
-        this.opts.log(`[event] tool_call id=${toolCallId ?? "?"} title="${title}" kind=${kind} status=${status}`);
-        this.upsertToolItem(toolCallId, title, kind, status);
+        this.opts.log(`[event] tool_call id=${toolCallId ?? "?"} title="${title}" kind=${kind} status=${status} detail=${detail ?? "-"}`);
+        this.upsertToolItem(toolCallId, title, kind, status, detail);
         this.refreshActivityCard();
         await this.maybeSendTyping();
         break;
@@ -241,15 +243,16 @@ export class FeishuAcpClient implements acp.Client {
     title: string,
     kind: string,
     status: ToolItem["status"],
+    detail?: string,
   ): void {
     const id = toolCallId ?? `${kind}:${title}:${this.toolItems.size}`;
     const existing = this.toolItems.get(id);
     if (existing) {
-      // Update status; preserve original title/kind (updates may omit them)
       if (title !== "unknown") existing.title = title;
+      if (detail) existing.detail = detail;
       existing.status = status;
     } else {
-      this.toolItems.set(id, { title, kind, status });
+      this.toolItems.set(id, { title, kind, status, detail });
     }
   }
 
