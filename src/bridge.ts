@@ -23,8 +23,6 @@ export class FeishuAcpBridge {
   private feishuClient: FeishuClient;
   private sessionManager: SessionManager | null = null;
   private log: (msg: string) => void;
-  /** Tracks the latest chat_id for each user (for bot menu event routing). */
-  private userChatMap = new Map<string, string>();
 
   constructor(config: FeishuAcpConfig, storage: StorageBackend, log?: (msg: string) => void) {
     this.config = config;
@@ -68,7 +66,6 @@ export class FeishuAcpBridge {
       appSecret: this.config.feishu.appSecret,
       onMessage: (event) => this.handleMessage(event),
       onCardAction: (event) => this.handleCardAction(event),
-      onBotMenu: (data) => this.handleBotMenu(data),
       log: this.log,
     });
     ws.start();
@@ -92,9 +89,6 @@ export class FeishuAcpBridge {
     if (!userId || !messageId || !chatId) return;
 
     this.log(`Message from ${userId} in chat ${chatId}: [${message.message_type}]`);
-
-    // Track which chat this user is in (for bot menu event routing)
-    this.userChatMap.set(userId, chatId);
 
     // Check and enqueue asynchronously (needs bot openId for @mention filter)
     this.checkAndEnqueue(event, chatId, userId, messageId).catch((err) => {
@@ -187,28 +181,6 @@ export class FeishuAcpBridge {
       }
     } else {
       this.log(`Card action ignored: chat=${value.c}, no matching pending permission`);
-    }
-  }
-
-  private handleBotMenu(data: { eventKey: string; openId: string }): void {
-    const chatId = this.userChatMap.get(data.openId);
-    if (!chatId) {
-      this.log(`Bot menu ignored: no recent chat for user ${data.openId}`);
-      return;
-    }
-
-    this.log(`Bot menu: eventKey="${data.eventKey}" user=${data.openId} chat=${chatId}`);
-
-    switch (data.eventKey) {
-      case "cancel":
-        this.sessionManager?.cancelSession(chatId)
-          .catch((err) => this.log(`Cancel via menu error: ${String(err)}`));
-        break;
-      case "new_session":
-        this.sessionManager?.restartSession(chatId);
-        break;
-      default:
-        this.log(`Bot menu: unknown eventKey "${data.eventKey}"`);
     }
   }
 
