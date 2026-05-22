@@ -14,6 +14,21 @@ const DEV_TRANSPORT = {
 };
 
 /**
+ * Variadic logger surface used by `@larksuiteoapi/node-sdk`. The SDK's
+ * default implementation just calls `console.log("[info]:", ...msg)`, which
+ * collides with our structured pino output. We adapt it onto a
+ * {@link LarkLogger} so SDK-internal messages flow through the same
+ * formatter as everything else.
+ */
+export interface LarkSdkLogger {
+  error(...msg: unknown[]): void;
+  warn(...msg: unknown[]): void;
+  info(...msg: unknown[]): void;
+  debug(...msg: unknown[]): void;
+  trace(...msg: unknown[]): void;
+}
+
+/**
  * Minimal structured logger interface used throughout `lark-acp`.
  *
  * Compatible with pino but intentionally narrower so callers can plug in
@@ -65,6 +80,30 @@ function buildOptions(level?: string): LoggerOptions {
  */
 export function createPinoLogger(level?: string): LarkLogger {
   return pino(buildOptions(level)) as unknown as LarkLogger;
+}
+
+/**
+ * Adapt a {@link LarkLogger} to the variadic surface expected by
+ * `@larksuiteoapi/node-sdk`. The SDK's internal `LoggerProxy` always invokes
+ * the underlying logger with a single array argument carrying the original
+ * variadic parts (see `node-sdk`'s `LoggerProxy`). We unwrap that one level
+ * and stringify into a single `msg` so pino formats SDK chatter the same way
+ * as our own logs (`name=lark-sdk` is kept as a child binding).
+ */
+export function adaptToSdkLogger(logger: LarkLogger): LarkSdkLogger {
+  const flatten = (msg: readonly unknown[]): unknown[] =>
+    msg.length === 1 && Array.isArray(msg[0]) ? msg[0] : [...msg];
+  const join = (msg: readonly unknown[]): string =>
+    flatten(msg)
+      .map((part) => (typeof part === "string" ? part : JSON.stringify(part)))
+      .join(" ");
+  return {
+    error: (...msg) => logger.error(join(msg)),
+    warn: (...msg) => logger.warn(join(msg)),
+    info: (...msg) => logger.info(join(msg)),
+    debug: (...msg) => logger.debug(join(msg)),
+    trace: (...msg) => logger.debug(join(msg)),
+  };
 }
 
 export type { PinoLogger };

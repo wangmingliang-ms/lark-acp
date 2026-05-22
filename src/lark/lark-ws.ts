@@ -1,9 +1,11 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
-import type { LarkLogger } from "../logger/logger.js";
+import { adaptToSdkLogger, type LarkLogger } from "../logger/logger.js";
 
-const LARK_LOGGER_LEVEL = Lark.LoggerLevel.error;
+const LARK_LOGGER_LEVEL = Lark.LoggerLevel.info;
 
-const CARD_ACTION_TOAST_OK = { toast: { type: "success" as const, content: "已确认" } };
+const CARD_ACTION_TOAST_OK = {
+  toast: { type: "success" as const, content: "已确认" },
+};
 
 export interface LarkWsOptions {
   appId: string;
@@ -28,15 +30,21 @@ export class LarkWsConnection {
     this.logger = opts.logger.child({ name: "lark-ws" });
     this.onMessage = opts.onMessage;
     this.onCardAction = opts.onCardAction;
+    const sdkLogger = adaptToSdkLogger(opts.logger.child({ name: "lark-sdk" }));
     this.wsClient = new Lark.WSClient({
       appId: opts.appId,
       appSecret: opts.appSecret,
       loggerLevel: LARK_LOGGER_LEVEL,
+      logger: sdkLogger,
     });
   }
 
   start(): void {
-    const dispatcher = new Lark.EventDispatcher({}).register({
+    const sdkLogger = adaptToSdkLogger(this.logger.child({ name: "lark-sdk" }));
+    const dispatcher = new Lark.EventDispatcher({
+      logger: sdkLogger,
+      loggerLevel: LARK_LOGGER_LEVEL,
+    }).register({
       "im.message.receive_v1": async (data) => {
         try {
           this.onMessage(data as Lark.RawMessageEvent);
@@ -48,7 +56,10 @@ export class LarkWsConnection {
         // suppress SDK warning noise
       },
       "im.message.reaction.created_v1": async () => {
-        // suppress SDK warning noise
+        this.logger.debug("reaction created");
+      },
+      "im.message.reaction.deleted_v1": async () => {
+        this.logger.debug("reaction deleted");
       },
       "card.action.trigger": async (data: Lark.RawCardActionEvent) => {
         try {

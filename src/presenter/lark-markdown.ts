@@ -21,9 +21,26 @@ const MAX_MARKDOWN_CHUNK = 4000;
 /** Lark code-block languages (case-insensitive on the wire, but the docs
  *  list them in upper case). Anything else is dropped. */
 const LARK_CODE_LANGS = new Set([
-  "PYTHON", "C", "CPP", "GO", "JAVA", "KOTLIN", "SWIFT", "PHP", "RUBY", "RUST",
-  "JAVASCRIPT", "TYPESCRIPT", "BASH", "SHELL", "SQL", "JSON", "XML", "YAML",
-  "HTML", "THRIFT",
+  "PYTHON",
+  "C",
+  "CPP",
+  "GO",
+  "JAVA",
+  "KOTLIN",
+  "SWIFT",
+  "PHP",
+  "RUBY",
+  "RUST",
+  "JAVASCRIPT",
+  "TYPESCRIPT",
+  "BASH",
+  "SHELL",
+  "SQL",
+  "JSON",
+  "XML",
+  "YAML",
+  "HTML",
+  "THRIFT",
 ]);
 
 const LANG_ALIASES: Record<string, string> = {
@@ -130,9 +147,10 @@ function walkBlock(token: Token, out: PostParagraph[]): void {
     case "code": {
       const code = token as Tokens.Code;
       const lang = normalizeLang(code.lang);
-      const block: PostElCodeBlock = lang === undefined
-        ? { tag: "code_block", text: code.text }
-        : { tag: "code_block", language: lang, text: code.text };
+      const block: PostElCodeBlock =
+        lang === undefined
+          ? { tag: "code_block", text: code.text }
+          : { tag: "code_block", language: lang, text: code.text };
       out.push([block]);
       return;
     }
@@ -253,10 +271,7 @@ function addStyle(el: PostElement, style: TextStyle): PostElement {
 }
 
 function tableToText(table: Tokens.Table): string {
-  const rows = [
-    table.header.map((c) => c.text),
-    ...table.rows.map((r) => r.map((c) => c.text)),
-  ];
+  const rows = [table.header.map((c) => c.text), ...table.rows.map((r) => r.map((c) => c.text))];
   const colCount = table.header.length;
   const colWidths = new Array<number>(colCount).fill(0);
   for (const row of rows) {

@@ -168,9 +168,7 @@ export class LarkAcpClient implements acp.Client {
     if (cardId) {
       this.presenter
         .expirePermissionCard(cardId, reason)
-        .catch((err) =>
-          this.logger.debug({ err, cardId }, "expirePermissionCard rejected"),
-        );
+        .catch((err) => this.logger.debug({ err, cardId }, "expirePermissionCard rejected"));
     }
   }
 
@@ -239,12 +237,7 @@ export class LarkAcpClient implements acp.Client {
             this.appendText("text", "\n```diff\n" + lines.join("\n") + "\n```\n");
           }
         }
-        this.upsertTool(
-          toolCallId,
-          u.title ?? "unknown",
-          u.kind ?? "tool",
-          u.status as ToolStatus,
-        );
+        this.upsertTool(toolCallId, u.title ?? "unknown", u.kind ?? "tool", u.status as ToolStatus);
         this.scheduleFlush();
         return;
       }
@@ -369,8 +362,6 @@ export class LarkAcpClient implements acp.Client {
     const now = Date.now();
     if (now - this.lastTypingAt < TYPING_INTERVAL_MS) return;
     this.lastTypingAt = now;
-    await this.callbacks.onTyping().catch((err) =>
-      this.logger.debug({ err }, "onTyping rejected"),
-    );
+    await this.callbacks.onTyping().catch((err) => this.logger.debug({ err }, "onTyping rejected"));
   }
 }

@@ -18,32 +18,38 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   copilot: {
     label: "GitHub Copilot",
     command: "npx",
-    args: ["@github/copilot", "--acp", "--yolo"],
-    description: "GitHub Copilot CLI",
+    args: ["-y", "@github/copilot", "--acp"],
+    description: "GitHub Copilot CLI (native --acp)",
   },
   claude: {
     label: "Claude Code",
     command: "npx",
-    args: ["@agentclientprotocol/claude-agent-acp"],
-    description: "Claude Code ACP adapter",
+    args: ["-y", "@zed-industries/claude-code-acp"],
+    description: "Claude Code via Zed's ACP adapter (uses local `claude` CLI auth)",
+  },
+  "claude-agent": {
+    label: "Claude Agent SDK",
+    command: "npx",
+    args: ["-y", "@agentclientprotocol/claude-agent-acp"],
+    description: "Direct Anthropic API via the Claude Agent SDK (needs ANTHROPIC_API_KEY)",
   },
   codex: {
     label: "Codex CLI",
     command: "npx",
-    args: ["@zed-industries/codex-acp"],
-    description: "OpenAI Codex ACP adapter",
+    args: ["-y", "@zed-industries/codex-acp"],
+    description: "OpenAI Codex via Zed's ACP adapter",
   },
   gemini: {
     label: "Gemini CLI",
     command: "npx",
-    args: ["@google/gemini-cli", "--experimental-acp"],
-    description: "Google Gemini CLI",
+    args: ["-y", "@google/gemini-cli", "--experimental-acp"],
+    description: "Google Gemini CLI (experimental --acp)",
   },
   opencode: {
     label: "OpenCode",
     command: "opencode",
     args: ["acp"],
-    description: "OpenCode",
+    description: "OpenCode (assumes `opencode` is on $PATH)",
   },
 };
 

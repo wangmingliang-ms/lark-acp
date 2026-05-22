@@ -8,27 +8,8 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import type { LarkLogger } from "../logger/logger.js";
 
 type LarkRawMention = NonNullable<Lark.RawMessageEvent["message"]["mentions"]>[number];
-
-/**
- * Downloads a user-uploaded image referenced by `image_key` from a given
- * message. Implemented by {@link LarkHttpClient.downloadMessageImage} —
- * we accept just this minimal interface so the interpreter stays
- * decoupled from the HTTP client.
- */
-export interface ImageDownloader {
-  downloadMessageImage(
-    messageId: string,
-    imageKey: string,
-  ): Promise<{ bytes: Buffer; mimeType: string }>;
-}
-
-export interface LarkInterpreterOptions {
-  downloader: ImageDownloader;
-  logger: LarkLogger;
-}
 
 // ---- Post message element types (matched to Lark docs) ----
 
@@ -145,25 +126,21 @@ interface LocationPayload {
  * Translate a Lark inbound message event into the ACP `ContentBlock[]`
  * an agent expects as its prompt.
  *
- * Image messages and inline `<img>` tags inside `post` rich-text are
- * downloaded via {@link ImageDownloader} and embedded as base64
- * `ImageContent`. Other media types (file / audio / video / sticker) are
- * rendered as descriptive text — the agent learns about the attachment
- * but doesn't get the bytes.
+ * No binary attachments are downloaded — images, files, audio, video and
+ * stickers are all rendered as descriptive text placeholders carrying
+ * `message_id` / `image_key` / `file_key` so the agent can fetch them
+ * out-of-band (e.g. through a future Lark MCP tool) if it needs to.
  */
-export async function larkMessageToPrompt(
-  event: Lark.RawMessageEvent,
-  opts: LarkInterpreterOptions,
-): Promise<acp.ContentBlock[]> {
+export function larkMessageToPrompt(event: Lark.RawMessageEvent): acp.ContentBlock[] {
   const { message } = event;
 
   switch (message.message_type) {
     case "text":
       return parseText(message.content, message.mentions);
     case "post":
-      return parsePost(message.content, message.message_id, opts);
+      return parsePost(message.content, message.message_id);
     case "image":
-      return parseImage(message.content, message.message_id, opts);
+      return parseImage(message.content, message.message_id);
     case "file":
       return parseFile(message.content);
     case "audio":
@@ -195,10 +172,7 @@ function parseText(raw: string, mentions?: LarkRawMention[]): acp.ContentBlock[]
     for (const m of mentions) {
       const key = m.key ?? "@_user_";
       const name = m.name ?? m.id?.open_id ?? key;
-      text = text.replace(
-        new RegExp(escapeRegExp(key), "g"),
-        `@{${name}}`,
-      );
+      text = text.replace(new RegExp(escapeRegExp(key), "g"), `@{${name}}`);
     }
   }
   text = text.trim();
@@ -206,23 +180,11 @@ function parseText(raw: string, mentions?: LarkRawMention[]): acp.ContentBlock[]
   return [{ type: "text", text }];
 }
 
-async function parsePost(
-  raw: string,
-  messageId: string,
-  opts: LarkInterpreterOptions,
-): Promise<acp.ContentBlock[]> {
+function parsePost(raw: string, messageId: string): acp.ContentBlock[] {
   const payload = safeParse<PostPayload>(raw);
   if (!payload) return [{ type: "text", text: "[富文本消息解析失败]" }];
 
-  const blocks: acp.ContentBlock[] = [];
   const lineBuffer: string[] = [];
-
-  const flushLines = (): void => {
-    if (!lineBuffer.length) return;
-    const text = lineBuffer.join("\n").trim();
-    lineBuffer.length = 0;
-    if (text) blocks.push({ type: "text", text });
-  };
 
   if (payload.title) {
     lineBuffer.push(`**${payload.title}**`, "");
@@ -230,8 +192,8 @@ async function parsePost(
 
   const paragraphs = payload.content;
   if (!paragraphs?.length) {
-    flushLines();
-    return blocks;
+    const text = lineBuffer.join("\n").trim();
+    return text ? [{ type: "text", text }] : [];
   }
 
   for (const para of paragraphs) {
@@ -254,15 +216,7 @@ async function parsePost(
     const lineParts: string[] = [];
     for (const el of para) {
       if (el.tag === "img") {
-        // Cut the current text run, emit the image as its own block, then
-        // continue accumulating text after the image.
-        if (lineParts.length) {
-          lineBuffer.push(lineParts.join(""));
-          lineParts.length = 0;
-        }
-        flushLines();
-        const imageBlock = await tryDownloadImage(messageId, el.image_key, opts);
-        blocks.push(imageBlock);
+        lineParts.push(imagePlaceholder(messageId, el.image_key));
         continue;
       }
       const rendered = elementToText(el);
@@ -271,19 +225,19 @@ async function parsePost(
     if (lineParts.length) lineBuffer.push(lineParts.join(""));
   }
 
-  flushLines();
-  return blocks;
+  const text = lineBuffer.join("\n").trim();
+  return text ? [{ type: "text", text }] : [];
 }
 
-async function parseImage(
-  raw: string,
-  messageId: string,
-  opts: LarkInterpreterOptions,
-): Promise<acp.ContentBlock[]> {
+function parseImage(raw: string, messageId: string): acp.ContentBlock[] {
   const payload = safeParse<ImagePayload>(raw);
   const key = payload?.image_key;
   if (!key) return [{ type: "text", text: "[图片消息缺少 image_key]" }];
-  return [await tryDownloadImage(messageId, key, opts)];
+  return [{ type: "text", text: imagePlaceholder(messageId, key) }];
+}
+
+function imagePlaceholder(messageId: string, imageKey: string): string {
+  return `[图片 (message_id=${messageId}, image_key=${imageKey})]`;
 }
 
 function parseFile(raw: string): acp.ContentBlock[] {
@@ -343,10 +297,18 @@ function elementToText(el: PostElement): string {
       if (el.style?.length) {
         for (const st of el.style) {
           switch (st) {
-            case "bold": t = `**${t}**`; break;
-            case "italic": t = `*${t}*`; break;
-            case "underline": t = `<u>${t}</u>`; break;
-            case "lineThrough": t = `~~${t}~~`; break;
+            case "bold":
+              t = `**${t}**`;
+              break;
+            case "italic":
+              t = `*${t}*`;
+              break;
+            case "underline":
+              t = `<u>${t}</u>`;
+              break;
+            case "lineThrough":
+              t = `~~${t}~~`;
+              break;
           }
         }
       }
@@ -370,27 +332,6 @@ function elementToText(el: PostElement): string {
 }
 
 // ---- Helpers ----
-
-async function tryDownloadImage(
-  messageId: string,
-  imageKey: string,
-  opts: LarkInterpreterOptions,
-): Promise<acp.ContentBlock> {
-  try {
-    const { bytes, mimeType } = await opts.downloader.downloadMessageImage(messageId, imageKey);
-    return {
-      type: "image",
-      data: bytes.toString("base64"),
-      mimeType,
-    };
-  } catch (err) {
-    opts.logger.warn(
-      { err, messageId, imageKey },
-      "downloadMessageImage failed — falling back to text placeholder",
-    );
-    return { type: "text", text: `[图片下载失败: ${imageKey}]` };
-  }
-}
 
 function safeParse<T>(raw: string): T | null {
   try {

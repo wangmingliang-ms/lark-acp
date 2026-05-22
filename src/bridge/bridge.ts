@@ -155,8 +155,7 @@ export class LarkBridge {
     };
 
     this.idleTimeoutMs = opts.session?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-    this.maxConcurrentChats =
-      opts.session?.maxConcurrentChats ?? DEFAULT_MAX_CONCURRENT_CHATS;
+    this.maxConcurrentChats = opts.session?.maxConcurrentChats ?? DEFAULT_MAX_CONCURRENT_CHATS;
   }
 
   /**
@@ -210,10 +209,7 @@ export class LarkBridge {
     const chatId = message.chat_id;
     if (!userId || !messageId || !chatId) return;
 
-    this.logger.info(
-      { userId, chatId, messageType: message.message_type },
-      "message received",
-    );
+    this.logger.info({ userId, chatId, messageType: message.message_type }, "message received");
 
     this.routeMessage(event, userId, messageId, chatId).catch((err) =>
       this.logger.error({ err, chatId }, "routeMessage failed"),
@@ -246,10 +242,7 @@ export class LarkBridge {
       }
     }
 
-    const prompt = await larkMessageToPrompt(event, {
-      downloader: this.http,
-      logger: this.logger,
-    });
+    const prompt = larkMessageToPrompt(event);
     if (!prompt.length) return;
 
     if (await this.maybeHandleCommand(prompt, chatId, messageId)) return;

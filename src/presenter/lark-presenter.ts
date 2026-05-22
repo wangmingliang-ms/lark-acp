@@ -22,12 +22,12 @@ const HEADER_TEMPLATE_RESOLVED = "green";
 const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
-  thinking:     { content: "💭 思考中...",  template: "wathet" },
+  thinking: { content: "💭 思考中...", template: "wathet" },
   calling_tool: { content: "🛠 调用工具...", template: "blue" },
-  responding:   { content: "✍️ 回复中...",   template: "blue" },
-  complete:     { content: "✅ 已完成",     template: "green" },
-  cancelled:    { content: "⛔ 已取消",     template: "grey" },
-  failed:       { content: "⚠️ 出错",       template: "red" },
+  responding: { content: "✍️ 回复中...", template: "blue" },
+  complete: { content: "✅ 已完成", template: "green" },
+  cancelled: { content: "⛔ 已取消", template: "grey" },
+  failed: { content: "⚠️ 出错", template: "red" },
 };
 
 const CANCEL_BUTTON_TEXT = "中断当前任务";
@@ -46,9 +46,7 @@ function buildPermissionCard(
   const toolTitle = params.toolCall?.title ?? "unknown";
   const toolKind = params.toolCall?.kind ?? "tool";
 
-  const elements: object[] = [
-    { tag: "markdown", content: `**${toolKind}**: \`${toolTitle}\`` },
-  ];
+  const elements: object[] = [{ tag: "markdown", content: `**${toolKind}**: ${toolTitle}` }];
 
   for (const opt of params.options) {
     elements.push({
@@ -59,7 +57,14 @@ function buildPermissionCard(
           tag: "button",
           text: { tag: "plain_text", content: opt.name },
           type: buttonTypeForKind(opt.kind),
-          value: { r: requestId, o: opt.optionId, n: opt.name, k: toolKind, t: toolTitle, c: chatId },
+          value: {
+            r: requestId,
+            o: opt.optionId,
+            n: opt.name,
+            k: toolKind,
+            t: toolTitle,
+            c: chatId,
+          },
         },
       ],
     });
@@ -85,7 +90,7 @@ function buildResolvedCard(toolKind: string, toolTitle: string, selectedName: st
     elements: [
       {
         tag: "markdown",
-        content: `**${toolKind}**: \`${toolTitle}\`\n\n已选择: **${selectedName}**`,
+        content: `**${toolKind}**: ${toolTitle}\n\n已选择: **${selectedName}**`,
       },
     ],
   };
@@ -116,7 +121,7 @@ function entryToMarkdown(entry: TimelineEntry): string {
         .join("\n");
     case "tool": {
       const mark = STATUS_MARKS[entry.status];
-      const head = `${mark} **${entry.toolKind}**: \`${entry.title}\``;
+      const head = `${mark} **${entry.toolKind}**: ${entry.title}`;
       return entry.detail ? `${head}\n\n${entry.detail}` : head;
     }
   }

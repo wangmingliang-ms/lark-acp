@@ -2,9 +2,9 @@
  * Persistent mapping from `chatId` → ACP session(s), used so the bridge can
  * resume the agent's conversation across process restarts.
  *
- * The library does **not** ship a default — callers must construct one of
- * {@link FileSessionStore}, {@link PostgresSessionStore}, or their own
- * implementation, and pass it to `LarkBridge`.
+ * The library does **not** ship a default — callers must construct a
+ * {@link FileSessionStore} or their own implementation, and pass it to
+ * `LarkBridge`.
  */
 
 export interface SessionRecord {

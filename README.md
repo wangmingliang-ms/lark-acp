@@ -1,6 +1,6 @@
 # lark-acp
 
-> ⚠️ **WIP**：API 与模块结构仍在迭代中，CLI 入口（`bin/lark-acp.ts`）尚未跟随重构后的库代码同步，目前只能作为一个库 (`src/`) 被嵌入使用。
+> ⚠️ **WIP**：API 与模块结构仍在迭代中。库（`src/`）和 CLI（`bin/lark-acp.ts`）均可使用，但接口可能在 1.0 之前继续调整。
 
 把 [飞书/Lark](https://open.larksuite.com/) 机器人桥接到任何符合 [ACP（Agent Client Protocol）](https://agentcommunicationprotocol.dev/) 的 AI Agent 子进程上。
 
@@ -12,310 +12,293 @@
 - 处理工具调用授权请求 → 飞书卡片按钮 → ACP 回调的整条链路；
 - 持久化 chat → sessionId 映射，支持跨进程恢复会话。
 
----
-
-## 模块结构
-
-```
-src/
-  bridge/         顶层编排：LarkBridge / ChatRuntime
-  acp/            ACP 客户端实现：spawn agent、LarkAcpClient (acp.Client)
-  interpreter/    入站方向：飞书消息 → ACP ContentBlock[]
-  presenter/      出站方向：ACP 状态 → 飞书互动卡片 / post 富文本
-  lark/           飞书 SDK 薄封装：HTTP（lark-http）+ WebSocket（lark-ws）
-  session-store/  chat → sessionId 持久化（文件 / Postgres）
-  logger/         pino 封装
-```
-
-每个子目录的 `index.ts` 仅 re-export 公开 API；子模块内部直接互相引用具体文件，避免 barrel 链。
-
-### 命名约定
-
-- **interpreter** —— 把外部世界（飞书）"翻译"给 Agent 看；
-- **presenter** —— 把 Agent 的内部状态"呈现"给外部世界（飞书）；
-
-两者在 `LarkBridge` 内部对称地承担入站/出站职责。
+内部架构、unified card / 取消链路 / 授权流程的细节、以及未来要做的飞书工具注入计划，都放在 [`PLAN.md`](./PLAN.md) 里。
 
 ---
 
-## 数据流
+## CLI: `lark-acp`
+
+`bin/lark-acp.ts` 是一层薄薄的命令行入口，负责加载凭据、解析运行时参数，再用 `LarkBridge` 把指定的 ACP agent 子进程接到飞书上。
+
+### 安装与运行
+
+```bash
+# 在仓库内开发：
+bun install
+bun run build
+node dist/bin/lark-acp.js --help
+
+# 或者通过 npm 安装后：
+lark-acp --help
+```
+
+> ℹ️ 虽然脚本住在 `bin/` 目录里（这是 npm 生态对 `package.json#bin` 入口的传统约定），它本身是一个普通的 Node.js / TypeScript 脚本，不是预编译的二进制。`package.json#bin` 把 `dist/bin/lark-acp.js` 注册成 PATH 上的命令。
+
+### 命令格式
 
 ```
-飞书 WS                     LarkBridge                          Agent (ACP 子进程)
-    │                            │                                    │
-    │ message_received           │                                    │
-    ├───────────────────────────►│                                    │
-    │                            │ larkMessageToPrompt()              │
-    │                            │ （interpreter，下载图片→base64）    │
-    │                            │                                    │
-    │                            │ ChatRuntime.enqueue()              │
-    │                            │   ├─ 首次：spawnAgent / resume     │
-    │                            │   └─ 后续：复用同一 sessionId      │
-    │                            │                                    │
-    │                            │ connection.prompt(blocks) ────────►│
-    │                            │                                    │
-    │                            │◄─ sessionUpdate stream ────────────┤
-    │                            │   • agent_message_chunk            │
-    │                            │   • agent_thought_chunk            │
-    │                            │   • tool_call / tool_call_update   │
-    │                            │                                    │
-    │  patchCard(timeline) ◄─────┤                                    │
-    │  （unified card debounce 100ms）                                 │
-    │                            │                                    │
-    │                            │◄─ requestPermission ───────────────┤
-    │  replyCard(permission) ◄───┤                                    │
-    │                            │                                    │
-    │ card.action.trigger ──────►│                                    │
-    │                            │ resolve permission ───────────────►│
-    │                            │                                    │
-    │                            │◄─ prompt result {stopReason} ──────┤
-    │                            │                                    │
-    │  patchCard(final) ◄────────┤ finalize(status)                   │
+lark-acp [global-options] proxy --agent <preset> [-- <extra-args>...]
+lark-acp [global-options] proxy -- <agent-cmd> [agent-args...]
+lark-acp agents
+lark-acp help
+lark-acp version
+```
+
+两种启动方式：
+
+- **`--agent <preset>`** —— 使用内置预设，最常用。运行 `lark-acp agents` 查看完整列表（当前提供 `claude` / `claude-agent` / `codex` / `copilot` / `gemini` / `opencode`）。
+- **`-- <agent-cmd>`** —— 任意自定义命令（自研 ACP server、未在预设里的工具）。`--` 后的所有 token 原样转发，agent 自己的 flag 不会被本工具吞掉。
+
+两种方式可以组合：`proxy --agent claude -- --debug` 会在预设的 args 末尾追加 `--debug` 再启动。
+
+所有全局选项**必须**出现在 `proxy` 子命令之前。
+
+### 内置 agent 预设
+
+`lark-acp proxy --agent <preset>` 直接展开成下列命令，避免每次重复输入冗长的 `npx @scope/package-name`。`lark-acp agents` 命令会输出最新清单。
+
+| Preset         | 展开命令                                       | 说明                                                                                                          |
+| -------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `claude`       | `npx -y @zed-industries/claude-code-acp`       | Zed 维护的 Claude Code ACP 适配器，会拉起本地 `claude` 子进程并桥接到 ACP；需先在终端跑过 `claude` 完成登录。 |
+| `claude-agent` | `npx -y @agentclientprotocol/claude-agent-acp` | 直接走 Anthropic API 的 Claude Agent SDK 适配器；需要 `ANTHROPIC_API_KEY`。                                   |
+| `codex`        | `npx -y @zed-industries/codex-acp`             | OpenAI Codex 的 ACP 适配器。                                                                                  |
+| `copilot`      | `npx -y @github/copilot --acp --yolo`          | GitHub Copilot CLI 原生支持 `--acp`。                                                                         |
+| `gemini`       | `npx -y @google/gemini-cli --experimental-acp` | Google Gemini CLI 的实验性 ACP 模式。                                                                         |
+| `opencode`     | `opencode acp`                                 | OpenCode 自带 `acp` 子命令；预设假设 `opencode` 已在 `$PATH` 上。                                             |
+
+> ⚠️ 直接 `proxy -- claude`（**不带**适配器）不会工作 —— Claude Code CLI 本身没有 ACP server 模式，会被当作普通交互式 REPL 启动。所以才需要 `--agent claude` 走 Zed 适配器；其它 CLI 同理。
+
+如果需要的 agent 不在预设里（自研 ACP server、未发布到 npm 的工具等），用 raw command 路径：
+
+```bash
+lark-acp proxy -- node ./my-acp-server.js --port 9000
+```
+
+### 全局选项
+
+| 选项                   | 说明                                              |
+| ---------------------- | ------------------------------------------------- |
+| `--cwd <dir>`          | agent 子进程工作目录（默认当前目录）              |
+| `--config <path>`      | 覆盖配置文件路径                                  |
+| `--data-dir <dir>`     | 覆盖会话存储目录                                  |
+| `--idle-timeout <min>` | 闲置 N 分钟后驱逐 chat（`0` 表示永不，默认 1440） |
+| `--max-chats <n>`      | 最大并发 chat 数（默认 10）                       |
+| `--hide-thoughts`      | 不在卡片中渲染 `agent_thought_chunk`              |
+| `--hide-tools`         | 不在卡片中渲染 `tool_call` 时间线条目             |
+| `--hide-cancel-button` | 不渲染卡片底部的"中断当前任务"按钮                |
+| `-h`, `--help`         | 显示帮助                                          |
+| `-v`, `--version`      | 显示版本                                          |
+
+### 配置文件
+
+CLI 读取一份**通用配置文件**（默认 `$XDG_CONFIG_HOME/lark-acp/config.json`，回退 `~/.config/lark-acp/config.json`），里面包含凭据和运行时默认值。CLI flag 优先级最高，环境变量次之，配置文件兜底，最后才是内置默认值。
+
+完整 schema（所有字段都可选）：
+
+```jsonc
+{
+  "credentials": {
+    "appId": "cli_xxxxxxxxxxxxxxxx",
+    "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  "dataDir": "./var/lark-acp", // 等价 --data-dir
+  "runtime": {
+    "cwd": "/work/project", // 等价 --cwd
+    "idleTimeoutMinutes": 1440, // 等价 --idle-timeout
+    "maxChats": 10, // 等价 --max-chats
+    "hideThoughts": false, // 等价 --hide-thoughts
+    "hideTools": false,
+    "hideCancelButton": false,
+  },
+}
+```
+
+文件路径和敏感字段的覆盖关系：
+
+| 字段                              | 来源（高 → 低）                                                   |
+| --------------------------------- | ----------------------------------------------------------------- |
+| `credentials.appId` / `appSecret` | 环境变量 `LARK_ACP_APP_ID` / `LARK_ACP_APP_SECRET` → 配置文件     |
+| 配置文件路径                      | `--config` → 环境变量 `LARK_ACP_CONFIG` → XDG 默认                |
+| `dataDir`                         | `--data-dir` → 环境变量 `LARK_ACP_DATA_DIR` → 配置文件 → XDG 默认 |
+| `runtime.*`                       | 同名 CLI flag → 配置文件 → 内置默认                               |
+
+> 在飞书开放平台 [开发者后台](https://open.larksuite.com/app) 创建一个"自建应用"，从「凭证与基础信息」页拿 `App ID` / `App Secret`；在「事件与回调」里把订阅模式切到 **长连接 (WebSocket)**，并订阅 `im.message.receive_v1` / `card.action.trigger`。
+
+会话状态（`sessions.json`）默认写到 `$XDG_DATA_HOME/lark-acp`（回退 `~/.local/share/lark-acp`）。
+
+### 配置示例
+
+#### 最小配置（仅写一个文件，其它走默认）
+
+```bash
+# 1. 准备目录（首次使用时一次性执行）
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/lark-acp"
+
+# 2. 写入凭据
+cat > "${XDG_CONFIG_HOME:-$HOME/.config}/lark-acp/config.json" <<'EOF'
+{
+  "credentials": {
+    "appId":     "cli_a1b2c3d4e5f60001",
+    "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+}
+EOF
+chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/lark-acp/config.json"
+
+# 3. 启动桥接
+lark-acp proxy --agent claude
+```
+
+最终目录布局：
+
+```
+~/.config/lark-acp/
+└── config.json                # 凭据 + 可选的运行时默认值
+~/.local/share/lark-acp/
+└── sessions.json              # 运行起来后自动生成的 chat→sessionId 映射
+```
+
+#### 完整配置（凭据 + 运行时默认值）
+
+把所有运行时默认值固化到文件里，命令行只剩 `proxy --agent` 那段：
+
+```jsonc
+{
+  "credentials": {
+    "appId": "cli_a1b2c3d4e5f60001",
+    "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  },
+  "runtime": {
+    "cwd": "/srv/projects/main",
+    "idleTimeoutMinutes": 60,
+    "maxChats": 20,
+    "hideThoughts": true,
+  },
+}
+```
+
+```bash
+lark-acp proxy --agent claude
+```
+
+需要临时覆盖某项时再传 flag，例如 `--cwd /tmp/sandbox` 会盖掉文件里的 `runtime.cwd`。
+
+#### 用环境变量代替凭据文件
+
+适合 CI、容器、或临时切换不同 App：
+
+```bash
+export LARK_ACP_APP_ID="cli_a1b2c3d4e5f60001"
+export LARK_ACP_APP_SECRET="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+lark-acp proxy --agent claude
+```
+
+环境变量同时存在时，覆盖文件中 `credentials` 块的同名字段。
+
+#### 自定义路径
+
+把配置和状态都收到项目内部，便于多账号切换 / 隔离：
+
+```bash
+lark-acp \
+  --config   ./secrets/lark-acp.json \
+  --data-dir ./var/lark-acp \
+  proxy --agent claude
+```
+
+或用环境变量等价：
+
+```bash
+LARK_ACP_CONFIG=./secrets/lark-acp.json \
+LARK_ACP_DATA_DIR=./var/lark-acp \
+  lark-acp proxy --agent claude
+```
+
+#### 把命令固定下来（systemd / pm2 等）
+
+`lark-acp` 是前台进程，自身不带 daemon 模式，由进程管理器托管即可。systemd unit 的 `ExecStart` 示例：
+
+```ini
+[Service]
+Environment=LARK_ACP_APP_ID=cli_a1b2c3d4e5f60001
+Environment=LARK_ACP_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ExecStart=/usr/local/bin/lark-acp --cwd /srv/projects/main proxy --agent claude
+Restart=on-failure
+```
+
+### 退出与信号
+
+CLI 在收到 `SIGINT` / `SIGTERM` 时会尝试优雅停止：调用 `bridge.stop()` 关闭所有 chat runtime，再退出。Agent 子进程由 `LarkBridge` 内部的 `ChatRuntime.shutdown()` 负责清理。
+
+### 快速示例
+
+```bash
+# 1. 接 Claude Code（最常用）
+#    会话由 lark-acp 自己持久化，重启自动恢复，无需手动 resume。
+lark-acp proxy --agent claude
+
+# 2. 接 OpenCode，agent 工作目录设到具体项目
+lark-acp --cwd /work/project proxy --agent opencode
+
+# 3. 接 GitHub Copilot CLI，关掉思考输出
+lark-acp --hide-thoughts proxy --agent copilot
+
+# 4. 自研 ACP server（不在预设里）
+lark-acp proxy -- node ./my-acp-server.js --port 9000
 ```
 
 ---
 
-## Unified Card：一张卡片承载整轮对话
+## 库使用：`LarkBridge`
 
-为避免每次 thought / text / tool 切换都新发一张卡片刷屏，桥接层在 `LarkAcpClient` 内部维护一条**结构化时间线**（`TimelineEntry[]`），每次 ACP 流事件追加 / 更新条目，再 debounce 后整体渲染成一张飞书互动卡片：
+如果不走 CLI，而是把桥接层嵌进自己的应用，直接 `import` 即可：
 
 ```ts
-type TimelineEntry =
-  | { kind: "text";    text: string }
-  | { kind: "thought"; text: string }
-  | { kind: "tool";    toolCallId; title; toolKind; status; detail? };
-```
+import { LarkBridge, FileSessionStore } from "lark-acp";
 
-- 同类型相邻条目会合并（`appendText` 把连续的 chunk 拼到最后一项）；
-- 工具条目通过 `toolCallId → index` 索引表 O(1) 查找更新（`tool_call_update` 事件）；
-- 渲染时连续条目用 `hr` 分隔，思考用 markdown 引用块（`> `）与正文区分；
-- 卡片头部 `STATUS_HEADER` 实时反映 Agent 状态：`thinking` / `calling_tool` / `responding` / `complete` / `cancelled` / `failed`；
-- 运行中卡片底部带"中断当前任务"按钮；finalize 时按钮消失、头部变为终态色。
-
-### 渲染时机
-
-`scheduleFlush()` 用 100ms 的 debounce 合并连续事件，避免高频 `patchCard` 触发限流。`flushing` 标志防止首次创建卡片时与 patch 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 patch。
-
----
-
-## 中断 / 取消链路
-
-用户有两种方式中断当前 prompt：
-
-1. **`/cancel`、`取消`、`/stop`、`停止`** 任意命令消息；
-2. 点击运行中卡片底部的"中断当前任务"按钮。
-
-两条路径最终都进入 `ChatRuntime.cancel()`：
-
-```
-按钮点击 → bridge.handleCardAction
-              └─ value.cancel === true → handleCancelButton(chatId)
-                                          └─ runtime.cancel()
-                                              ├─ client.cancelPendingPermission()
-                                              ├─ connection.cancel({ sessionId })
-                                              └─ queue.length = 0
-```
-
-Agent 收到 cancel 后 `prompt()` 以 `stopReason: "cancelled"` 返回，`finalize("cancelled")` 把卡片头改成 "⛔ 已取消"。Agent 子进程**不会**被杀掉——下次消息直接复用同一 session。
-
-`shutdown()` 才会真正杀掉子进程，用在 `/new` / `/restart` 命令、空闲超时、或 Agent 认证失败 / 已死等场景。
-
----
-
-## 工具调用授权流程
-
-```
-agent.requestPermission(params)
-        │
-        ▼
-LarkAcpClient.requestPermission
-  ├─ requestId = uuid()
-  ├─ pendingPermissions.set(requestId, { resolve, timer, cardMessageId })
-  ├─ 起 permissionTimeoutMs 超时（默认 5 分钟）
-  └─ presenter.sendInterruptCard()  → 飞书互动卡片
-                                       payload: { r: requestId, o: optionId, c: chatId, ... }
-
-用户点击按钮 → 飞书 card.action.trigger
-        │
-        ▼
-LarkBridge.handleCardAction
-  └─ runtime.handleCardAction(requestId, optionId)
-       └─ pp.resolve({ outcome: "selected", optionId })  → ACP agent
-
-超时 / 会话结束 / sendInterruptCard 失败：
-  └─ pp.resolve({ outcome: "cancelled" })，原卡片 patch 成"已失效"
-```
-
-`sendInterruptCard` 失败时**默认 cancel 而非 allow**，避免静默放行。
-
----
-
-## 多会话并发与生命周期
-
-`LarkBridge` 持有 `Map<chatId, ChatRuntime>`：
-
-- **懒创建**：首条消息触发 `acquireRuntime`，调用 `spawnAgent` 或 `spawnAndResumeAgent`；
-- **FIFO 串行**：单个 chat 内消息按到达顺序排队，避免同一 session 上并发 prompt；
-- **空闲驱逐**：默认 24h 不活跃即 `shutdown()`，回收子进程；
-- **总数上限**：默认 10 个并发 chat，达到上限时驱逐 lastActivity 最久的；
-- **跨进程恢复**：`SessionStore` 持久化 `chatId → sessionId`，进程重启后下次消息会优先 `unstable_resumeSession` / `loadSession`；都不行才 `newSession`。
-
----
-
-## 配置项
-
-```ts
-new LarkBridge({
+const bridge = new LarkBridge({
   feishu: { appId, appSecret },
 
   agent: {
-    command: "claude",
-    args: ["--acp"],
+    command: "npx",
+    args: ["-y", "@zed-industries/claude-code-acp"],
     cwd: "/path/to/project",
     env: { ... },
-    showThoughts: true,        // 是否在卡片中渲染 agent_thought_chunk
-    showTools: true,           // 是否渲染 tool_call / tool_call_update
-    showCancelButton: true,    // 是否渲染卡片底部"中断当前任务"按钮
-    permissionTimeoutMs: 300_000,  // 授权卡片自动 cancel 超时
+    showThoughts: true,           // 是否在卡片中渲染 agent_thought_chunk
+    showTools: true,              // 是否渲染 tool_call / tool_call_update
+    showCancelButton: true,       // 是否渲染卡片底部"中断当前任务"按钮
+    permissionTimeoutMs: 300_000, // 授权卡片自动 cancel 超时
   },
 
   session: {
-    idleTimeoutMs: 24 * 3600_000,  // 0 = never
+    idleTimeoutMs: 24 * 3600_000, // 0 = never
     maxConcurrentChats: 10,
   },
 
   sessionStore: new FileSessionStore({ path: "./sessions.json" }),
-  // 或 new PostgresSessionStore({ ... })
 });
+
+await bridge.start();
 ```
 
----
-
-## 飞书消息 → ACP ContentBlock
-
-`interpreter/lark-interpreter.ts` 处理飞书消息的所有类型：
-
-| 飞书消息类型 | 转换结果 |
-| --- | --- |
-| `text` | `{ type: "text", text }`；`@mention` 会替换成名字 |
-| `image` | 通过 SDK `im.messageResource.get` 下载，base64 内嵌为 `{ type: "image", data, mimeType }` |
-| `post` | 富文本展平：内联 `<img>` 切分段落，文本/链接/at 拼回纯文本 |
-| `file` / `audio` / `media` | 描述性文本占位（不下载） |
-| `sticker` / `share_chat` / `share_user` / `location` / `merge_forward` | 描述性文本占位 |
-| 图片下载失败 | 退化为文本 `[图片下载失败: <key>]` |
-
-每条消息前会被注入一段上下文文本：
-
-```
-[上下文: 群聊 "项目协作群" (oc_xxx) 中用户 张三 (ou_xxx) 的消息]
-```
+`bridge.stop()` 优雅停止；`LarkCardPresenter` / `LarkPresenter` 接口可替换以接入别的 UI（比如 Web / 自定义协议）。完整 API 见 `src/index.ts` 的 re-export。
 
 ---
 
-## Agent 输出 → 飞书 post 富文本
+## 工程约定
 
-仅用于系统通知（取消提示、Agent 错误）的 `replyText` 走 `presenter/lark-markdown.ts`：
+仓库的 TypeScript 风格规范见 [`CLAUDE.md`](./CLAUDE.md)。要点：默认抛异常 + JSDoc `@throws`，仅在 schema 解析等"失败是预期分支"的边界用 Result 风格；禁 `any` / 不安全 `as` / `!`；默认 `type` 而非 `interface`；ESM + NodeNext，import 路径写 `.js` 后缀。`tsconfig.json` 启用了 `strict` / `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` / `verbatimModuleSyntax` / `noFallthroughCasesInSwitch`。
 
-- `marked@18` 解析 markdown AST；
-- 标题 → 加粗段落；段落 → 内联文本/链接/样式；
-- 代码块 → `code_block`（语言走白名单 + 别名映射，非白名单语言 fallback 无 language）；
-- 列表 / 引用 → 飞书 `md` 标签（飞书 post 中唯一原生支持列表/引用的元素）；
-- 表格 → 列宽对齐的 `code_block`（`md` 标签不支持表格）；
-- 长消息按 `\n\`\`\`\n` / `\n\n` / `\n` 边界拆分到 `MAX_MARKDOWN_CHUNK = 4000` 以下；
-- 行内代码 → 用反引号包裹的纯文本（post 没有 inline-code 元素）；
-- 图片 → 退化为可点击链接（post 的 `img` 需要 `image_key`，agent 发的 URL 没法直接用）。
-
-Agent 的主输出**不**走 `replyText`——它进入 unified card 的时间线，由 `presenter/lark-presenter.ts` 渲染成卡片的 `markdown` 元素。
+格式化由 Prettier（行宽 100）统一：`bun run fmt` 写盘，`bun run fmt:check` 校验，Zed 在 `.zed/settings.json` 里配置成保存即格式化。
 
 ---
 
-## TypeScript 工程约定
+## 参考
 
-完整规范见 [`CLAUDE.md`](./CLAUDE.md)。要点：
-
-- 默认抛异常 + JSDoc `@throws`，仅在解析 / 校验等"失败是预期分支"的边界用 Result 风格；
-- 禁 `any` / 不安全 `as` / `!`；解析外部数据走 schema 校验；
-- 默认 `type` 而非 `interface`（仅 declaration merging 用 interface）；
-- 默认不写注释，仅在 *why* 非显然时简短说明；
-- discriminated union + 穷尽 `switch` 替代散落的 `if/else if`；
-- ESM + NodeNext，import 路径写 `.js` 后缀。
-
-`tsconfig.json` 启用：`strict`、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、`verbatimModuleSyntax`、`noFallthroughCasesInSwitch`。
-
----
-
-## 飞书工具注入（计划中）
-
-目前桥接层是**单向**的——飞书消息 → ACP prompt，Agent 输出 → 飞书卡片。Agent 无法主动**调用**飞书的能力（发选项卡让用户选、下载用户上传的文件、给指定群发消息、查群成员等）。
-
-下一步要把这些能力作为**ACP 工具**暴露给 Agent，让 Agent 能在自己的工具调用循环中直接驱动飞书。
-
-### 方案方向
-
-ACP 的 `newSession` / `loadSession` / `unstable_resumeSession` 都接受 `mcpServers` 参数。最自然的实现是把桥接层自己跑成一个本地 MCP server，把它的 stdio / unix socket 地址塞进 `mcpServers`：
-
-```ts
-connection.newSession({
-  cwd,
-  mcpServers: [
-    { name: "lark", command: "node", args: ["./mcp-lark-server.js"], env: {...} },
-    // 或 { name: "lark", url: "http://127.0.0.1:xxx/sse" } 走 SSE transport
-  ],
-});
-```
-
-这样 Agent 端**不需要任何改动**——它通过自己原生的 MCP 客户端发现并调用工具，调用结果再以工具调用的形式回到 ACP 流里，桥接层照常渲染到 unified card。
-
-另一种更轻量的方向：复用 `LarkAcpClient` 已有的 `requestPermission` 通道——把"发选项卡让用户选"伪装成一个授权请求。这条路不需要 MCP server，但语义不太对（授权 ≠ 业务问答），先不优先。
-
-### 候选工具清单
-
-按优先级粗分：
-
-**用户交互（高优）**
-- `lark.askChoice(question, options[])` —— 发互动卡片让用户从选项中选一个，Agent 阻塞等待结果；
-- `lark.askText(question)` —— 提示用户在当前 chat 回复一条文本，桥接层捕获下一条用户消息作为返回；
-- `lark.sendCard(card)` —— Agent 自己构造卡片 JSON 直接发送（advanced，需要约束 schema）。
-
-**资源访问（高优）**
-- `lark.downloadMessageFile(messageId, fileKey)` —— 复用已有的 `messageResource.get`，扩展支持 `type: "file"` / `"audio"` 等；
-- `lark.downloadMessageImage(messageId, imageKey)` —— 桥接层已实现，包一层暴露给 Agent；
-- `lark.listChatHistory(chatId, limit)` —— 拉取最近 N 条消息（需要权限 `im:message:readonly`）。
-
-**主动外发（中优）**
-- `lark.sendMessage(chatId, content)` —— Agent 主动给某个群/用户发消息（不在当前 prompt 上下文中）；
-- `lark.uploadImage(bytes)` —— 上传图片拿到 `image_key`，配合 `sendMessage` 发图。
-
-**元信息（低优）**
-- `lark.getUserInfo(openId)` / `lark.getChatInfo(chatId)` / `lark.listChatMembers(chatId)` —— 复用 `lark-http.ts` 的缓存层。
-
-### 待解决的设计问题
-
-- **工具调用与 unified card 的关系**：Agent 调用 `lark.askChoice` 时，问答卡片应该是另发一张消息，还是嵌进当前 unified card？嵌进去会让"取消"按钮的语义变模糊；另发一张又会破坏"一轮对话一张卡片"的设计。倾向另发，但需要在 unified card 里留一条 `tool: lark.askChoice` 时间线条目作为索引。
-- **阻塞 vs. 异步**：MCP 工具调用是同步的（agent 等待返回），但飞书侧的用户操作是异步事件回调。需要在 MCP server 端做 promise bridge，与现有 `pendingPermissions` 模式同构。
-- **权限边界**：`sendMessage` 给任意 chat 发消息是高风险能力，是否需要白名单 / 配置开关 / 卡片确认？至少要有 `enabledTools: string[]` 或 `tools.allow` / `tools.deny` 的配置项。
-- **飞书 API 限频**：Agent 可能会高频调用，需要在 MCP server 层加 rate limit，避免触发飞书的接口风控。
-- **Agent 兼容性**：不是所有 ACP agent 都启用了 MCP 客户端能力。要在 `initialize` 后检查 `agentCapabilities` 决定是否注入工具。
-
----
-
-## 当前进度（WIP）
-
-- ✅ Bridge / interpreter / presenter / acp / session-store 重构完成，类型检查干净；
-- ✅ Unified card：思考 / 文本 / 工具调用合并渲染、状态头、中断按钮；
-- ✅ `showThoughts` / `showTools` / `showCancelButton` 配置开关；
-- ✅ 取消链路双通道（命令 + 按钮）；
-- ✅ 飞书图片消息真实下载并 base64 内嵌；
-- ✅ markdown → 飞书 post 走 `marked` AST 而非正则；
-- ⏳ **飞书工具注入（MCP server）**——见上节，目前 Agent 只能被动接收消息，不能反向驱动飞书能力；
-- ⏳ `bin/lark-acp.ts` CLI 入口未跟随重构同步，目前不可直接运行；
-- ⏳ 测试：尚无 unit / integration test（计划用 vitest + testcontainers）；
-- ⏳ Postgres session store 未实测；
-- ⏳ 文档：API doc 注释完整度参差，待补齐。
-
-参考：
-
-- ACP 协议：https://agentcommunicationprotocol.dev/core-concepts/architecture
-- 飞书开放平台：https://open.larksuite.com/document/server-docs/getting-started/getting-started
+- ACP 协议：<https://agentcommunicationprotocol.dev/core-concepts/architecture>
+- 飞书开放平台：<https://open.larksuite.com/document/server-docs/getting-started/getting-started>
+- 路线图与设计文档：[`PLAN.md`](./PLAN.md)
+- 工程规范：[`CLAUDE.md`](./CLAUDE.md)
 
 License: MIT

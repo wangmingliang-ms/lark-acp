@@ -73,19 +73,27 @@ export async function spawnAndResumeAgent(
   const hasResume = !!agentCaps?.sessionCapabilities?.resume;
   const hasLoad = !!agentCaps?.loadSession;
 
-  opts.logger.debug(
-    { hasResume, hasLoad, previousSessionId },
-    "agent capabilities for resume",
-  );
+  opts.logger.debug({ hasResume, hasLoad, previousSessionId }, "agent capabilities for resume");
 
   if (hasResume || hasLoad) {
     try {
       if (hasResume) {
-        await connection.unstable_resumeSession({ sessionId: previousSessionId });
+        await connection.unstable_resumeSession({
+          sessionId: previousSessionId,
+          cwd: opts.cwd,
+          mcpServers: [],
+        });
       } else {
-        await connection.loadSession({ sessionId: previousSessionId, cwd: opts.cwd, mcpServers: [] });
+        await connection.loadSession({
+          sessionId: previousSessionId,
+          cwd: opts.cwd,
+          mcpServers: [],
+        });
       }
-      opts.logger.info({ sessionId: previousSessionId, mode: hasResume ? "resume" : "load" }, "session resumed");
+      opts.logger.info(
+        { sessionId: previousSessionId, mode: hasResume ? "resume" : "load" },
+        "session resumed",
+      );
       return {
         agent: { process: proc, connection, sessionId: previousSessionId, capabilities: caps },
         resumed: true,
@@ -149,13 +157,8 @@ async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {
   }
 
   if (initResult.authMethods && initResult.authMethods.length > 0) {
-    const method = initResult.authMethods[0];
-    logger.info({ methodId: method.id, methodName: method.name }, "agent requires authentication");
-    try {
-      await connection.authenticate({ methodId: method.id });
-    } catch (err) {
-      throw new Error("Agent authentication failed during setup", { cause: err });
-    }
+    const ids = initResult.authMethods.map((m: { id: string }) => m.id);
+    logger.debug({ authMethods: ids }, "agent advertised auth methods (informational only)");
   }
 
   return { proc, connection, initResult };

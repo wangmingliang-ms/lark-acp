@@ -82,9 +82,7 @@ export class ChatRuntime {
 
     if (!this.state.processing) {
       this.state.processing = true;
-      this.processQueue().catch((err) =>
-        this.logger.error({ err }, "queue processor crashed"),
-      );
+      this.processQueue().catch((err) => this.logger.error({ err }, "queue processor crashed"));
     }
   }
 
@@ -136,8 +134,7 @@ export class ChatRuntime {
       showCancelButton: this.opts.showCancelButton,
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
       callbacks: {
-        onTyping: () =>
-          this.opts.presenter.addReaction(firstMessage.messageId).then(() => {}),
+        onTyping: () => this.opts.presenter.addReaction(firstMessage.messageId).then(() => {}),
       },
     });
 
@@ -180,8 +177,7 @@ export class ChatRuntime {
         const pending = state.queue.shift()!;
 
         state.client.updateCallbacks({
-          onTyping: () =>
-            this.opts.presenter.addReaction(pending.messageId).then(() => {}),
+          onTyping: () => this.opts.presenter.addReaction(pending.messageId).then(() => {}),
         });
 
         state.client.setContext(pending.messageId, pending.chatId);
@@ -228,15 +224,14 @@ export class ChatRuntime {
   ): Promise<void> {
     const errMsg = formatAgentError(err);
     const isAuthError = isAuthenticationError(err);
-    const procDead =
-      state.agent.process.killed || state.agent.process.exitCode !== null;
+    const procDead = state.agent.process.killed || state.agent.process.exitCode !== null;
 
     // Always finalize the unified card as failed so the in-progress state
     // doesn't get stuck. Best-effort — if presenter rejects we still surface
     // the error via replyText below.
-    await state.client.finalize("failed").catch((finalErr) =>
-      this.logger.debug({ err: finalErr }, "finalize after error rejected"),
-    );
+    await state.client
+      .finalize("failed")
+      .catch((finalErr) => this.logger.debug({ err: finalErr }, "finalize after error rejected"));
 
     if (isAuthError || procDead) {
       this.shutdown();
