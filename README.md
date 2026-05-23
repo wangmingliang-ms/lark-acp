@@ -11,6 +11,8 @@
 
 把 [飞书/Lark](https://open.larksuite.com/) 机器人接到任何符合 [ACP（Agent Client Protocol）](https://agentcommunicationprotocol.dev/) 的 AI Agent 上：用户在飞书里发消息，agent 在你的机器上跑，过程和结果都以一张可交互的飞书卡片呈现，工具调用授权、中断、跨进程恢复会话都在卡片里完成。
 
+实际使用强烈建议配合[飞书cli](https://github.com/larksuite/cli)与其skill一起使用。
+
 <p align="center">
   <img src="docs/mock-example.png" alt="lark-acp 在飞书里的演示卡片" width="640">
 </p>
