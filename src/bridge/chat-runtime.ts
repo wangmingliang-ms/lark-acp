@@ -58,6 +58,16 @@ export class ChatRuntime {
   private aborted = false;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
   private promptInFlight = false;
+  /**
+   * Set while the first message is bootstrapping the agent (spawn +
+   * initialize + newSession/resume), a window that can take many seconds.
+   * During it `state` is still null, so without this flag the idle-eviction
+   * getters below would report the runtime as idle-since-epoch and evict it
+   * mid-spawn. See {@link processing} / {@link lastActivity}.
+   */
+  private booting = false;
+  /** Wall-clock construction time — the `lastActivity` floor before `state` exists. */
+  private readonly createdAt = Date.now();
 
   constructor(opts: ChatRuntimeOptions) {
     this.opts = opts;
@@ -69,11 +79,15 @@ export class ChatRuntime {
   }
 
   get processing(): boolean {
-    return this.state?.processing ?? false;
+    // A booting runtime is busy even though `state` is still null — it must
+    // not be evicted while its agent subprocess is spawning.
+    return this.booting || (this.state?.processing ?? false);
   }
 
   get lastActivity(): number {
-    return this.state?.lastActivity ?? 0;
+    // Fall back to construction time (not 0) so a freshly-created or still-
+    // booting runtime looks recently active, never "idle since the epoch".
+    return this.state?.lastActivity ?? this.createdAt;
   }
 
   /**
@@ -84,11 +98,14 @@ export class ChatRuntime {
    */
   async enqueue(message: PendingMessage): Promise<void> {
     if (!this.state) {
+      this.booting = true;
       try {
         this.state = await this.bootstrap(message);
       } catch (err) {
         this.aborted = true;
         throw err;
+      } finally {
+        this.booting = false;
       }
     }
 
