@@ -28,6 +28,8 @@
     "prepare": "npm run build",
     "start": "node dist/bin/lark-acp.js",
     "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "fmt": "prettier --write .",
     "fmt:check": "prettier --check ."
   },
@@ -41,7 +43,8 @@
   "devDependencies": {
     "@types/node": "^22.19.19",
     "prettier": "^3.8.3",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=20.0.0"
