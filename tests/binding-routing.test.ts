@@ -55,7 +55,12 @@ class RecordingPresenter implements LarkPresenter {
 
 /** Minimal view of the private methods this test drives. */
 interface BridgeInternals {
-  handleCommand(command: LarkCommand, chatId: string, messageId: string): Promise<void>;
+  handleCommand(
+    command: LarkCommand,
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void>;
   resolveBinding(chatId: string): Promise<{ cwd: string; label: string; explicit: boolean } | null>;
 }
 
@@ -130,8 +135,8 @@ describe("per-chat repo routing (integration)", () => {
     bridge = makeBridge();
     const b = asInternals(bridge);
 
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", "om_1");
-    await b.handleCommand({ kind: "bind", cwd: repoB, agent: "codex" }, "oc_B", "om_2");
+    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", null, "om_1");
+    await b.handleCommand({ kind: "bind", cwd: repoB, agent: "codex" }, "oc_B", null, "om_2");
 
     const bindA = await bindingStore.get("oc_A");
     const bindB = await bindingStore.get("oc_B");
@@ -151,6 +156,7 @@ describe("per-chat repo routing (integration)", () => {
     await asInternals(bridge).handleCommand(
       { kind: "bind", cwd: repoA, agent: "claude" },
       "oc_A",
+      null,
       "om_1",
     );
     await bindingStore.close();
@@ -168,6 +174,7 @@ describe("per-chat repo routing (integration)", () => {
     await asInternals(bridge).handleCommand(
       { kind: "bind", cwd: path.join(repoA, "does-not-exist"), agent: "claude" },
       "oc_A",
+      null,
       "om_1",
     );
     expect(await bindingStore.get("oc_A")).toBeNull();
@@ -191,18 +198,18 @@ describe("per-chat repo routing (integration)", () => {
   it("/unbind removes the binding", async () => {
     bridge = makeBridge();
     const b = asInternals(bridge);
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", "om_1");
+    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", null, "om_1");
     expect(await bindingStore.get("oc_A")).not.toBeNull();
 
-    await b.handleCommand({ kind: "unbind" }, "oc_A", "om_2");
+    await b.handleCommand({ kind: "unbind" }, "oc_A", null, "om_2");
     expect(await bindingStore.get("oc_A")).toBeNull();
   });
 
   it("rebinding a chat overwrites its repo + agent", async () => {
     bridge = makeBridge();
     const b = asInternals(bridge);
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", "om_1");
-    await b.handleCommand({ kind: "bind", cwd: repoB, agent: "codex" }, "oc_A", "om_2");
+    await b.handleCommand({ kind: "bind", cwd: repoA, agent: "claude" }, "oc_A", null, "om_1");
+    await b.handleCommand({ kind: "bind", cwd: repoB, agent: "codex" }, "oc_A", null, "om_2");
 
     expect(await bindingStore.get("oc_A")).toMatchObject({ cwd: repoB, agentLabel: "codex" });
     expect((await bindingStore.list()).length).toBe(1);

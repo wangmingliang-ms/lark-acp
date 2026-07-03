@@ -15,6 +15,7 @@ function opts(): ChatRuntimeOptions {
   // keeps the test focused (CLAUDE.md §4 — documented, narrow test cast).
   return {
     chatId: "oc_test",
+    threadId: null,
     agentCommand: "node",
     agentArgs: [],
     agentCwd: "/tmp",

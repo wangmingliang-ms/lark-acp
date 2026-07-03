@@ -56,13 +56,23 @@ export class FileSessionStore implements SessionStore {
 
     for (const [chatId, entries] of Object.entries(record)) {
       if (Array.isArray(entries)) {
-        this.data.set(chatId, entries as SessionRecord[]);
+        // Backfill `threadId: null` on records persisted before topic support
+        // (they belong to the chat's "main" conversation). Newer records
+        // already carry their own threadId, which we preserve.
+        const normalized = (entries as SessionRecord[]).map((r) => ({
+          ...r,
+          threadId: r.threadId ?? null,
+        }));
+        this.data.set(chatId, normalized);
       }
     }
   }
 
   async close(): Promise<void> {
-    // No persistent handles — writes are synchronous.
+    // Flush any pending write synchronously so a deferred setImmediate can't
+    // fire after the caller considers the store closed (and, in tests, after
+    // the temp dir is gone) — same contract as FileBindingStore.close().
+    if (this.flushScheduled) this.flushNow();
   }
 
   async listByChat(chatId: string): Promise<readonly SessionRecord[]> {
@@ -71,10 +81,26 @@ export class FileSessionStore implements SessionStore {
     return [...records].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  async getLatest(chatId: string): Promise<SessionRecord | null> {
+  async listByThread(
+    chatId: string,
+    threadId: string | null,
+  ): Promise<readonly SessionRecord[]> {
+    const records = this.data.get(chatId);
+    if (!records) return [];
+    return records
+      .filter((r) => r.threadId === threadId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  async getLatest(chatId: string, threadId: string | null): Promise<SessionRecord | null> {
     const records = this.data.get(chatId);
     if (!records?.length) return null;
-    return records.reduce((a, b) => (a.updatedAt > b.updatedAt ? a : b));
+    let latest: SessionRecord | null = null;
+    for (const r of records) {
+      if (r.threadId !== threadId) continue;
+      if (!latest || r.updatedAt > latest.updatedAt) latest = r;
+    }
+    return latest;
   }
 
   async save(record: SessionRecord): Promise<void> {
@@ -103,13 +129,29 @@ export class FileSessionStore implements SessionStore {
     if (this.flushScheduled) return;
     this.flushScheduled = true;
     setImmediate(() => {
-      this.flushScheduled = false;
-      const obj: Record<string, SessionRecord[]> = {};
-      for (const [chatId, records] of this.data) {
-        obj[chatId] = records;
+      try {
+        this.flushNow();
+      } catch (err) {
+        // Best-effort background durability. A transient FS error here must
+        // not crash the bridge process — surface it and keep running; the
+        // next save()/delete() reschedules a flush. Not silent (§12).
+        process.stderr.write(`[lark-acp] session store flush failed: ${String(err)}\n`);
       }
-      fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), "utf-8");
     });
+  }
+
+  /**
+   * Write the in-memory map to disk synchronously.
+   *
+   * @throws when the write fails (missing dir, permissions, disk full).
+   */
+  private flushNow(): void {
+    this.flushScheduled = false;
+    const obj: Record<string, SessionRecord[]> = {};
+    for (const [chatId, records] of this.data) {
+      obj[chatId] = records;
+    }
+    fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), "utf-8");
   }
 
   private migrateLegacy(legacy: Record<string, LegacyRecord>): void {
@@ -117,6 +159,7 @@ export class FileSessionStore implements SessionStore {
       this.data.set(oldKey, [
         {
           chatId: oldKey,
+          threadId: null,
           sessionId: val.sessionId,
           agentCommand: "",
           agentArgs: [],

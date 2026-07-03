@@ -50,7 +50,7 @@ interface BridgeInternals {
   resolveBinding(chatId: string): Promise<ReceptionBinding | null>;
   reloadBindings(): Promise<void>;
   snapshotBindings(): Promise<void>;
-  acquireRuntime(chatId: string, binding: ReceptionBinding): unknown;
+  acquireRuntime(chatId: string, threadId: string | null, binding: ReceptionBinding): unknown;
   readonly activeChatCount: number;
 }
 function asInternals(bridge: LarkBridge): BridgeInternals {
@@ -149,7 +149,7 @@ describe("reception area", () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
     const eff = await b.resolveBinding("oc_new");
-    b.acquireRuntime("oc_new", eff!);
+    b.acquireRuntime("oc_new", null, eff!);
     const agents = fs.readFileSync(path.join(home, "AGENTS.md"), "utf-8");
     const claude = fs.readFileSync(path.join(home, "CLAUDE.md"), "utf-8");
     expect(agents).toContain("oc_new");
@@ -167,7 +167,7 @@ describe("hot-reload of bindings", () => {
 
     // A reception runtime exists for the unbound chat.
     const recv = await b.resolveBinding("oc_x");
-    b.acquireRuntime("oc_x", recv!);
+    b.acquireRuntime("oc_x", null, recv!);
     expect(b.activeChatCount).toBe(1);
 
     // Simulate the agent binding the chat by editing settings.json directly.
@@ -196,7 +196,7 @@ describe("hot-reload of bindings", () => {
     });
     await b.snapshotBindings();
     const recv = await b.resolveBinding("oc_y");
-    b.acquireRuntime("oc_y", recv!);
+    b.acquireRuntime("oc_y", null, recv!);
     expect(b.activeChatCount).toBe(1);
 
     await b.reloadBindings(); // nothing changed
@@ -216,7 +216,7 @@ describe("hot-reload of bindings", () => {
       updatedAt: 1,
     });
     await b.snapshotBindings();
-    b.acquireRuntime("oc_z", (await b.resolveBinding("oc_z"))!);
+    b.acquireRuntime("oc_z", null, (await b.resolveBinding("oc_z"))!);
     expect(b.activeChatCount).toBe(1);
 
     fs.writeFileSync(settingsPath, "{ half writ"); // corrupt mid-write

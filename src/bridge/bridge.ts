@@ -78,6 +78,17 @@ function assertNever(x: never): never {
 }
 
 /**
+ * Compose the `chats` map key for a `(chatId, threadId)` pair. A `null`
+ * threadId (an ordinary, non-topic message) collapses to the bare chatId, so
+ * the chat's "main" conversation keeps the same key it had before topic
+ * support. A topic thread is namespaced with a NUL separator — never present
+ * in Feishu ids — to avoid any collision with a bare chatId.
+ */
+function runtimeKey(chatId: string, threadId: string | null): string {
+  return threadId === null ? chatId : `${chatId}\u0000${threadId}`;
+}
+
+/**
  * Raised by {@link resolveBindTarget} when a `/bind` request is invalid —
  * a non-existent path or an unresolvable agent selection. The message is
  * user-facing (sent back as a Lark notice card).
@@ -110,6 +121,12 @@ interface CardActionPayload {
   t?: string;
   /** Chat id — present on every card the bridge produces. */
   c?: string;
+  /**
+   * Feishu topic (话题) id the card belongs to; absent/null for the chat's
+   * "main" (non-topic) conversation. Together with {@link c} it selects the
+   * per-thread runtime that owns the pending permission / cancel.
+   */
+  th?: string | null;
   /** Set on the unified card's "cancel current task" button. */
   cancel?: boolean;
 }
@@ -388,6 +405,18 @@ export class LarkBridge {
   // ----- WS event handlers ------------------------------------------------
 
   private handleMessage(event: Lark.RawMessageEvent): void {
+    // TEMP(thread-probe): dump the full raw inbound event so we can inspect
+    // Feishu's topic/thread fields (thread_id / root_id / parent_id) from a
+    // real message. Logged AND appended to a file the agent can read back.
+    // Remove once the thread→session design is settled.
+    this.logger.info({ rawEvent: event }, "thread-probe: raw inbound message event");
+    try {
+      const line = `${JSON.stringify({ at: new Date().toISOString(), event })}\n`;
+      fs.appendFileSync("/tmp/lark-acp-thread-probe.jsonl", line, "utf-8");
+    } catch (err) {
+      this.logger.warn({ err }, "thread-probe: failed to append probe file");
+    }
+
     const { message, sender } = event;
     if (sender.sender_type !== SENDER_TYPE_USER) return;
 
@@ -396,10 +425,18 @@ export class LarkBridge {
     const chatId = message.chat_id;
     if (!userId || !messageId || !chatId) return;
 
-    this.logger.info({ userId, chatId, messageType: message.message_type }, "message received");
+    // Feishu "topic" (话题) id. Absent for ordinary messages → null, which
+    // routes to the chat's "main" conversation (identical to pre-topic
+    // behaviour). A populated value scopes this message to its own topic.
+    const threadId = message.thread_id ?? null;
 
-    this.routeMessage(event, userId, messageId, chatId).catch((err) =>
-      this.logger.error({ err, chatId }, "routeMessage failed"),
+    this.logger.info(
+      { userId, chatId, threadId, messageType: message.message_type },
+      "message received",
+    );
+
+    this.routeMessage(event, userId, messageId, chatId, threadId).catch((err) =>
+      this.logger.error({ err, chatId, threadId }, "routeMessage failed"),
     );
   }
 
@@ -408,6 +445,7 @@ export class LarkBridge {
     userId: string,
     messageId: string,
     chatId: string,
+    threadId: string | null,
   ): Promise<void> {
     const { message } = event;
     const isGroup = message.chat_type === CHAT_TYPE_GROUP;
@@ -438,10 +476,17 @@ export class LarkBridge {
       case "empty":
         return;
       case "command":
-        await this.handleCommand(interpreted.command, chatId, messageId);
+        await this.handleCommand(interpreted.command, chatId, threadId, messageId);
         return;
       case "prompt":
-        await this.enqueueWithContext(event, chatId, userId, messageId, interpreted.blocks);
+        await this.enqueueWithContext(
+          event,
+          chatId,
+          threadId,
+          userId,
+          messageId,
+          interpreted.blocks,
+        );
         return;
       default:
         return assertNever(interpreted);
@@ -451,24 +496,27 @@ export class LarkBridge {
   private async handleCommand(
     command: LarkCommand,
     chatId: string,
+    threadId: string | null,
     messageId: string,
   ): Promise<void> {
     switch (command.kind) {
       case "cancel": {
-        this.logger.info({ chatId }, "cancel command");
-        const runtime = this.chats.get(chatId);
+        this.logger.info({ chatId, threadId }, "cancel command");
+        const runtime = this.chats.get(runtimeKey(chatId, threadId));
         try {
           await runtime?.cancel();
         } catch (err) {
-          this.logger.warn({ err, chatId }, "cancel command failed");
+          this.logger.warn({ err, chatId, threadId }, "cancel command failed");
         }
         await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.cancel);
         return;
       }
       case "new": {
-        this.logger.info({ chatId }, "new session command");
-        this.teardownChat(chatId);
-        await this.clearChatSessions(chatId);
+        // Thread-scoped ("Reset Thread"): only this topic's runtime + sessions
+        // are dropped; the chat's other topics keep running.
+        this.logger.info({ chatId, threadId }, "new session command");
+        this.teardownThread(chatId, threadId);
+        await this.clearThreadSessions(chatId, threadId);
         await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.new);
         return;
       }
@@ -607,6 +655,7 @@ export class LarkBridge {
   private async enqueueWithContext(
     event: Lark.RawMessageEvent,
     chatId: string,
+    threadId: string | null,
     userId: string,
     messageId: string,
     prompt: acp.ContentBlock[],
@@ -653,7 +702,7 @@ export class LarkBridge {
 
     prompt.unshift({ type: "text", text: context });
 
-    const runtime = this.acquireRuntime(chatId, binding);
+    const runtime = this.acquireRuntime(chatId, threadId, binding);
     const pending: PendingMessage = { prompt, messageId, chatId };
     try {
       await runtime.enqueue(pending);
@@ -661,8 +710,8 @@ export class LarkBridge {
       // bootstrap (spawn / initialize / newSession / resume) failed — the
       // ChatRuntime never registered itself as active, so drop it and let
       // the next message try again from scratch.
-      this.chats.delete(chatId);
-      this.logger.error({ err, chatId }, "agent bootstrap failed");
+      this.chats.delete(runtimeKey(chatId, threadId));
+      this.logger.error({ err, chatId, threadId }, "agent bootstrap failed");
       const summary = `⚠️ Agent 启动失败: ${formatBootstrapError(err)}`;
       await this.presenter
         .replyText(messageId, summary)
@@ -715,8 +764,13 @@ export class LarkBridge {
     return null;
   }
 
-  private acquireRuntime(chatId: string, binding: EffectiveBinding): ChatRuntime {
-    const existing = this.chats.get(chatId);
+  private acquireRuntime(
+    chatId: string,
+    threadId: string | null,
+    binding: EffectiveBinding,
+  ): ChatRuntime {
+    const key = runtimeKey(chatId, threadId);
+    const existing = this.chats.get(key);
     if (existing) return existing;
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
@@ -729,6 +783,7 @@ export class LarkBridge {
 
     const runtime = new ChatRuntime({
       chatId,
+      threadId,
       agentCommand: binding.command,
       agentArgs: [...binding.args],
       agentCwd: binding.cwd,
@@ -742,7 +797,7 @@ export class LarkBridge {
       sessionStore: this.sessionStore,
       logger: this.logger,
     });
-    this.chats.set(chatId, runtime);
+    this.chats.set(key, runtime);
     return runtime;
   }
 
@@ -878,42 +933,56 @@ export class LarkBridge {
     const value = event.action.value as CardActionPayload | undefined;
     if (!value?.c) return;
 
+    // Older cards (pre-topic) carry no `th`; `?? null` maps them to the chat's
+    // main conversation, matching how those runtimes are keyed.
+    const threadId = value.th ?? null;
+
     if (value.cancel === true) {
-      this.handleCancelButton(value.c);
+      this.handleCancelButton(value.c, threadId);
       return;
     }
 
     if (!value.r || !value.o) return;
-    this.handlePermissionCardAction(event, value.c, value.r, value.o, value.n, value.k, value.t);
+    this.handlePermissionCardAction(
+      event,
+      value.c,
+      threadId,
+      value.r,
+      value.o,
+      value.n,
+      value.k,
+      value.t,
+    );
   }
 
-  private handleCancelButton(chatId: string): void {
-    const runtime = this.chats.get(chatId);
+  private handleCancelButton(chatId: string, threadId: string | null): void {
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
     if (!runtime) {
-      this.logger.info({ chatId }, "cancel button clicked but no active runtime");
+      this.logger.info({ chatId, threadId }, "cancel button clicked but no active runtime");
       return;
     }
-    this.logger.info({ chatId }, "cancel button clicked");
+    this.logger.info({ chatId, threadId }, "cancel button clicked");
     runtime
       .cancel()
-      .catch((err) => this.logger.warn({ err, chatId }, "cancel via card button failed"));
+      .catch((err) => this.logger.warn({ err, chatId, threadId }, "cancel via card button failed"));
   }
 
   private handlePermissionCardAction(
     event: Lark.CardActionEvent,
     chatId: string,
+    threadId: string | null,
     requestId: string,
     optionId: string,
     optionName: string | undefined,
     toolKind: string | undefined,
     toolTitle: string | undefined,
   ): void {
-    const runtime = this.chats.get(chatId);
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
     const handled = runtime?.handleCardAction(requestId, optionId) ?? false;
     const messageId = event.messageId;
 
     if (!handled) {
-      this.logger.info({ chatId, requestId }, "orphan card action — patching as expired");
+      this.logger.info({ chatId, threadId, requestId }, "orphan card action — patching as expired");
       if (messageId) {
         this.presenter
           .expirePermissionCard(messageId, ORPHAN_CARD_REASON)
@@ -933,45 +1002,83 @@ export class LarkBridge {
 
   // ----- Lifecycle helpers ------------------------------------------------
 
-  /** Shut down and forget a chat's live runtime, if any. */
-  private teardownChat(chatId: string): void {
-    const runtime = this.chats.get(chatId);
+  /**
+   * Shut down and forget one topic's runtime (the `(chatId, threadId)` pair).
+   * Used by the thread-scoped `/new` ("Reset Thread") command; the chat's
+   * other topics keep running.
+   */
+  private teardownThread(chatId: string, threadId: string | null): void {
+    const key = runtimeKey(chatId, threadId);
+    const runtime = this.chats.get(key);
     if (!runtime) return;
     runtime.shutdown();
-    this.chats.delete(chatId);
+    this.chats.delete(key);
   }
 
-  /** Drop every persisted ACP session for a chat (used on bind / unbind / new). */
+  /**
+   * Shut down and forget *every* runtime belonging to a chat — its main
+   * conversation and all topic threads. Used by chat-scoped operations
+   * (bind / unbind / rebind) that swap the repo out from under every topic.
+   */
+  private teardownChat(chatId: string): void {
+    // Safe to delete during Map iteration: the iterator tolerates removing the
+    // current/visited key (only concurrent insertion is problematic).
+    for (const [key, runtime] of this.chats) {
+      if (runtime.chatId !== chatId) continue;
+      runtime.shutdown();
+      this.chats.delete(key);
+    }
+  }
+
+  /**
+   * Drop every persisted ACP session for a chat, across all its topics
+   * (used on bind / unbind / rebind).
+   */
   private async clearChatSessions(chatId: string): Promise<void> {
     const sessions = await this.sessionStore.listByChat(chatId);
+    await Promise.all(sessions.map((s) => this.sessionStore.delete(chatId, s.sessionId)));
+  }
+
+  /**
+   * Drop the persisted ACP sessions for one topic only (used by the
+   * thread-scoped `/new`). Other topics in the same chat are untouched.
+   */
+  private async clearThreadSessions(chatId: string, threadId: string | null): Promise<void> {
+    const sessions = await this.sessionStore.listByThread(chatId, threadId);
     await Promise.all(sessions.map((s) => this.sessionStore.delete(chatId, s.sessionId)));
   }
 
   private evictIdle(): void {
     if (this.idleTimeoutMs <= 0) return;
     const now = Date.now();
-    for (const [chatId, runtime] of this.chats) {
+    for (const [key, runtime] of this.chats) {
       if (runtime.processing) continue;
       if (now - runtime.lastActivity <= this.idleTimeoutMs) continue;
-      this.logger.info({ chatId }, "evicting idle chat");
+      this.logger.info(
+        { chatId: runtime.chatId, threadId: runtime.threadId },
+        "evicting idle chat",
+      );
       runtime.shutdown();
-      this.chats.delete(chatId);
+      this.chats.delete(key);
     }
   }
 
   private evictOldest(): void {
-    let oldest: { chatId: string; lastActivity: number } | null = null;
-    for (const [chatId, runtime] of this.chats) {
+    let oldest: { key: string; lastActivity: number } | null = null;
+    for (const [key, runtime] of this.chats) {
       if (runtime.processing) continue;
       if (!oldest || runtime.lastActivity < oldest.lastActivity) {
-        oldest = { chatId, lastActivity: runtime.lastActivity };
+        oldest = { key, lastActivity: runtime.lastActivity };
       }
     }
     if (!oldest) return;
-    this.logger.info({ chatId: oldest.chatId }, "max concurrent chats reached — evicting oldest");
-    const runtime = this.chats.get(oldest.chatId);
+    const runtime = this.chats.get(oldest.key);
+    this.logger.info(
+      { chatId: runtime?.chatId, threadId: runtime?.threadId },
+      "max concurrent chats reached — evicting oldest",
+    );
     runtime?.shutdown();
-    this.chats.delete(oldest.chatId);
+    this.chats.delete(oldest.key);
   }
 }
 

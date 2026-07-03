@@ -89,6 +89,7 @@ export class LarkAcpClient implements acp.Client {
   private lastTypingAt = 0;
   private currentMessageId = "";
   private currentChatId = "";
+  private currentThreadId: string | null = null;
 
   private readonly pendingPermissions = new Map<string, PendingPermission>();
 
@@ -116,9 +117,10 @@ export class LarkAcpClient implements acp.Client {
   }
 
   /** Bind the current Lark message context so cards reply to the right message. */
-  setContext(messageId: string, chatId: string): void {
+  setContext(messageId: string, chatId: string, threadId: string | null): void {
     this.currentMessageId = messageId;
     this.currentChatId = chatId;
+    this.currentThreadId = threadId;
   }
 
   // ----- Permission flow --------------------------------------------------
@@ -157,7 +159,13 @@ export class LarkAcpClient implements acp.Client {
       }
 
       this.presenter
-        .sendInterruptCard(this.currentMessageId, params, requestId, this.currentChatId)
+        .sendInterruptCard(
+          this.currentMessageId,
+          params,
+          requestId,
+          this.currentChatId,
+          this.currentThreadId,
+        )
         .then((cardMessageId) => {
           const stillPending = this.pendingPermissions.get(requestId);
           if (stillPending) stillPending.cardMessageId = cardMessageId;
@@ -381,6 +389,7 @@ export class LarkAcpClient implements acp.Client {
         entries: this.timeline,
         cancellable: opts.cancellable && this.showCancelButton,
         chatId: this.currentChatId,
+        threadId: this.currentThreadId,
       };
 
       if (this.cardId) {

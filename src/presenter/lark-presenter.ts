@@ -82,6 +82,7 @@ function buildPermissionCard(
   params: acp.RequestPermissionRequest,
   requestId: string,
   chatId: string,
+  threadId: string | null,
 ): object {
   const toolTitle = params.toolCall?.title ?? "unknown";
   const toolKind = params.toolCall?.kind ?? "tool";
@@ -97,6 +98,10 @@ function buildPermissionCard(
         k: toolKind,
         t: toolTitle,
         c: chatId,
+        // Omit `th` for the main (non-topic) conversation so those cards stay
+        // byte-identical to the pre-topic payload; the bridge reads a missing
+        // `th` as null. Topic cards carry their thread id explicitly.
+        ...(threadId !== null ? { th: threadId } : {}),
       }),
     );
   }
@@ -195,7 +200,12 @@ function buildUnifiedCard(state: UnifiedCardState): object {
   if (state.cancellable) {
     elements.push({ tag: "hr" });
     elements.push(
-      buildCallbackButton(CANCEL_BUTTON_TEXT, "danger", { cancel: true, c: state.chatId }),
+      buildCallbackButton(CANCEL_BUTTON_TEXT, "danger", {
+        cancel: true,
+        c: state.chatId,
+        // See buildPermissionCard: `th` omitted for the main conversation.
+        ...(state.threadId !== null ? { th: state.threadId } : {}),
+      }),
     );
   }
 
@@ -241,8 +251,12 @@ export class LarkCardPresenter implements LarkPresenter {
     params: acp.RequestPermissionRequest,
     requestId: string,
     chatId: string,
+    threadId: string | null,
   ): Promise<string | null> {
-    return this.http.replyCard(messageId, buildPermissionCard(params, requestId, chatId));
+    return this.http.replyCard(
+      messageId,
+      buildPermissionCard(params, requestId, chatId, threadId),
+    );
   }
 
   async updatePermissionCard(

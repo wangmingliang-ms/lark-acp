@@ -19,6 +19,12 @@ export interface PendingMessage {
 
 export interface ChatRuntimeOptions {
   chatId: string;
+  /**
+   * Feishu topic (话题) this runtime serves, or `null` for the chat's "main"
+   * (non-topic) conversation. Each `(chatId, threadId)` pair gets its own
+   * runtime, agent subprocess, and ACP session.
+   */
+  threadId: string | null;
   agentCommand: string;
   agentArgs: string[];
   agentCwd: string;
@@ -71,11 +77,15 @@ export class ChatRuntime {
 
   constructor(opts: ChatRuntimeOptions) {
     this.opts = opts;
-    this.logger = opts.logger.child({ name: "chat", chatId: opts.chatId });
+    this.logger = opts.logger.child({ name: "chat", chatId: opts.chatId, threadId: opts.threadId });
   }
 
   get chatId(): string {
     return this.opts.chatId;
+  }
+
+  get threadId(): string | null {
+    return this.opts.threadId;
   }
 
   get processing(): boolean {
@@ -174,7 +184,7 @@ export class ChatRuntime {
       logger: this.logger,
     };
 
-    const latest = await this.opts.sessionStore.getLatest(this.opts.chatId);
+    const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
     let agent: AgentProcess;
     if (latest) {
       this.logger.info({ previousSessionId: latest.sessionId }, "attempting resume");
@@ -239,7 +249,7 @@ export class ChatRuntime {
           onTyping: () => this.opts.presenter.addReaction(pending.messageId).then(() => {}),
         });
 
-        state.client.setContext(pending.messageId, pending.chatId);
+        state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
 
         this.promptInFlight = true;
         try {
@@ -321,6 +331,7 @@ export class ChatRuntime {
     try {
       await this.opts.sessionStore.save({
         chatId: this.opts.chatId,
+        threadId: this.opts.threadId,
         sessionId,
         agentCommand: this.opts.agentCommand,
         agentArgs: this.opts.agentArgs,

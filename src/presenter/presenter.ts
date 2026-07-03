@@ -51,6 +51,10 @@ export interface UnifiedCardState {
   /** Chat id — embedded in the cancel button's action payload so the
    *  bridge can route the click back to the right runtime. */
   chatId: string;
+  /** Feishu topic (话题) id, or `null` for the chat's "main" conversation.
+   *  Embedded alongside {@link chatId} so a cancel click routes to the
+   *  right per-thread runtime. */
+  threadId: string | null;
 }
 
 /**
@@ -90,6 +94,7 @@ export interface LarkPresenter {
     params: acp.RequestPermissionRequest,
     requestId: string,
     chatId: string,
+    threadId: string | null,
   ): Promise<string | null>;
 
   /** Replace a permission card with a "resolved" confirmation. */
