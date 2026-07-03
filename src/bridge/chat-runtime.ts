@@ -6,6 +6,7 @@ import {
   spawnAgent,
   spawnAndResumeAgent,
   killAgent,
+  AgentDisconnectedError,
   type AgentProcess,
   type SpawnAgentOptions,
 } from "../acp/agent-process.js";
@@ -229,7 +230,8 @@ export class ChatRuntime {
 
     if (!messageId || exitedNormally) return;
 
-    const stderrSuffix = tail.length > 0 ? `\n\nstderr (最后 ${tail.length} 行):\n${tail.join("\n")}` : "";
+    const stderrSuffix =
+      tail.length > 0 ? `\n\nstderr (最后 ${tail.length} 行):\n${tail.join("\n")}` : "";
     const summary = `⚠️ Agent 进程意外退出 (code=${code ?? "null"}, signal=${signal ?? "null"})${stderrSuffix}`;
     this.opts.presenter
       .replyText(messageId, summary)
@@ -272,10 +274,7 @@ export class ChatRuntime {
 
     let result: Awaited<ReturnType<typeof state.agent.connection.prompt>>;
     try {
-      result = await state.agent.connection.prompt({
-        sessionId: state.agent.sessionId,
-        prompt: pending.prompt,
-      });
+      result = await this.promptOrDisconnect(state, pending);
     } finally {
       if (reactionId) {
         this.opts.presenter
@@ -289,6 +288,35 @@ export class ChatRuntime {
     await this.persistSession(state.agent.sessionId);
   }
 
+  /**
+   * Await the agent's prompt, but reject if the ACP connection closes first.
+   *
+   * The SDK never rejects a pending `prompt()` when the agent's stdio stream
+   * ends (it only aborts its close signal), so a bare `await prompt()` hangs
+   * forever if the agent dies mid-turn — leaving the unified card stuck in its
+   * "in progress" state with the cancel button showing. Racing
+   * `connection.closed` surfaces the death as an {@link AgentDisconnectedError}
+   * that {@link handlePromptError} turns into a finalised card + user notice.
+   *
+   * @throws {AgentDisconnectedError} when the connection closes before the
+   *         prompt resolves.
+   */
+  private async promptOrDisconnect(
+    state: ChatRuntimeState,
+    pending: PendingMessage,
+  ): Promise<Awaited<ReturnType<typeof state.agent.connection.prompt>>> {
+    const disconnected = state.agent.connection.closed.then(() => {
+      throw new AgentDisconnectedError();
+    });
+    return Promise.race([
+      state.agent.connection.prompt({
+        sessionId: state.agent.sessionId,
+        prompt: pending.prompt,
+      }),
+      disconnected,
+    ]);
+  }
+
   private async handlePromptError(
     state: ChatRuntimeState,
     pending: PendingMessage,
@@ -296,10 +324,13 @@ export class ChatRuntime {
   ): Promise<void> {
     const errMsg = formatAgentError(err);
     const isAuthError = isAuthenticationError(err);
+    const disconnected = err instanceof AgentDisconnectedError;
     const procDead = state.agent.process.killed || state.agent.process.exitCode !== null;
     const stderrTail = procDead ? state.agent.getRecentStderr() : [];
     const stderrSuffix =
-      stderrTail.length > 0 ? `\n\nstderr (最后 ${stderrTail.length} 行):\n${stderrTail.join("\n")}` : "";
+      stderrTail.length > 0
+        ? `\n\nstderr (最后 ${stderrTail.length} 行):\n${stderrTail.join("\n")}`
+        : "";
 
     // Always finalize the unified card as failed so the in-progress state
     // doesn't get stuck. Best-effort — if presenter rejects we still surface
@@ -308,12 +339,14 @@ export class ChatRuntime {
       .finalize("failed")
       .catch((finalErr) => this.logger.debug({ err: finalErr }, "finalize after error rejected"));
 
-    if (isAuthError || procDead) {
+    // A closed connection means the agent is gone even if the OS hasn't
+    // surfaced an exit code yet — tear it down so the next message respawns.
+    if (isAuthError || procDead || disconnected) {
       this.shutdown();
       const summary = isAuthError
         ? `⚠️ Agent authentication failed: ${errMsg}${stderrSuffix}`
         : `⚠️ Agent crashed: ${errMsg}${stderrSuffix}`;
-      this.logger.error({ err, isAuthError }, "agent died");
+      this.logger.error({ err, isAuthError, disconnected }, "agent died");
       await this.opts.presenter
         .replyText(pending.messageId, summary)
         .catch((sendErr) => this.logger.warn({ err: sendErr }, "error reply failed"));

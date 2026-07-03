@@ -77,6 +77,23 @@ export class AgentAuthError extends Error {
 }
 
 /**
+ * Thrown when the ACP connection to the agent closes while a request is still
+ * pending. The SDK leaves such requests (notably `prompt()`) hanging forever
+ * when the agent's stdio stream ends — it only aborts its close signal, never
+ * rejecting the in-flight promise. The bridge races `connection.closed`
+ * against `prompt()` and throws this so the normal prompt-error path can
+ * finalise the card and notify the user instead of hanging indefinitely.
+ */
+export class AgentDisconnectedError extends Error {
+  constructor(cause?: unknown) {
+    super("Agent connection closed before the prompt completed", {
+      ...(cause !== undefined ? { cause } : {}),
+    });
+    this.name = "AgentDisconnectedError";
+  }
+}
+
+/**
  * Detect an ACP "authentication required" rejection. codex-acp returns
  * JSON-RPC error code -32000 with message "Authentication required"; other
  * adapters phrase it differently, so match on both code and message text.
