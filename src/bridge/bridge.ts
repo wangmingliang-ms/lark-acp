@@ -27,6 +27,8 @@ const DEFAULT_SHOW_CANCEL_BUTTON = true;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
+/** Debounce for settings.json change events (fs.watch double-fires). */
+const SETTINGS_RELOAD_DEBOUNCE_MS = 300;
 
 const ORPHAN_CARD_REASON = "会话已结束，本次确认已失效";
 
@@ -194,6 +196,23 @@ export interface LarkBridgeOptions {
    */
   groupRequireMention?: boolean;
 
+  /**
+   * Working directory for chats that have no explicit or default binding —
+   * the "reception area". When set, an unbound chat spawns the default agent
+   * here so the user can converse (and ask the agent to bind the chat via
+   * natural language). When `null`, an unbound chat gets the old "please
+   * /bind" notice instead. Default `null` (caller usually passes the home dir).
+   */
+  unboundCwd?: string | null;
+
+  /**
+   * Absolute path to settings.json. Used for (a) hot-reloading bindings when
+   * the file changes (e.g. the agent edits it), and (b) telling the agent
+   * where to write bindings via the `LARK_ACP_SETTINGS` env var. When unset,
+   * hot-reload is disabled.
+   */
+  settingsPath?: string | null;
+
   sessionStore: SessionStore;
   /** Persistent per-chat repo + agent binding (one bot → many repos). */
   bindingStore: BindingStore;
@@ -225,6 +244,12 @@ interface EffectiveBinding {
   readonly label: string;
   /** `true` when it came from an explicit `/bind`, `false` for the default. */
   readonly explicit: boolean;
+  /**
+   * `true` when this is the ephemeral reception-area binding (default agent in
+   * `unboundCwd`) for a chat with no real binding. The bridge injects
+   * bind-instructions into such a runtime so the user can bind by talking.
+   */
+  readonly reception: boolean;
 }
 
 /**
@@ -255,12 +280,19 @@ export class LarkBridge {
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrentChats: number;
   private readonly groupRequireMention: boolean;
+  private readonly unboundCwd: string | null;
+  private readonly settingsPath: string | null;
   private readonly lark: LarkBridgeLarkOptions;
 
   private readonly chats = new Map<string, ChatRuntime>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private ws: LarkWsConnection | null = null;
   private started = false;
+  /** fs.watch handle for hot-reloading settings.json (null when disabled). */
+  private settingsWatcher: fs.FSWatcher | null = null;
+  private reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Snapshot of the last-applied bindings, for diffing on hot-reload. */
+  private bindingSignatures = new Map<string, string>();
 
   constructor(opts: LarkBridgeOptions) {
     this.lark = opts.lark;
@@ -291,6 +323,8 @@ export class LarkBridge {
     this.idleTimeoutMs = opts.session?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.maxConcurrentChats = opts.session?.maxConcurrentChats ?? DEFAULT_MAX_CONCURRENT_CHATS;
     this.groupRequireMention = opts.groupRequireMention ?? false;
+    this.unboundCwd = opts.unboundCwd ?? null;
+    this.settingsPath = opts.settingsPath ?? null;
   }
 
   /**
@@ -304,6 +338,12 @@ export class LarkBridge {
 
     await this.sessionStore.init();
     await this.bindingStore.init();
+
+    // Seed the binding signature snapshot, then watch settings.json so an
+    // external edit (e.g. the agent binding a chat) hot-reloads without a
+    // restart.
+    await this.snapshotBindings();
+    this.startSettingsWatcher();
 
     this.cleanupTimer = setInterval(() => this.evictIdle(), IDLE_CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
@@ -323,6 +363,11 @@ export class LarkBridge {
   async stop(): Promise<void> {
     this.logger.info("stopping bridge");
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
+    if (this.settingsWatcher) {
+      this.settingsWatcher.close();
+      this.settingsWatcher = null;
+    }
     for (const runtime of this.chats.values()) runtime.shutdown();
     this.chats.clear();
     await this.sessionStore.close();
@@ -563,7 +608,7 @@ export class LarkBridge {
   ): Promise<void> {
     const binding = await this.resolveBinding(chatId);
     if (!binding) {
-      this.logger.info({ chatId }, "message in unbound chat — prompting for /bind");
+      this.logger.info({ chatId }, "message in unbound chat — reception disabled, prompting /bind");
       await this.presenter.replyNoticeCard(messageId, {
         title: "尚未绑定仓库",
         body: "本会话还没有绑定仓库目录。请先发送：\n/bind <路径> [agent]\n\n例如：/bind ~/workspace/copilot-intellij claude\n查看用法：/bind",
@@ -581,6 +626,20 @@ export class LarkBridge {
     const context = isGroup
       ? `[上下文: 群聊 "${chatName}" (${chatId}) 中用户 ${userName} (${userId}) 的消息]`
       : `[上下文: 用户 ${userName} (${userId}) 的私聊消息]`;
+
+    // In the reception area, remind the agent (inline, every turn) that this
+    // chat is unbound and how to bind it — reinforces the AGENTS.md/CLAUDE.md
+    // dropped at spawn, in case the agent's harness ignores those files.
+    if (binding.reception) {
+      prompt.unshift({
+        type: "text",
+        text:
+          `[lark-acp: 本会话尚未绑定到具体仓库，当前运行在接待区。若用户要求绑定/切换到某个仓库，` +
+          `请按工作目录下 AGENTS.md 的说明，编辑 settings.json 的 bindings["${chatId}"] = ` +
+          `{ cwd, agent }（agent 可为 claude/codex/copilot/gemini/opencode，用户指定则从其指定）。` +
+          `保存后 lark-acp 会自动重新路由，无需重启。本会话 chatId: ${chatId}]`,
+      });
+    }
 
     prompt.unshift({ type: "text", text: context });
 
@@ -615,6 +674,7 @@ export class LarkBridge {
         ...(stored.agentEnv ? { env: stored.agentEnv } : {}),
         label: stored.agentLabel,
         explicit: true,
+        reception: false,
       };
     }
     if (this.defaultCwd && this.defaultAgent) {
@@ -625,6 +685,21 @@ export class LarkBridge {
         ...(this.defaultAgent.env ? { env: this.defaultAgent.env } : {}),
         label: this.defaultAgent.label,
         explicit: false,
+        reception: false,
+      };
+    }
+    // Reception area: no real binding, but if a reception cwd + default agent
+    // are configured, spawn the agent there so the user can converse and ask
+    // it to bind the chat by natural language.
+    if (this.unboundCwd && this.defaultAgent) {
+      return {
+        cwd: this.unboundCwd,
+        command: this.defaultAgent.command,
+        args: this.defaultAgent.args,
+        ...(this.defaultAgent.env ? { env: this.defaultAgent.env } : {}),
+        label: this.defaultAgent.label,
+        explicit: false,
+        reception: true,
       };
     }
     return null;
@@ -636,12 +711,18 @@ export class LarkBridge {
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
 
+    // Inject the chat id + settings path so the agent can bind this chat by
+    // editing settings.json. In the reception area also drop instruction files
+    // that explain how (the agent reads AGENTS.md / CLAUDE.md on start).
+    const injectedEnv = this.buildAgentEnv(chatId, binding);
+    if (binding.reception) this.writeBindInstructions(binding.cwd, chatId);
+
     const runtime = new ChatRuntime({
       chatId,
       agentCommand: binding.command,
       agentArgs: [...binding.args],
       agentCwd: binding.cwd,
-      ...(binding.env ? { agentEnv: { ...binding.env } } : {}),
+      ...(injectedEnv ? { agentEnv: injectedEnv } : {}),
       showThoughts: this.display.showThoughts,
       showTools: this.display.showTools,
       showCancelButton: this.display.showCancelButton,
@@ -653,6 +734,126 @@ export class LarkBridge {
     });
     this.chats.set(chatId, runtime);
     return runtime;
+  }
+
+  /**
+   * Compose the agent subprocess env: the binding's own env (if any) plus
+   * `LARK_ACP_CHAT_ID` and `LARK_ACP_SETTINGS` so the agent knows which chat
+   * it serves and where to persist a binding.
+   */
+  private buildAgentEnv(
+    chatId: string,
+    binding: EffectiveBinding,
+  ): Record<string, string> | undefined {
+    const base: Record<string, string> = { ...(binding.env ?? {}) };
+    base["LARK_ACP_CHAT_ID"] = chatId;
+    if (this.settingsPath) base["LARK_ACP_SETTINGS"] = this.settingsPath;
+    return Object.keys(base).length > 0 ? base : undefined;
+  }
+
+  /**
+   * Write `AGENTS.md` + `CLAUDE.md` into the reception cwd telling the agent
+   * how to bind this chat. Best-effort: a write failure just means the agent
+   * lacks the hint (it can still be told inline). Never throws.
+   */
+  private writeBindInstructions(cwd: string, chatId: string): void {
+    if (!this.settingsPath) return;
+    const doc = renderBindInstructions(chatId, this.settingsPath);
+    for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+      try {
+        fs.writeFileSync(path.join(cwd, name), doc, "utf-8");
+      } catch (err) {
+        this.logger.warn({ err, cwd, name }, "failed to write bind instructions");
+      }
+    }
+  }
+
+  // ----- Hot-reload of settings.json bindings -----------------------------
+
+  /**
+   * Snapshot the current bindings into `bindingSignatures` (chatId ->
+   * "cwd|label"). Used as the baseline the watcher diffs against.
+   */
+  private async snapshotBindings(): Promise<void> {
+    this.bindingSignatures.clear();
+    const all = await this.bindingStore.list();
+    for (const b of all) {
+      this.bindingSignatures.set(b.chatId, `${b.cwd}|${b.agentLabel}`);
+    }
+  }
+
+  /**
+   * Watch settings.json for external edits (the agent binding a chat, or a
+   * hand edit) and hot-reload. Disabled when no settings path is configured.
+   * Debounced because fs.watch double-fires; tolerant of transient read
+   * failures (a half-written file yields no changes, retried on the next event).
+   */
+  private startSettingsWatcher(): void {
+    if (!this.settingsPath) return;
+    const target = this.settingsPath;
+    try {
+      // Watch the directory, not the file: editors/atomic renames replace the
+      // inode, which breaks a file-level watch. Filter to the settings file.
+      const dir = path.dirname(target);
+      const base = path.basename(target);
+      this.settingsWatcher = fs.watch(dir, (_event, filename) => {
+        if (filename && filename !== base) return;
+        this.scheduleReload();
+      });
+      this.logger.info({ settings: target }, "watching settings.json for binding changes");
+    } catch (err) {
+      this.logger.warn({ err, settings: target }, "could not watch settings.json — hot-reload off");
+    }
+  }
+
+  private scheduleReload(): void {
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
+    this.reloadTimer = setTimeout(() => {
+      this.reloadTimer = null;
+      this.reloadBindings().catch((err) => this.logger.error({ err }, "binding hot-reload failed"));
+    }, SETTINGS_RELOAD_DEBOUNCE_MS);
+  }
+
+  /**
+   * Re-read bindings and apply any adds/changes/removals. A changed or removed
+   * binding tears down that chat's live runtime so the next message respawns
+   * in the new cwd (or the reception area). Other chats + the WS are untouched.
+   */
+  private async reloadBindings(): Promise<void> {
+    // Skip transient corruption: if the store can tell us the settings file is
+    // mid-write / unparseable, wait for the next event rather than mistaking a
+    // half-written file for "all bindings removed" and tearing down every chat.
+    const store = this.bindingStore as { isReadable?: () => boolean };
+    if (typeof store.isReadable === "function" && !store.isReadable()) {
+      this.logger.debug("settings.json not readable yet — deferring hot-reload");
+      return;
+    }
+
+    const all = await this.bindingStore.list();
+    const next = new Map<string, string>();
+    for (const b of all) next.set(b.chatId, `${b.cwd}|${b.agentLabel}`);
+
+    const affected: string[] = [];
+    // Added or changed.
+    for (const [chatId, sig] of next) {
+      if (this.bindingSignatures.get(chatId) !== sig) affected.push(chatId);
+    }
+    // Removed.
+    for (const chatId of this.bindingSignatures.keys()) {
+      if (!next.has(chatId)) affected.push(chatId);
+    }
+
+    if (affected.length === 0) return;
+
+    this.bindingSignatures = next;
+    for (const chatId of affected) {
+      const hadRuntime = this.chats.has(chatId);
+      this.teardownChat(chatId);
+      this.logger.info(
+        { chatId, rebound: next.has(chatId), hadRuntime },
+        "binding changed — chat runtime reset",
+      );
+    }
   }
 
   private handleCardAction(event: Lark.CardActionEvent): void {
@@ -754,6 +955,51 @@ export class LarkBridge {
     runtime?.shutdown();
     this.chats.delete(oldest.chatId);
   }
+}
+
+/**
+ * Render the bind-instruction doc dropped into the reception cwd. It tells the
+ * agent how to bind THIS chat to a repo by editing settings.json — including
+ * that it may pick any agent (claude / codex / copilot / gemini / opencode).
+ */
+function renderBindInstructions(chatId: string, settingsPath: string): string {
+  return [
+    "# lark-acp — how to bind this chat to a repository",
+    "",
+    "You are running as a lark-acp agent for a Feishu/Lark chat. This chat is",
+    "**not yet bound** to a project directory, so you are running in a reception",
+    "area. When the user asks to work on / bind to a specific repository, do the",
+    "following:",
+    "",
+    "1. Determine the absolute path of the repository they mean (ask if unsure).",
+    '2. Determine which agent to use. If they name one (e.g. "use claude",',
+    '   "用 codex"), honour it. Valid agents: `claude`, `codex`, `copilot`,',
+    "   `gemini`, `opencode`, `claude-agent`. If they don't say, use `claude`.",
+    "3. Edit the JSON file at:",
+    `   ${settingsPath}`,
+    "   Add (or update) an entry under the top-level `bindings` object keyed by",
+    "   this chat's id. Preserve all other keys in the file.",
+    "",
+    "```json",
+    "{",
+    '  "bindings": {',
+    `    "${chatId}": { "cwd": "/absolute/path/to/repo", "agent": "claude" }`,
+    "  }",
+    "}",
+    "```",
+    "",
+    `This chat's id is: ${chatId}`,
+    "(also available in the env var LARK_ACP_CHAT_ID; the settings file path is",
+    "in LARK_ACP_SETTINGS.)",
+    "",
+    "After you save the file, lark-acp detects the change and re-routes this chat",
+    "to the bound repository automatically — the user's next message will run",
+    "there. Tell the user the binding is done and which repo + agent you set.",
+    "",
+    "Do not delete other chats' bindings or other top-level keys (credentials,",
+    "runtime, agents).",
+    "",
+  ].join("\n");
 }
 
 /**

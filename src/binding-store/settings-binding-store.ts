@@ -80,6 +80,23 @@ export class SettingsBindingStore implements BindingStore {
     return Object.entries(stored).map(([chatId, b]) => this.hydrate(chatId, b));
   }
 
+  /**
+   * Whether settings.json is currently readable as JSON. Returns `true` when
+   * the file is absent (a legitimately empty state) or parses cleanly; `false`
+   * only when the file exists but is malformed (e.g. an agent is mid-write).
+   * Callers that diff bindings (hot-reload) use this to skip a transient bad
+   * read instead of mistaking it for "all bindings removed".
+   */
+  isReadable(): boolean {
+    if (!fs.existsSync(this.settingsPath)) return true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.settingsPath, "utf-8")) as unknown;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+    } catch {
+      return false;
+    }
+  }
+
   // ----- internals --------------------------------------------------------
 
   /** Turn a `{ cwd, agent }` entry into a full ChatBinding via the resolver. */

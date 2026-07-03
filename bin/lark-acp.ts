@@ -187,6 +187,7 @@ type FileRuntime = {
   readonly hideCancelButton?: boolean;
   readonly permissionMode?: PermissionMode;
   readonly groupRequireMention?: boolean;
+  readonly unboundCwd?: string;
 };
 
 type FileConfig = {
@@ -313,6 +314,7 @@ function readConfigFile(filePath: string): FileConfig {
     ...optBoolField("runtime.hideTools", runtimeObj["hideTools"]),
     ...optBoolField("runtime.hideCancelButton", runtimeObj["hideCancelButton"]),
     ...optBoolField("runtime.groupRequireMention", runtimeObj["groupRequireMention"]),
+    ...optStringField("runtime.unboundCwd", runtimeObj["unboundCwd"]),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
   };
 
@@ -438,6 +440,7 @@ type ParsedArgs = {
   readonly configPath?: string;
   readonly dataDir?: string;
   readonly home?: string;
+  readonly unboundCwd?: string;
   readonly idleTimeoutMinutes?: number;
   readonly maxChats?: number;
   readonly hideThoughts?: boolean;
@@ -465,6 +468,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   let configPath: string | undefined;
   let dataDir: string | undefined;
   let home: string | undefined;
+  let unboundCwd: string | undefined;
   let idleTimeoutMinutes: number | undefined;
   let maxChats: number | undefined;
   let hideThoughts: boolean | undefined;
@@ -518,6 +522,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--home":
         home = takeValue("--home");
+        break;
+      case "--unbound-cwd":
+        unboundCwd = takeValue("--unbound-cwd");
         break;
       case "--data-dir":
         dataDir = takeValue("--data-dir");
@@ -621,6 +628,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(configPath !== undefined ? { configPath } : {}),
       ...(dataDir !== undefined ? { dataDir } : {}),
       ...(home !== undefined ? { home } : {}),
+      ...(unboundCwd !== undefined ? { unboundCwd } : {}),
       ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
       ...(maxChats !== undefined ? { maxChats } : {}),
       ...(hideThoughts !== undefined ? { hideThoughts } : {}),
@@ -648,6 +656,8 @@ type EffectiveConfig = {
   readonly showCancelButton: boolean;
   readonly permissionMode: PermissionMode;
   readonly groupRequireMention: boolean;
+  /** Reception-area cwd for unbound chats (default = home dir; null disables). */
+  readonly unboundCwd: string | null;
 };
 
 /**
@@ -721,6 +731,19 @@ function resolveConfig(
   const hideCancelButton = args.hideCancelButton ?? file.runtime.hideCancelButton ?? false;
   const groupRequireMention = args.groupRequireMention ?? file.runtime.groupRequireMention ?? false;
 
+  // Reception area: default ON, cwd = home dir. Precedence: --unbound-cwd flag
+  // > runtime.unboundCwd > home dir. An explicit empty string disables it
+  // (restores the old "please /bind" notice for unbound chats).
+  const rawUnbound = args.unboundCwd ?? file.runtime.unboundCwd;
+  const expandTilde = (p: string): string =>
+    p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
+  const unboundCwd =
+    rawUnbound === undefined
+      ? homeDir
+      : rawUnbound === ""
+        ? null
+        : path.resolve(expandTilde(rawUnbound));
+
   const envPermissionMode = process.env[ENV_PERMISSION_MODE];
   if (envPermissionMode !== undefined && !isPermissionMode(envPermissionMode)) {
     throw new CliError(
@@ -746,6 +769,7 @@ function resolveConfig(
     showCancelButton: !hideCancelButton,
     permissionMode,
     groupRequireMention,
+    unboundCwd,
   };
 }
 
@@ -776,6 +800,10 @@ function printHelp(): void {
     `  --cwd <dir>            DEFAULT working directory for chats with no`,
     `                         explicit /bind. Optional — when omitted, each`,
     `                         chat must bind its own repo via /bind first.`,
+    `  --unbound-cwd <dir>    Reception-area dir for unbound chats — the agent`,
+    `                         runs here so you can bind by natural language`,
+    `                         ("bind me to X using codex"). Default: the home`,
+    `                         dir. Pass "" to disable (reply a /bind notice).`,
     `  --home <dir>           lark-acp home directory holding settings.json,`,
     `                         sessions, logs. (default: $LARK_ACP_HOME, else`,
     `                         ~/.lark-acp). Created on startup if missing.`,
@@ -965,6 +993,9 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   cliLogger.info(
     `group msgs:  ${cfg.groupRequireMention ? "@-mention required" : "respond to all"}`,
   );
+  cliLogger.info(
+    `unbound:     ${cfg.unboundCwd ? `reception area @ ${cfg.unboundCwd}` : "off (reply /bind notice)"}`,
+  );
 
   const sessionStore = new FileSessionStore(cfg.dataDir);
   // Bindings live in settings.json's `bindings` block (one file for all
@@ -996,6 +1027,8 @@ async function runProxy(args: ParsedArgs): Promise<void> {
       maxConcurrentChats: cfg.maxChats,
     },
     groupRequireMention: cfg.groupRequireMention,
+    unboundCwd: cfg.unboundCwd,
+    settingsPath: configPath,
     sessionStore,
     bindingStore,
     logger: rootLogger,
