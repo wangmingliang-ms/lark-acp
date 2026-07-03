@@ -24,11 +24,11 @@
 ### 安装与运行
 
 ```bash
-# 方式一：npx，免安装直接跑（每次拉取最新发布版）
-npx -y lark-acp --help
+# 方式一：npx，从 GitHub 免安装直接跑
+npx -y "github:wangmingliang-ms/lark-acp" --help
 
-# 方式二：全局安装，得到 `lark-acp` 命令
-npm i -g lark-acp
+# 方式二：从 GitHub 安装（推荐，见下方「从 GitHub 安装」）
+#   注意：npm 上的 lark-acp 名称已被无关的包占用，`npm i -g lark-acp` 会装错东西。
 lark-acp --help
 
 # 方式三：在仓库内本地构建（开发 / 想用未发布的改动）
@@ -40,6 +40,38 @@ node dist/bin/lark-acp.js --help
 > **本地开发建议 `npm link`**：在仓库根执行一次 `npm link`，就把全局 `lark-acp`
 > 软链到本仓库的 `dist/`。之后改了代码只需 `npm run build`（无需重新 link）即可
 > 生效，配合下文的 `lark-acp restart` 快速迭代。撤销：`npm rm -g lark-acp`。
+
+### 从 GitHub 安装
+
+npm 官方仓库上的 `lark-acp` 名称已被无关的包占用，直接 `npm i -g lark-acp` 会装错东西。
+推荐用下面的脚本直接从本仓库安装（内部走 `npm i -g git+…`，借助 `prepare` 钩子自动编译）：
+
+**Linux / macOS / WSL：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wangmingliang-ms/lark-acp/main/install.sh | sh
+```
+
+**Windows PowerShell：**
+
+```powershell
+irm https://raw.githubusercontent.com/wangmingliang-ms/lark-acp/main/install.ps1 | iex
+```
+
+可用环境变量覆盖来源仓库与分支/标签：
+
+```bash
+LARK_ACP_REF=v0.2.0 sh install.sh          # 装某个 tag
+LARK_ACP_REPO=4t145/lark-acp sh install.sh # 装上游仓库
+```
+
+卸载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wangmingliang-ms/lark-acp/main/uninstall.sh | sh
+# Windows：irm https://raw.githubusercontent.com/wangmingliang-ms/lark-acp/main/uninstall.ps1 | iex
+# 或直接：npm rm -g lark-acp
+```
 
 ### 命令格式
 
