@@ -4,5 +4,5 @@ export type {
   LarkAcpClientCallbacks,
   PermissionMode,
 } from "./lark-acp-client.js";
-export { spawnAgent, spawnAndResumeAgent, killAgent } from "./agent-process.js";
+export { spawnAgent, spawnAndResumeAgent, killAgent, AgentAuthError } from "./agent-process.js";
 export type { AgentProcess, SpawnAgentOptions } from "./agent-process.js";

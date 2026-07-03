@@ -25,6 +25,59 @@ export interface SpawnAgentOptions {
   logger: LarkLogger;
 }
 
+/**
+ * Thrown when an agent rejects session creation because it is not
+ * authenticated (e.g. Codex without ChatGPT login / OPENAI_API_KEY). Carries
+ * the agent label so the bridge can show the user an actionable message
+ * instead of an opaque "failed to create session".
+ */
+export class AgentAuthError extends Error {
+  readonly agentLabel: string;
+  readonly authHint: string;
+  constructor(agentLabel: string, authHint: string, cause?: unknown) {
+    super(`${agentLabel} 未认证：${authHint}`, cause !== undefined ? { cause } : undefined);
+    this.name = "AgentAuthError";
+    this.agentLabel = agentLabel;
+    this.authHint = authHint;
+  }
+}
+
+/**
+ * Detect an ACP "authentication required" rejection. codex-acp returns
+ * JSON-RPC error code -32000 with message "Authentication required"; other
+ * adapters phrase it differently, so match on both code and message text.
+ */
+function isAuthError(err: unknown): boolean {
+  const e = err as { code?: number; message?: string } | undefined;
+  const code = e?.code;
+  const msg = String(e?.message ?? err ?? "").toLowerCase();
+  return (
+    code === -32000 ||
+    msg.includes("authentication required") ||
+    msg.includes("not authenticated") ||
+    msg.includes("unauthorized") ||
+    msg.includes("login required")
+  );
+}
+
+/**
+ * Per-agent hint on how to authenticate, keyed by the agent command. Best
+ * effort — falls back to a generic message.
+ */
+function authHintFor(command: string, args: readonly string[]): string {
+  const joined = `${command} ${args.join(" ")}`.toLowerCase();
+  if (joined.includes("codex")) {
+    return "请先认证 Codex：设置 OPENAI_API_KEY 或 CODEX_API_KEY 环境变量，或运行 `codex login`（需 ChatGPT 订阅），然后重发消息。";
+  }
+  if (joined.includes("gemini")) {
+    return "请先认证 Gemini：设置 GEMINI_API_KEY 环境变量或完成 gemini 登录，然后重发消息。";
+  }
+  if (joined.includes("claude")) {
+    return "请先认证 Claude：完成 claude 登录或设置对应 API key，然后重发消息。";
+  }
+  return "该 agent 需要认证。请完成其登录或设置对应 API key 后重发消息。";
+}
+
 interface SpawnInternal {
   proc: ChildProcess;
   connection: acp.ClientSideConnection;
@@ -46,6 +99,9 @@ export async function spawnAgent(opts: SpawnAgentOptions): Promise<AgentProcess>
   try {
     sessionResult = await connection.newSession({ cwd: opts.cwd, mcpServers: [] });
   } catch (err) {
+    if (isAuthError(err)) {
+      throw new AgentAuthError(opts.command, authHintFor(opts.command, opts.args), err);
+    }
     throw new Error("Failed to create agent session", { cause: err });
   }
   opts.logger.info({ sessionId: sessionResult.sessionId }, "agent session created");
@@ -118,6 +174,9 @@ export async function spawnAndResumeAgent(
   try {
     sessionResult = await connection.newSession({ cwd: opts.cwd, mcpServers: [] });
   } catch (err) {
+    if (isAuthError(err)) {
+      throw new AgentAuthError(opts.command, authHintFor(opts.command, opts.args), err);
+    }
     throw new Error("Failed to create agent session after resume failure", { cause: err });
   }
   opts.logger.info({ sessionId: sessionResult.sessionId }, "fresh session created");

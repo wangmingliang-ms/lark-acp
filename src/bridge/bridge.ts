@@ -14,6 +14,7 @@ import {
 } from "../interpreter/lark-interpreter.js";
 import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
 import type { PermissionMode } from "../acp/lark-acp-client.js";
+import { AgentAuthError } from "../acp/agent-process.js";
 import type { NoticeCardSpec } from "../presenter/presenter.js";
 import type { SessionStore } from "../session-store/session-store.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
@@ -86,8 +87,12 @@ class BindError extends Error {
 }
 
 function formatBootstrapError(err: unknown): string {
+  // Auth failures get a clean, actionable message — no confusing internal
+  // "failed to create session" chain.
+  if (err instanceof AgentAuthError) return `🔑 ${err.message}`;
   if (!(err instanceof Error)) return String(err);
   const cause = err.cause;
+  if (cause instanceof AgentAuthError) return `🔑 ${cause.message}`;
   if (cause instanceof Error && cause.message) return `${err.message}\n→ ${cause.message}`;
   return err.message;
 }
@@ -849,6 +854,14 @@ export class LarkBridge {
     for (const chatId of affected) {
       const hadRuntime = this.chats.has(chatId);
       this.teardownChat(chatId);
+      // The chat's persisted ACP sessions belonged to the *previous* binding
+      // (often the reception-area agent). A new binding means a different cwd
+      // and possibly a different agent binary, so resuming those sessions
+      // would fail. Drop them: the next message starts a fresh session in the
+      // newly-bound repo.
+      await this.clearChatSessions(chatId).catch((err) =>
+        this.logger.warn({ err, chatId }, "failed to clear sessions on rebind"),
+      );
       this.logger.info(
         { chatId, rebound: next.has(chatId), hadRuntime },
         "binding changed — chat runtime reset",
