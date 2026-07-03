@@ -2,6 +2,19 @@
 
 Date: 2026-07-03
 
+> **Revision (2026-07-03, post-implementation):** The original mechanism below —
+> `npm i -g git+https://…`, relying on npm's `prepare` hook to build — was found
+> during live end-to-end testing to fail on npm 11.12.1. npm runs the git
+> dependency's `prepare` build inside a sandbox whose `node_modules/.bin/tsc` is
+> not executable, so the build dies with `tsc: Permission denied` (exit 127).
+> This reproduced 100% of the time and was independent of npm cache state, umask,
+> and prepare flags; a manual `git clone` + `npm install` + `npm run build`
+> always succeeded. The install scripts were therefore changed to **clone into a
+> temp dir → `npm install` → `npm run build` → `npm install -g --install-links .`
+> → clean up the temp dir**. `--install-links` is required so npm copies the
+> package instead of symlinking it into the soon-deleted temp dir. Sections below
+> describe the original design; the clone+build mechanism is the shipped one.
+
 ## Problem
 
 Users want a one-liner to install the `lark-acp` CLI directly from the GitHub
@@ -35,10 +48,10 @@ TypeScript sources compile and the `lark-acp` bin is linked with no extra steps.
 
 Defaults baked to the fork, overridable via environment variables:
 
-| Variable         | Default                        | Meaning                          |
-| ---------------- | ------------------------------ | -------------------------------- |
-| `LARK_ACP_REPO`  | `wangmingliang-ms/lark-acp`    | GitHub `owner/repo` to install   |
-| `LARK_ACP_REF`   | `main`                         | git ref (branch / tag / commit)  |
+| Variable        | Default                     | Meaning                         |
+| --------------- | --------------------------- | ------------------------------- |
+| `LARK_ACP_REPO` | `wangmingliang-ms/lark-acp` | GitHub `owner/repo` to install  |
+| `LARK_ACP_REF`  | `main`                      | git ref (branch / tag / commit) |
 
 Install target URL:
 `git+https://github.com/${LARK_ACP_REPO}.git#${LARK_ACP_REF}`

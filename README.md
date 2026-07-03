@@ -44,7 +44,8 @@ node dist/bin/lark-acp.js --help
 ### 从 GitHub 安装
 
 npm 官方仓库上的 `lark-acp` 名称已被无关的包占用，直接 `npm i -g lark-acp` 会装错东西。
-推荐用下面的脚本直接从本仓库安装（内部走 `npm i -g git+…`，借助 `prepare` 钩子自动编译）：
+推荐用下面的脚本直接从本仓库安装（脚本会克隆到临时目录、`npm install` 并 `npm run build`，再
+`npm install -g --install-links` 安装成全局命令，最后清理临时目录）：
 
 **Linux / macOS / WSL：**
 
