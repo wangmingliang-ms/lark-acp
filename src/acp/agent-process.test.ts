@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentAuthError } from "./agent-process.js";
+import { AgentAuthError, sanitizeChildEnv } from "./agent-process.js";
 
 describe("AgentAuthError", () => {
   it("builds an actionable message carrying label + hint", () => {
@@ -15,5 +15,52 @@ describe("AgentAuthError", () => {
     const cause = { code: -32000, message: "Authentication required" };
     const err = new AgentAuthError("codex", "hint", cause);
     expect(err.cause).toBe(cause);
+  });
+});
+
+describe("sanitizeChildEnv", () => {
+  it("strips CLAUDECODE so a nested claude session guard does not trip", () => {
+    const result = sanitizeChildEnv({ CLAUDECODE: "1", PATH: "/usr/bin" });
+    expect(result).not.toHaveProperty("CLAUDECODE");
+    expect(result.PATH).toBe("/usr/bin");
+  });
+
+  it("strips the whole CLAUDE_CODE_* family", () => {
+    const result = sanitizeChildEnv({
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CLAUDE_CODE_SESSION_ID: "abc",
+      CLAUDE_CODE_SSE_PORT: "1234",
+    });
+    expect(Object.keys(result)).toHaveLength(0);
+  });
+
+  it("preserves unrelated CLAUDE_* vars such as credentials/config", () => {
+    const result = sanitizeChildEnv({
+      CLAUDE_CONFIG_DIR: "/home/u/.claude",
+      ANTHROPIC_API_KEY: "sk-test",
+      CLAUDECODE: "1",
+    });
+    expect(result.CLAUDE_CONFIG_DIR).toBe("/home/u/.claude");
+    expect(result.ANTHROPIC_API_KEY).toBe("sk-test");
+    expect(result).not.toHaveProperty("CLAUDECODE");
+  });
+
+  it("lets an explicit override re-add a stripped var (caller intent wins)", () => {
+    const result = sanitizeChildEnv({ CLAUDECODE: "1" }, { CLAUDECODE: "keep" });
+    expect(result.CLAUDECODE).toBe("keep");
+  });
+
+  it("applies overrides on top of the base env", () => {
+    const result = sanitizeChildEnv({ PATH: "/usr/bin" }, { EXTRA: "x" });
+    expect(result.PATH).toBe("/usr/bin");
+    expect(result.EXTRA).toBe("x");
+  });
+
+  it("does not mutate the inputs", () => {
+    const base = { CLAUDECODE: "1", PATH: "/usr/bin" };
+    const overrides = { EXTRA: "x" };
+    sanitizeChildEnv(base, overrides);
+    expect(base).toEqual({ CLAUDECODE: "1", PATH: "/usr/bin" });
+    expect(overrides).toEqual({ EXTRA: "x" });
   });
 });

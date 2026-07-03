@@ -7,6 +7,40 @@ const STDIO_PIPED: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"];
 const WIN32_PLATFORM = "win32";
 const STDERR_BUFFER_LINES = 50;
 
+/**
+ * Environment variables Claude Code sets for its own child processes. The
+ * `claude` CLI refuses to launch nested inside another Claude Code session
+ * (it aborts with "Claude Code cannot be launched inside another Claude Code
+ * session"), which makes `session/new` fail with "Query closed before response
+ * received". When the bridge itself is started from within a Claude Code
+ * session, these leak into every spawned agent — so strip them before spawn.
+ *
+ * `CLAUDECODE` is the exact flag the guard checks; the `CLAUDE_CODE_*` family is
+ * stripped too so related nesting/session checks cannot trip. Unrelated
+ * `CLAUDE_*` / `ANTHROPIC_*` vars (config dir, API keys) are deliberately kept.
+ */
+const NESTED_SESSION_ENV_EXACT = "CLAUDECODE";
+const NESTED_SESSION_ENV_PREFIX = "CLAUDE_CODE_";
+
+/**
+ * Build the environment for a spawned agent: start from `base` (normally
+ * `process.env`), drop the Claude Code nested-session markers, then apply
+ * `overrides` on top so an explicit caller value always wins. Pure — never
+ * mutates its arguments.
+ */
+export function sanitizeChildEnv(
+  base: NodeJS.ProcessEnv,
+  overrides: Record<string, string> = {},
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (value === undefined) continue;
+    if (key === NESTED_SESSION_ENV_EXACT || key.startsWith(NESTED_SESSION_ENV_PREFIX)) continue;
+    result[key] = value;
+  }
+  return { ...result, ...overrides };
+}
+
 export interface AgentProcess {
   process: ChildProcess;
   connection: acp.ClientSideConnection;
@@ -200,7 +234,7 @@ async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {
 
   const proc = spawn(command, args, {
     cwd,
-    env: { ...process.env, ...(env ?? {}) },
+    env: sanitizeChildEnv(process.env, env ?? {}),
     stdio: STDIO_PIPED,
     shell: process.platform === WIN32_PLATFORM,
   });
