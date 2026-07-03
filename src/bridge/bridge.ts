@@ -405,18 +405,6 @@ export class LarkBridge {
   // ----- WS event handlers ------------------------------------------------
 
   private handleMessage(event: Lark.RawMessageEvent): void {
-    // TEMP(thread-probe): dump the full raw inbound event so we can inspect
-    // Feishu's topic/thread fields (thread_id / root_id / parent_id) from a
-    // real message. Logged AND appended to a file the agent can read back.
-    // Remove once the thread→session design is settled.
-    this.logger.info({ rawEvent: event }, "thread-probe: raw inbound message event");
-    try {
-      const line = `${JSON.stringify({ at: new Date().toISOString(), event })}\n`;
-      fs.appendFileSync("/tmp/lark-acp-thread-probe.jsonl", line, "utf-8");
-    } catch (err) {
-      this.logger.warn({ err }, "thread-probe: failed to append probe file");
-    }
-
     const { message, sender } = event;
     if (sender.sender_type !== SENDER_TYPE_USER) return;
 
