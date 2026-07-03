@@ -27,6 +27,7 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import {
   LarkBridge,
   FileSessionStore,
@@ -41,6 +42,15 @@ import type {
   ResolvedAgentInvocation,
 } from "../src/index.js";
 import { buildRegistry, resolveAgent, type Registry, type UserPresetPatch } from "./agents.js";
+import {
+  startBridge,
+  stopBridge,
+  statusBridge,
+  tailLog,
+  rewriteSubcommand,
+  ProcessControlError,
+  DEFAULT_LOG_LINES,
+} from "./process-control.js";
 
 // Resolved from dist/bin/lark-acp.js, so the package.json sits two levels up.
 const { version: VERSION } = createRequire(import.meta.url)("../../package.json") as {
@@ -429,7 +439,8 @@ function optNumberField(
 // ---------- argv parsing --------------------------------------------------
 
 type ParsedArgs = {
-  readonly command: "proxy" | "agents" | "help" | "version";
+  readonly command:
+    "proxy" | "agents" | "help" | "version" | "start" | "stop" | "restart" | "status" | "logs";
   /** Preset id (`--agent <id>`); resolved against the registry in {@link runProxy}. */
   readonly agentPreset?: string;
   /** Raw command from `proxy -- <cmd>`; mutually exclusive with `agentPreset`. */
@@ -448,6 +459,17 @@ type ParsedArgs = {
   readonly hideCancelButton?: boolean;
   readonly permissionMode?: PermissionMode;
   readonly groupRequireMention?: boolean;
+  /**
+   * Full argv (as received) plus the index of the management subcommand token,
+   * set only for `start` / `restart`. The handler swaps that token to `proxy`
+   * and spawns it in the background — forwarding all options verbatim.
+   */
+  readonly rawArgv?: readonly string[];
+  readonly subcommandIndex?: number;
+  /** `logs --follow` / `-f`. */
+  readonly logsFollow?: boolean;
+  /** `logs -n <N>` — number of trailing lines. */
+  readonly logsLines?: number;
 };
 
 const HELP_FLAGS = new Set(["-h", "--help"]);
@@ -512,6 +534,16 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (token === "agents") return finalize("agents");
     if (token === "help") return finalize("help");
     if (token === "version") return finalize("version");
+    // Process-management subcommands. `start`/`restart` capture the full argv +
+    // this token's index so the handler can re-launch it as `proxy …` in the
+    // background, forwarding every option verbatim.
+    if (token === "start")
+      return finalize("start", undefined, [], { rawArgv: argv, subcommandIndex: i });
+    if (token === "restart")
+      return finalize("restart", undefined, [], { rawArgv: argv, subcommandIndex: i });
+    if (token === "stop") return finalize("stop");
+    if (token === "status") return finalize("status");
+    if (token === "logs") return finalize("logs", undefined, [], parseLogsFlags(argv, i + 1));
 
     switch (token) {
       case "--cwd":
@@ -618,6 +650,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     command: ParsedArgs["command"],
     agentRawCmd?: string,
     agentExtraList: readonly string[] = [],
+    extra: {
+      readonly rawArgv?: readonly string[];
+      readonly subcommandIndex?: number;
+      readonly logsFollow?: boolean;
+      readonly logsLines?: number;
+    } = {},
   ): ParsedArgs {
     return {
       command,
@@ -636,8 +674,47 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(hideCancelButton !== undefined ? { hideCancelButton } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),
       ...(groupRequireMention !== undefined ? { groupRequireMention } : {}),
+      ...(extra.rawArgv !== undefined ? { rawArgv: extra.rawArgv } : {}),
+      ...(extra.subcommandIndex !== undefined ? { subcommandIndex: extra.subcommandIndex } : {}),
+      ...(extra.logsFollow !== undefined ? { logsFollow: extra.logsFollow } : {}),
+      ...(extra.logsLines !== undefined ? { logsLines: extra.logsLines } : {}),
     };
   }
+}
+
+/**
+ * Parse the trailing tokens of `logs` (`-f`/`--follow`, `-n <N>`) starting at
+ * `start`. Unknown tokens are ignored so `logs` stays forgiving.
+ *
+ * @throws {CliError} when `-n` is missing or not a positive integer.
+ */
+function parseLogsFlags(
+  argv: readonly string[],
+  start: number,
+): { readonly logsFollow: boolean; readonly logsLines: number } {
+  let follow = false;
+  let lines = DEFAULT_LOG_LINES;
+  let i = start;
+  while (i < argv.length) {
+    const token = argv[i];
+    if (token === "-f" || token === "--follow") {
+      follow = true;
+      i++;
+      continue;
+    }
+    if (token === "-n" || token === "--lines") {
+      const raw = argv[i + 1];
+      const n = raw === undefined ? NaN : Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliError(`${token} requires a positive integer (got: ${raw ?? "<none>"})`);
+      }
+      lines = n;
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  return { logsFollow: follow, logsLines: lines };
 }
 
 // ---------- effective config ---------------------------------------------
@@ -792,6 +869,9 @@ function printHelp(): void {
     `Usage:`,
     `  ${APP_NAME} [global-options] proxy --agent <preset> [-- <extra-args>...]`,
     `  ${APP_NAME} [global-options] proxy -- <agent-cmd> [agent-args]...`,
+    `  ${APP_NAME} [global-options] start --agent <preset>   (run proxy in background)`,
+    `  ${APP_NAME} [global-options] stop | restart | status`,
+    `  ${APP_NAME} logs [-f] [-n <lines>]`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
     `  ${APP_NAME} version`,
@@ -830,6 +910,16 @@ function printHelp(): void {
     `                         preset's args.`,
     `  agents                 List built-in agent presets and exit.`,
     ``,
+    `Process management (run the bridge in the background; cross-platform):`,
+    `  start                  Launch \`proxy\` (same options) as a background`,
+    `                         process. Records a PID under the home dir and`,
+    `                         redirects output to <home>/bridge.log.`,
+    `  stop                   Stop the background bridge (SIGTERM, then SIGKILL).`,
+    `  restart                Stop, then start again with the same options.`,
+    `  status                 Show whether the bridge is running (PID + uptime).`,
+    `  logs [-f] [-n <lines>] Print the tail of bridge.log; -f follows output,`,
+    `                         -n sets how many trailing lines (default ${DEFAULT_LOG_LINES}).`,
+    ``,
     `Settings file (${SETTINGS_FILE}, under the home dir):`,
     `  {`,
     `    "credentials": { "appId": "cli_...", "appSecret": "..." },`,
@@ -862,6 +952,11 @@ function printHelp(): void {
     ``,
     `Examples:`,
     `  ${APP_NAME} proxy --agent claude`,
+    `  ${APP_NAME} start --agent claude          # run in the background`,
+    `  ${APP_NAME} status                        # is it up? which PID?`,
+    `  ${APP_NAME} logs -f                        # follow the log`,
+    `  ${APP_NAME} restart --agent claude        # pick up a new build`,
+    `  ${APP_NAME} stop`,
     `  ${APP_NAME} --cwd /work/project proxy --agent opencode`,
     `  ${APP_NAME} --hide-thoughts proxy --agent copilot`,
     `  ${APP_NAME} --permission-mode alwaysAllow proxy --agent claude`,
@@ -1053,6 +1148,49 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   cliLogger.info("bridge running. Press Ctrl+C to stop.");
 }
 
+/**
+ * The `start` handler: re-launch this CLI's own `proxy` command in the
+ * background. `args.rawArgv` + `args.subcommandIndex` are set by the parser;
+ * we swap the `start` token to `proxy` so every option the user passed is
+ * forwarded verbatim to the backgrounded process.
+ *
+ * @throws {ProcessControlError} on an already-running or failed start.
+ * @throws {CliError} when parser invariants are somehow violated.
+ */
+async function runStart(args: ParsedArgs): Promise<void> {
+  const spawnArgv = buildProxyArgv(args);
+  await startBridge({
+    homeDir: resolveHomeDir(args.home),
+    selfPath: fileURLToPath(import.meta.url),
+    spawnArgv,
+  });
+}
+
+/** The `restart` handler: stop any running bridge, then start with the same argv. */
+async function runRestart(args: ParsedArgs): Promise<void> {
+  const spawnArgv = buildProxyArgv(args);
+  const homeDir = resolveHomeDir(args.home);
+  await stopBridge({ homeDir });
+  await startBridge({
+    homeDir,
+    selfPath: fileURLToPath(import.meta.url),
+    spawnArgv,
+  });
+}
+
+/**
+ * Turn a `start`/`restart` invocation into the `proxy` argv to background.
+ *
+ * @throws {CliError} when the parser did not record the raw argv + index
+ *         (should be unreachable — both are set together for start/restart).
+ */
+function buildProxyArgv(args: ParsedArgs): string[] {
+  if (args.rawArgv === undefined || args.subcommandIndex === undefined) {
+    throw new CliError(`internal: ${args.command} is missing captured argv`);
+  }
+  return rewriteSubcommand(args.rawArgv, args.subcommandIndex, "proxy");
+}
+
 async function main(): Promise<void> {
   let args: ParsedArgs;
   try {
@@ -1083,6 +1221,25 @@ async function main(): Promise<void> {
     case "proxy":
       await runProxy(args);
       return;
+    case "start":
+      await runStart(args);
+      return;
+    case "stop":
+      await stopBridge({ homeDir: resolveHomeDir(args.home) });
+      return;
+    case "restart":
+      await runRestart(args);
+      return;
+    case "status":
+      statusBridge({ homeDir: resolveHomeDir(args.home) });
+      return;
+    case "logs":
+      await tailLog({
+        homeDir: resolveHomeDir(args.home),
+        follow: args.logsFollow ?? false,
+        lines: args.logsLines ?? DEFAULT_LOG_LINES,
+      });
+      return;
     default:
       assertNever(args.command);
   }
@@ -1096,6 +1253,10 @@ main().catch((err) => {
   if (err instanceof CliError) {
     process.stderr.write(`error: ${err.message}\n`);
     process.exit(2);
+  }
+  if (err instanceof ProcessControlError) {
+    process.stderr.write(`error: ${err.message}\n`);
+    process.exit(1);
   }
   process.stderr.write(`fatal: ${formatError(err)}\n`);
   process.exit(1);
