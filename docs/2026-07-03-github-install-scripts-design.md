@@ -48,10 +48,10 @@ TypeScript sources compile and the `lark-acp` bin is linked with no extra steps.
 
 Defaults baked to the fork, overridable via environment variables:
 
-| Variable        | Default                     | Meaning                         |
-| --------------- | --------------------------- | ------------------------------- |
-| `LARK_ACP_REPO` | `wangmingliang-ms/lark-acp` | GitHub `owner/repo` to install  |
-| `LARK_ACP_REF`  | `main`                      | git ref (branch / tag / commit) |
+| Variable        | Default                     | Meaning                        |
+| --------------- | --------------------------- | ------------------------------ |
+| `LARK_ACP_REPO` | `wangmingliang-ms/lark-acp` | GitHub `owner/repo` to install |
+| `LARK_ACP_REF`  | `main`                      | git branch or tag to install   |
 
 Install target URL:
 `git+https://github.com/${LARK_ACP_REPO}.git#${LARK_ACP_REF}`

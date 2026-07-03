@@ -7,7 +7,7 @@
 #
 # Overrides (environment variables):
 #   LARK_ACP_REPO   GitHub owner/repo   (default: wangmingliang-ms/lark-acp)
-#   LARK_ACP_REF    git ref to install  (default: main)
+#   LARK_ACP_REF    git branch or tag   (default: main)
 #
 # Example:
 #   LARK_ACP_REF=v0.2.0 sh install.sh

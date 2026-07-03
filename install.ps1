@@ -5,7 +5,7 @@
 .DESCRIPTION
   Overrides via environment variables:
     LARK_ACP_REPO   GitHub owner/repo   (default: wangmingliang-ms/lark-acp)
-    LARK_ACP_REF    git ref to install  (default: main)
+    LARK_ACP_REF    git branch or tag   (default: main)
 
   Why clone+build instead of `npm i -g git+https://...`:
     npm's git-dependency prepare sandbox runs this package's `prepare` build
@@ -25,17 +25,25 @@ $ref = if ($env:LARK_ACP_REF) { $env:LARK_ACP_REF } else { 'main' }
 $minNodeMajor = 20
 
 function Fail($msg) {
-  Write-Error "lark-acp install: $msg"
+  # Write-Host (not Write-Error) so a piped `irm | iex` run prints a clean
+  # one-line message and exits with code 1, instead of a red terminating-error
+  # record that the interactive host may swallow.
+  Write-Host "lark-acp install: $msg"
   exit 1
 }
 
-foreach ($cmd in 'git', 'node', 'npm') {
+$tools = [ordered]@{
+  git  = 'Install git first: https://git-scm.com/downloads'
+  node = "Install Node.js >= $minNodeMajor: https://nodejs.org/"
+  npm  = 'npm ships with Node.js: https://nodejs.org/'
+}
+foreach ($cmd in $tools.Keys) {
   if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-    Fail "$cmd not found. Install it first (Node.js >= $minNodeMajor: https://nodejs.org/)."
+    Fail "$cmd not found. $($tools[$cmd])"
   }
 }
 
-$nodeMajor = [int](node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')
+$nodeMajor = [int](node -p "process.versions.node.split('.')[0]")
 if ($nodeMajor -lt $minNodeMajor) {
   Fail "Node.js >= $minNodeMajor required, found $(node --version)."
 }
@@ -74,7 +82,10 @@ try {
   }
 }
 finally {
-  if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
+  # -ErrorAction SilentlyContinue so a delete failure (e.g. a deep node_modules
+  # path exceeding MAX_PATH on Windows PowerShell 5.1) cannot mask the original
+  # error or abort a successful install; a leftover temp dir is harmless.
+  if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue }
 }
 
 if (Get-Command lark-acp -ErrorAction SilentlyContinue) {

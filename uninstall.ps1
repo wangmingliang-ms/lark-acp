@@ -11,10 +11,14 @@
 $ErrorActionPreference = 'Stop'
 
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-  Write-Error "lark-acp uninstall: npm not found; nothing to uninstall via npm."
+  Write-Host "lark-acp uninstall: npm not found; nothing to uninstall via npm."
   exit 1
 }
 
 Write-Host "lark-acp uninstall: removing global 'lark-acp' ..."
 npm rm -g lark-acp
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "lark-acp uninstall: npm rm failed (exit $LASTEXITCODE)."
+  exit 1
+}
 Write-Host "lark-acp uninstall: done."

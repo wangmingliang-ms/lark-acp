@@ -24,7 +24,7 @@
     }
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/bin/lark-acp.js dist/bin/mock-agent.js",
+    "build": "tsc && node scripts/chmod-bins.mjs",
     "prepare": "npm run build",
     "start": "node dist/bin/lark-acp.js",
     "dev": "tsc --watch",
