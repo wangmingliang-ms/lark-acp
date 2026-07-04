@@ -300,4 +300,60 @@ describe("LarkAcpClient card-v2 conversation rendering", () => {
         "```bash\nAPI_TOKEN=[REDACTED] curl -H 'Authorization: Bearer [REDACTED]' https://example.com\n```",
     });
   });
+
+  it("redacts space-separated secret flag values without swallowing later flags", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_exec",
+        title: "Run deploy",
+        kind: "execute",
+        status: "pending",
+        rawInput: "deploy --token abc123 --api-key xyz789 --password s3cret --verbose",
+      },
+    });
+    await waitForFlush();
+
+    const send = ops.find(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const tool = send?.state.entries[0];
+    expect(tool).toMatchObject({
+      kind: "tool",
+      title: "Run deploy",
+      detail:
+        "```bash\ndeploy --token [REDACTED] --api-key [REDACTED] --password [REDACTED] --verbose\n```",
+    });
+  });
+
+  it("does not redact the following flag when a secret flag carries no value", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_exec",
+        title: "Run deploy",
+        kind: "execute",
+        status: "pending",
+        rawInput: "deploy --token --dry-run",
+      },
+    });
+    await waitForFlush();
+
+    const send = ops.find(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const tool = send?.state.entries[0];
+    expect(tool).toMatchObject({
+      kind: "tool",
+      detail: "```bash\ndeploy --token --dry-run\n```",
+    });
+  });
 });

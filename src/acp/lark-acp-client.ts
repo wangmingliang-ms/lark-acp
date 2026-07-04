@@ -39,14 +39,6 @@ function normalizeToolStatus(status: ToolStatus): ToolStatus {
   }
 }
 
-function toolUpdateDetail(content: acp.ToolCallUpdate["content"] | undefined): string | undefined {
-  // Card v2 is intentionally compact: tool entries are timeline markers, not
-  // stdout/diff containers. Keeping large raw output out avoids Lark card size
-  // limits and preserves the quick-read conversation shape.
-  void content;
-  return undefined;
-}
-
 interface SealedToolMeta {
   readonly title: string;
   readonly kind: string;
@@ -146,14 +138,28 @@ function fencedCode(text: string, language: string): string {
   return `\`\`\`${language}\n${safe}\n\`\`\``;
 }
 
+// Best-effort secret masking for commands echoed into cards. It covers the
+// common shapes (`FOO_TOKEN=...`, `--api-key xxx`, `Authorization: Bearer ...`)
+// but is not a security boundary: obscure conventions such as `mysql -pSECRET`
+// or values piped via stdin can still slip through. Prefer over-redaction.
+const SECRET_WORD = "key|token|secret|password|pass|pwd";
+
 function redactCommand(command: string): string {
-  return command
-    .replace(
-      /(\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD)[A-Z0-9_]*\s*=\s*)([^\s'";]+)/gi,
-      "$1[REDACTED]",
-    )
-    .replace(/(\b(?:key|token|secret|password|pass|pwd)\s*[=:]\s*)([^\s'";]+)/gi, "$1[REDACTED]")
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]");
+  return (
+    command
+      .replace(
+        new RegExp(`(\\b[A-Z0-9_]*(?:${SECRET_WORD})[A-Z0-9_]*\\s*=\\s*)([^\\s'";]+)`, "gi"),
+        "$1[REDACTED]",
+      )
+      .replace(new RegExp(`(\\b(?:${SECRET_WORD})\\s*[=:]\\s*)([^\\s'";]+)`, "gi"), "$1[REDACTED]")
+      // Space-separated flag values: `--token abc`, `--api-key xyz`. The `(?!-)`
+      // guard keeps a valueless flag from eating the next flag as its "value".
+      .replace(
+        new RegExp(`(--?[A-Za-z0-9-]*(?:${SECRET_WORD})[A-Za-z0-9-]*\\s+)(?!-)([^\\s'";]+)`, "gi"),
+        "$1[REDACTED]",
+      )
+      .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+  );
 }
 
 /**
@@ -457,7 +463,10 @@ export class LarkAcpClient implements acp.Client {
           u.rawInput,
           u.locations,
         );
-        const detail = display.detail ?? toolUpdateDetail(u.content);
+        // Card v2 stays compact: tool entries are timeline markers, so we keep
+        // the formatted command/detail only and drop raw stdout/diff output,
+        // which would blow past Lark card size limits.
+        const detail = display.detail;
         if (this.status !== "responding") this.status = "calling_tool";
         this.upsertTool(
           toolCallId,
