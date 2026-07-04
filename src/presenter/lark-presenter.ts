@@ -7,16 +7,8 @@ import type {
   LarkPresenter,
   NoticeCardSpec,
   TimelineEntry,
-  ToolStatus,
   UnifiedCardState,
 } from "./presenter.js";
-
-const STATUS_MARKS: Record<ToolStatus, string> = {
-  pending: "⏸",
-  in_progress: "⏳",
-  completed: "✅",
-  failed: "❌",
-};
 
 const HEADER_TEMPLATE_PERMISSION = "blue";
 const HEADER_TEMPLATE_RESOLVED = "green";
@@ -177,8 +169,7 @@ function nonThoughtEntryToMarkdown(entry: Exclude<TimelineEntry, { kind: "though
     case "text":
       return entry.text;
     case "tool": {
-      const mark = STATUS_MARKS[entry.status];
-      const head = `${mark} **${entry.toolKind}**: ${entry.title}`;
+      const head = `**${entry.toolKind}**: ${entry.title}`;
       return entry.detail ? `${head}\n\n${entry.detail}` : head;
     }
     default:

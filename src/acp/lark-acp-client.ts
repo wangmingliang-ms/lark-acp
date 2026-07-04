@@ -7,7 +7,6 @@ import type {
   LarkPresenter,
   TimelineEntry,
   ToolStatus,
-  UnifiedCardState,
 } from "../presenter/presenter.js";
 
 const CARD_FLUSH_DEBOUNCE_MS = 100;
@@ -23,38 +22,28 @@ interface PendingPermission {
   cardMessageId: string | null;
 }
 
-function toolStatusToAgentStatus(status: ToolStatus): AgentStatus {
+function assertNeverToolStatus(x: never): never {
+  throw new Error(`unexpected tool status: ${String(x)}`);
+}
+
+function normalizeToolStatus(status: ToolStatus): ToolStatus {
   switch (status) {
-    case "completed":
-      return "complete";
-    case "failed":
-      return "failed";
     case "pending":
     case "in_progress":
-      return "calling_tool";
+    case "completed":
+    case "failed":
+      return status;
     default:
       return assertNeverToolStatus(status);
   }
 }
 
-function assertNeverToolStatus(x: never): never {
-  throw new Error(`unexpected tool status: ${String(x)}`);
-}
-
 function toolUpdateDetail(content: acp.ToolCallUpdate["content"] | undefined): string | undefined {
-  if (!content) return undefined;
-
-  const chunks: string[] = [];
-  for (const c of content) {
-    if (c.type !== "diff") continue;
-    const diff = c as acp.Diff;
-    const lines: string[] = [`--- ${diff.path}`];
-    diff.oldText?.split("\n").forEach((l) => lines.push(`- ${l}`));
-    diff.newText?.split("\n").forEach((l) => lines.push(`+ ${l}`));
-    chunks.push("```diff\n" + lines.join("\n") + "\n```");
-  }
-
-  return chunks.length > 0 ? chunks.join("\n\n") : undefined;
+  // Card v2 is intentionally compact: tool entries are timeline markers, not
+  // stdout/diff containers. Keeping large raw output out avoids Lark card size
+  // limits and preserves the quick-read conversation shape.
+  void content;
+  return undefined;
 }
 
 interface SealedToolMeta {
@@ -63,12 +52,6 @@ interface SealedToolMeta {
 }
 
 type ToolEntry = Extract<TimelineEntry, { kind: "tool" }>;
-
-interface ToolCardState {
-  cardId: string | null;
-  cardCreating: Promise<string | null> | null;
-  entry: ToolEntry;
-}
 
 /**
  * Strategy for handling agent-side permission requests.
@@ -93,7 +76,7 @@ export interface LarkAcpClientOptions {
   logger: LarkLogger;
   /** Include `agent_thought_chunk` updates in the unified card. */
   showThoughts: boolean;
-  /** Render `tool_call` / `tool_call_update` events as standalone tool cards. */
+  /** Render `tool_call` / `tool_call_update` events in the conversation card. */
   showTools: boolean;
   /**
    * Render the "中断当前任务" button at the bottom of the running card.
@@ -107,10 +90,11 @@ export interface LarkAcpClientOptions {
 }
 
 /**
- * `acp.Client` implementation for one Lark chat. Builds a unified
- * timeline cards for assistant text/thoughts, split whenever a tool call
- * interrupts the assistant message. Each tool call gets its own standalone
- * card so large tool outputs do not bloat any message card.
+ * `acp.Client` implementation for one Lark chat. Builds compact conversation
+ * cards containing assistant text, thoughts, and tool-call markers in one
+ * chronological timeline. Approval cards are the hard boundary: before an
+ * approval request the current conversation card is sealed, then the approval
+ * card is shown, and any post-approval output starts a fresh conversation card.
  *
  * One instance per chat — it holds per-prompt state (current message id,
  * timeline entries, unified card id, pending permissions).
@@ -131,9 +115,7 @@ export class LarkAcpClient implements acp.Client {
 
   private readonly pendingPermissions = new Map<string, PendingPermission>();
 
-  /** Tool-call id → its standalone card state. */
-  private readonly toolCards = new Map<string, ToolCardState>();
-  /** Tool metadata captured at permission boundaries; used to restore sparse updates in standalone tool cards. */
+  /** Tool metadata captured at approval boundaries; used to restore sparse post-approval updates. */
   private readonly sealedToolMeta = new Map<string, SealedToolMeta>();
 
   private cardId: string | null = null;
@@ -177,14 +159,23 @@ export class LarkAcpClient implements acp.Client {
     }
 
     const requestId = crypto.randomUUID();
-    await this.finishCurrentMessageSegment();
     const toolCallId = params.toolCall?.toolCallId;
     if (toolCallId) {
+      const toolStatus = (params.toolCall?.status ?? "pending") as ToolStatus;
+      if (this.showTools) {
+        this.upsertTool(
+          toolCallId,
+          params.toolCall?.title ?? "unknown",
+          params.toolCall?.kind ?? "tool",
+          normalizeToolStatus(toolStatus),
+        );
+      }
       this.sealedToolMeta.set(toolCallId, {
         title: params.toolCall?.title ?? "unknown",
         kind: params.toolCall?.kind ?? "tool",
       });
     }
+    await this.finishCurrentConversationSegment();
     this.permissionBoundaryThisPrompt = true;
 
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
@@ -223,16 +214,16 @@ export class LarkAcpClient implements acp.Client {
     });
   }
 
-  private async finishCurrentMessageSegment(): Promise<void> {
+  private async finishCurrentConversationSegment(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
     while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
 
-    if (!this.hasMainRenderableState()) return;
+    if (!this.hasRenderableState()) return;
 
-    this.status = "complete";
+    this.status = "sealed";
     await this.renderCard({ cancellable: false });
 
     this.timeline = [];
@@ -325,17 +316,14 @@ export class LarkAcpClient implements acp.Client {
         if (!this.showTools) return;
         const toolCallId = u.toolCallId;
         if (!toolCallId) return;
-        await this.finishCurrentMessageSegment();
-        const rawInput = u.rawInput;
-        const detail = typeof rawInput === "string" ? rawInput : undefined;
         this.status = "calling_tool";
-        await this.upsertTool(
+        this.upsertTool(
           toolCallId,
           u.title ?? "unknown",
           u.kind ?? "tool",
-          (u.status ?? "in_progress") as ToolStatus,
-          detail,
+          normalizeToolStatus((u.status ?? "in_progress") as ToolStatus),
         );
+        this.scheduleFlush();
         return;
       }
 
@@ -347,13 +335,14 @@ export class LarkAcpClient implements acp.Client {
 
         const detail = toolUpdateDetail(u.content);
         if (this.status !== "responding") this.status = "calling_tool";
-        await this.upsertTool(
+        this.upsertTool(
           toolCallId,
           u.title ?? "unknown",
           u.kind ?? "tool",
-          u.status as ToolStatus,
+          normalizeToolStatus(u.status as ToolStatus),
           detail,
         );
+        this.scheduleFlush();
         return;
       }
     }
@@ -370,7 +359,7 @@ export class LarkAcpClient implements acp.Client {
   }
 
   /**
-   * Finalise the current message card with the given terminal status, then
+   * Finalise the current conversation card with the given terminal status, then
    * reset per-prompt state so the next prompt starts clean.
    */
   async finalize(status: AgentStatus): Promise<void> {
@@ -381,13 +370,10 @@ export class LarkAcpClient implements acp.Client {
     }
     // Wait for any in-flight flush so we don't race the final patch.
     while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
-    const hasRenderableState =
-      this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
-    const shouldSkipEmptyFinalCard =
-      !hasRenderableState && (this.permissionBoundaryThisPrompt || this.toolCards.size > 0);
+    const hasRenderableState = this.hasRenderableState();
+    const shouldSkipEmptyFinalCard = !hasRenderableState && this.permissionBoundaryThisPrompt;
     if (!shouldSkipEmptyFinalCard) await this.renderCard({ cancellable: false });
     this.timeline = [];
-    this.toolCards.clear();
     this.sealedToolMeta.clear();
     this.cardId = null;
     this.cardCreating = null;
@@ -407,24 +393,23 @@ export class LarkAcpClient implements acp.Client {
     this.timeline.push({ kind, text });
   }
 
-  private async upsertTool(
+  private upsertTool(
     toolCallId: string,
     title: string,
     toolKind: string,
     status: ToolStatus,
     detail?: string,
-  ): Promise<void> {
-    const existing = this.toolCards.get(toolCallId);
+  ): void {
+    const existing = this.timeline.find(
+      (entry): entry is ToolEntry => entry.kind === "tool" && entry.toolCallId === toolCallId,
+    );
     if (existing !== undefined) {
-      if (title !== "unknown") existing.entry.title = title;
-      if (toolKind !== "tool") existing.entry.toolKind = toolKind;
-      existing.entry.status = status;
+      if (title !== "unknown") existing.title = title;
+      if (toolKind !== "tool") existing.toolKind = toolKind;
+      existing.status = status;
       if (detail !== undefined) {
-        existing.entry.detail = existing.entry.detail
-          ? `${existing.entry.detail}\n\n${detail}`
-          : detail;
+        existing.detail = existing.detail ? `${existing.detail}\n\n${detail}` : detail;
       }
-      await this.renderToolCard(toolCallId);
       return;
     }
 
@@ -432,58 +417,17 @@ export class LarkAcpClient implements acp.Client {
     if (meta !== undefined) this.sealedToolMeta.delete(toolCallId);
     const resolvedTitle = title !== "unknown" ? title : (meta?.title ?? title);
     const resolvedKind = toolKind !== "tool" ? toolKind : (meta?.kind ?? toolKind);
-    this.toolCards.set(toolCallId, {
-      cardId: null,
-      cardCreating: null,
-      entry: {
-        kind: "tool",
-        toolCallId,
-        title: resolvedTitle,
-        toolKind: resolvedKind,
-        status,
-        ...(detail !== undefined ? { detail } : {}),
-      },
+    this.timeline.push({
+      kind: "tool",
+      toolCallId,
+      title: resolvedTitle,
+      toolKind: resolvedKind,
+      status,
+      ...(detail !== undefined ? { detail } : {}),
     });
-    await this.renderToolCard(toolCallId);
   }
 
-  private async renderToolCard(toolCallId: string): Promise<void> {
-    if (!this.currentMessageId) return;
-    const tool = this.toolCards.get(toolCallId);
-    if (!tool) return;
-
-    const state: UnifiedCardState = {
-      status: toolStatusToAgentStatus(tool.entry.status),
-      entries: [tool.entry],
-      cancellable: false,
-      chatId: this.currentChatId,
-      threadId: this.currentThreadId,
-    };
-
-    if (tool.cardId) {
-      await this.presenter.updateUnifiedCard(tool.cardId, state);
-      return;
-    }
-    if (tool.cardCreating) {
-      const id = await tool.cardCreating;
-      if (id) {
-        tool.cardId = id;
-        await this.presenter.updateUnifiedCard(id, state);
-      }
-      return;
-    }
-
-    const promise = this.presenter.sendUnifiedCard(this.currentMessageId, state);
-    tool.cardCreating = promise;
-    try {
-      const id = await promise;
-      if (id) tool.cardId = id;
-    } finally {
-      tool.cardCreating = null;
-    }
-  }
-
-  private hasMainRenderableState(): boolean {
+  private hasRenderableState(): boolean {
     return this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
   }
 
@@ -504,7 +448,7 @@ export class LarkAcpClient implements acp.Client {
     if (!this.currentMessageId && !this.cardId) return;
     this.flushing = true;
     try {
-      const state: UnifiedCardState = {
+      const state = {
         status: this.status,
         entries: this.timeline,
         cancellable: opts.cancellable && this.showCancelButton,
