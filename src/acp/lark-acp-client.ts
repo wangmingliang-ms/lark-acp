@@ -517,6 +517,7 @@ export class LarkAcpClient implements acp.Client {
     const resolvedTitle = title !== "unknown" ? title : (meta?.title ?? title);
     const resolvedKind = toolKind !== "tool" ? toolKind : (meta?.kind ?? toolKind);
     const group = this.ensureToolGroup();
+    this.completeOpenToolsInGroup(group);
     const entry: ToolEntry = {
       kind: "tool",
       toolCallId,
@@ -550,15 +551,19 @@ export class LarkAcpClient implements acp.Client {
     const group = this.currentToolGroup;
     if (!group) return;
 
+    const changed = this.completeOpenToolsInGroup(group);
+    if (changed) await this.renderToolGroup(group);
+    this.sealCurrentToolGroup();
+  }
+
+  private completeOpenToolsInGroup(group: ToolGroupState): boolean {
     let changed = false;
     for (const entry of group.entries) {
       if (entry.status === "completed" || entry.status === "failed") continue;
       entry.status = "completed";
       changed = true;
     }
-
-    if (changed) await this.renderToolGroup(group);
-    this.sealCurrentToolGroup();
+    return changed;
   }
 
   private resetToolGroups(): void {

@@ -342,7 +342,7 @@ describe("LarkAcpClient chronological permission rendering", () => {
         toolCallId: "tool_read",
         title: "Read file",
         toolKind: "read",
-        status: "pending",
+        status: "completed",
       },
       {
         kind: "tool",
