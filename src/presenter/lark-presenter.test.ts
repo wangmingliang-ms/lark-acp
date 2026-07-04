@@ -91,7 +91,7 @@ describe("LarkCardPresenter card summary", () => {
     });
 
     expect(cards[0]?.header?.title?.content).toBe("✅ 已结束");
-    expect(cards[0]?.header?.template).toBe("grey");
+    expect(cards[0]?.header?.template).toBe("blue");
     expect(cards[0]?.config?.summary?.content).toBe("✅ 已结束");
   });
 

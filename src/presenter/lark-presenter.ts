@@ -19,8 +19,8 @@ const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> 
   thinking: { content: "💭 思考中...", template: "wathet" },
   calling_tool: { content: "🛠 调用工具...", template: "blue" },
   responding: { content: "✍️ 回复中...", template: "blue" },
-  sealed: { content: "✅ 已结束", template: "grey" },
-  complete: { content: "✅ 已结束", template: "grey" },
+  sealed: { content: "✅ 已结束", template: "blue" },
+  complete: { content: "✅ 已结束", template: "blue" },
   cancelled: { content: "⛔ 已取消", template: "grey" },
   failed: { content: "⚠️ 出错", template: "red" },
 };
