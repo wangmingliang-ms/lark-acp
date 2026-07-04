@@ -29,6 +29,11 @@ interface SealedToolMeta {
   readonly kind: string;
 }
 
+interface SealedSegment {
+  readonly cardId: string;
+  readonly entries: readonly TimelineEntry[];
+}
+
 export interface LarkAcpClientCallbacks {
   /** Called whenever the agent emits activity — used to refresh "typing" indicator. */
   onTyping: () => Promise<void>;
@@ -102,6 +107,8 @@ export class LarkAcpClient implements acp.Client {
   private readonly toolIndex = new Map<string, number>();
   /** Tool metadata captured while sealing a permission boundary; used to restore sparse updates in C2. */
   private readonly sealedToolMeta = new Map<string, SealedToolMeta>();
+  /** Previously sealed unified cards that should receive the prompt's terminal status. */
+  private readonly sealedSegments: SealedSegment[] = [];
 
   private cardId: string | null = null;
   private cardCreating: Promise<string | null> | null = null;
@@ -214,6 +221,12 @@ export class LarkAcpClient implements acp.Client {
     this.status = "sealed";
 
     await this.renderCard({ cancellable: false });
+    if (this.cardId) {
+      this.sealedSegments.push({
+        cardId: this.cardId,
+        entries: this.timeline.map((entry) => ({ ...entry })),
+      });
+    }
 
     this.timeline = [];
     this.toolIndex.clear();
@@ -373,9 +386,19 @@ export class LarkAcpClient implements acp.Client {
       this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
     const shouldSkipEmptyPostSealCard = this.permissionBoundaryThisPrompt && !hasRenderableState;
     if (!shouldSkipEmptyPostSealCard) await this.renderCard({ cancellable: false });
+    for (const segment of this.sealedSegments) {
+      await this.presenter.updateUnifiedCard(segment.cardId, {
+        status,
+        entries: segment.entries,
+        cancellable: false,
+        chatId: this.currentChatId,
+        threadId: this.currentThreadId,
+      });
+    }
     this.timeline = [];
     this.toolIndex.clear();
     this.sealedToolMeta.clear();
+    this.sealedSegments.length = 0;
     this.cardId = null;
     this.cardCreating = null;
     this.permissionBoundaryThisPrompt = false;

@@ -55,8 +55,8 @@ G2 只能靠 ③ 实现；① / ② 都到不了主页列表。
 
 ```
 用户消息
-  └─ 会话卡 C1（封存：冻结、header=⏸ 待确认、无按钮）
-  └─ 审批卡 A1        ← 就在 C1 正下方冒出（seal 之后才发，保证顺序）
+  └─ 会话卡 C1（封存：冻结、header=🔄 进行当中、无按钮）
+  └─ 审批卡 A1（header=⏳ 待确认） ← 就在 C1 正下方冒出（seal 之后才发，保证顺序）
        …（用户点 Approve）…
   └─ 会话卡 C2（Approve 之后的新内容从这里开始）
   └─ 审批卡 A2        ← 若又需确认
@@ -83,7 +83,7 @@ G2 只能靠 ③ 实现；① / ② 都到不了主页列表。
    agent 先发 `tool_call` 还是先发 `requestPermission`），渲染前将其滤除——该工具由审批卡
    代表，不在 C1 显示。
 3. 对 C1 做**最后一次渲染**：`cancellable: false`（按钮消失）+ header 用新的封存态
-   `sealed`（⏸ 待确认，灰色）。
+   `sealed`（🔄 进行当中，蓝色）。真正的等待用户确认状态由紧随其后的审批卡 A1 表达。
 4. 重置 `cardId = null`、`timeline = []`、`toolIndex.clear()`。后续内容靠现有 `renderCard`
    懒建卡逻辑自动开 **C2**。
 
@@ -115,7 +115,7 @@ Approve 通过后 agent 才发 `tool_call_update`(completed)。此时 `toolIndex
 
 | 语义 | summary.content | 何时的卡片 |
 |---|---|---|
-| 🔄 正在进行 | `🔄 处理中…` | 会话卡 C1/C2（thinking / calling_tool / responding） |
+| 🔄 正在进行 | `🔄 处理中…` | 会话卡 C1/C2（thinking / calling_tool / responding / sealed） |
 | ⏳ 等我 Approve | `⏳ 等待确认` | 审批卡 A1（seal 之后紧接发出的新消息） |
 | ✅ 已处理结束 | `✅ 已完成`（失败 `⚠️ 出错` / 取消 `⛔ 已取消`） | finalize 后的会话卡 |
 
@@ -137,8 +137,8 @@ summary 必为新值，故风险很低；仅"进行中 → 已完成"这种纯 p
   - （可选）为 summary 三态定义一个映射的输入来源——由 `AgentStatus` 推导即可，无需新增
     `UnifiedCardState` 字段。
 - `src/presenter/lark-presenter.ts`
-  - `STATUS_HEADER` 增加 `sealed: { content:"⏸ 待确认", template:"grey" }`。
-  - 新增 `AgentStatus → summary 文案` 映射（三态归并：sealed→等待确认；complete→已完成；
+  - `STATUS_HEADER` 增加 `sealed: { content:"🔄 进行当中", template:"blue" }`。
+  - 新增 `AgentStatus → summary 文案` 映射（三态归并：sealed→处理中；complete→已完成；
     cancelled/failed→对应；其余→处理中）。
   - `buildV2Card` / `buildUnifiedCard`：在 `config` 注入 `summary.content`。审批卡
     （`buildPermissionCard`）也注入 `summary.content = "⏳ 等待确认"`。
@@ -155,7 +155,7 @@ summary 必为新值，故风险很低；仅"进行中 → 已完成"这种纯 p
 - 待批工具移除：seal 时若 timeline 含该工具，C1 渲染不含它。
 - 结果落 C2：approve 后 `tool_call_update` 在新卡新建 ✅ 条目；title 回填正确。
 - `finalize` 空卡保护：以 approve 结尾时不发空卡。
-- summary：三态各自渲染出正确 `config.summary.content`；封存卡 header=⏸ 待确认。
+- summary：三态各自渲染出正确 `config.summary.content`；封存会话卡 header=🔄 进行当中，审批卡 header=⏳ 待确认。
 
 ## 9. 提交前三件套
 

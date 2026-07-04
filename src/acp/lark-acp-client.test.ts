@@ -191,4 +191,36 @@ describe("LarkAcpClient chronological permission rendering", () => {
 
     expect(ops.filter((op) => op.kind === "sendUnified")).toHaveLength(1);
   });
+
+  it("updates a sealed message card to the terminal status when the prompt finishes", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "I will edit that." },
+      },
+    });
+    const responsePromise = client.requestPermission(permissionRequest());
+    await waitForFlush();
+    const permission = ops.find(
+      (op): op is Extract<RenderOp, { kind: "permission" }> => op.kind === "permission",
+    );
+    if (!permission) throw new Error("expected permission request");
+    client.handleCardAction(permission.requestId, "allow");
+    await responsePromise;
+
+    await client.sessionUpdate(completedToolUpdate());
+    await waitForFlush();
+    await client.finalize("complete");
+
+    const sealedFinalPatch = ops.find(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> =>
+        op.kind === "updateUnified" && op.cardId === "card_1" && op.state.status === "complete",
+    );
+    expect(sealedFinalPatch?.state.entries).toEqual([{ kind: "text", text: "I will edit that." }]);
+    expect(sealedFinalPatch?.state.cancellable).toBe(false);
+  });
 });

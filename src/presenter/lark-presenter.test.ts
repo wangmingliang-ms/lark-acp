@@ -64,9 +64,10 @@ describe("LarkCardPresenter card summary", () => {
       "⏳ 等待确认",
       "✅ 已完成",
     ]);
+    expect(cards[1]?.header?.title?.content).toBe("⏳ 待确认");
   });
 
-  it("renders sealed cards as waiting-for-confirmation state", async () => {
+  it("renders sealed message cards as still-in-progress", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -78,7 +79,7 @@ describe("LarkCardPresenter card summary", () => {
       threadId: null,
     });
 
-    expect(cards[0]?.header?.title?.content).toBe("⏸ 待确认");
-    expect(cards[0]?.config?.summary?.content).toBe("⏳ 等待确认");
+    expect(cards[0]?.header?.title?.content).toBe("🔄 进行当中");
+    expect(cards[0]?.config?.summary?.content).toBe("🔄 处理中…");
   });
 });
