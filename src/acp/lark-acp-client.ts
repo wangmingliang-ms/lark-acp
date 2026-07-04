@@ -386,6 +386,7 @@ export class LarkAcpClient implements acp.Client {
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
         if (u.content.type === "text") {
+          await this.completeCurrentToolGroupBeforeContent();
           this.appendText("text", u.content.text);
           this.status = "responding";
           this.scheduleFlush();
@@ -394,6 +395,7 @@ export class LarkAcpClient implements acp.Client {
 
       case "agent_thought_chunk":
         if (u.content.type === "text" && this.showThoughts) {
+          await this.completeCurrentToolGroupBeforeContent();
           this.appendText("thought", u.content.text);
           if (this.status !== "responding") this.status = "thinking";
           this.scheduleFlush();
@@ -542,6 +544,21 @@ export class LarkAcpClient implements acp.Client {
 
   private sealCurrentToolGroup(): void {
     this.currentToolGroup = null;
+  }
+
+  private async completeCurrentToolGroupBeforeContent(): Promise<void> {
+    const group = this.currentToolGroup;
+    if (!group) return;
+
+    let changed = false;
+    for (const entry of group.entries) {
+      if (entry.status === "completed" || entry.status === "failed") continue;
+      entry.status = "completed";
+      changed = true;
+    }
+
+    if (changed) await this.renderToolGroup(group);
+    this.sealCurrentToolGroup();
   }
 
   private resetToolGroups(): void {

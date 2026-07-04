@@ -390,8 +390,19 @@ describe("LarkAcpClient chronological permission rendering", () => {
     const sends = ops.filter(
       (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
 
     expect(sends).toHaveLength(3);
+    expect(
+      patches.some(
+        (op) =>
+          op.cardId === "card_1" &&
+          op.state.entries[0]?.kind === "tool" &&
+          op.state.entries[0].status === "completed",
+      ),
+    ).toBe(true);
     expect(sends[0]?.state.entries).toEqual([
       {
         kind: "tool",
@@ -409,6 +420,48 @@ describe("LarkAcpClient chronological permission rendering", () => {
         title: "Edit file",
         toolKind: "edit",
         status: "pending",
+      },
+    ]);
+  });
+
+  it("marks an unfinished tool group completed before rendering following text", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops, { postFlushDebounceMs: 1 });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_exec",
+        title: "Terminal",
+        kind: "execute",
+        status: "pending",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "The command finished." },
+      },
+    });
+    await waitForFlush(20);
+
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+    const toolCompletion = patches.find(
+      (op) => op.cardId === "card_1" && op.state.entries[0]?.kind === "tool",
+    );
+
+    expect(toolCompletion?.state.status).toBe("complete");
+    expect(toolCompletion?.state.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool_exec",
+        title: "Terminal",
+        toolKind: "execute",
+        status: "completed",
       },
     ]);
   });
