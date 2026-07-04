@@ -61,6 +61,21 @@ describe("LarkCardPresenter card summary", () => {
       chatId: "oc_1",
       threadId: null,
     });
+    await presenter.updateUnifiedCard("card_1", {
+      status: "calling_tool",
+      entries: [
+        {
+          kind: "tool",
+          toolCallId: "tool_1",
+          title: "Read file",
+          toolKind: "read",
+          status: "pending",
+        },
+      ],
+      cancellable: true,
+      chatId: "oc_1",
+      threadId: null,
+    });
     await presenter.sendInterruptCard("om_1", permissionRequest(), "req_1", "oc_1", null);
     await presenter.updateUnifiedCard("card_1", {
       status: "complete",
@@ -72,10 +87,12 @@ describe("LarkCardPresenter card summary", () => {
 
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
       "💭 思考中...",
+      "🔄 处理中...",
       "⏳ 待确认",
       "✅ 已结束",
     ]);
-    expect(cards[1]?.header?.title?.content).toBe("⏳ 待确认");
+    expect(cards[1]?.header?.title?.content).toBe("🔄 处理中...");
+    expect(cards[2]?.header?.title?.content).toBe("⏳ 待确认");
   });
 
   it("renders sealed message cards as still-in-progress", async () => {
@@ -128,18 +145,18 @@ describe("LarkCardPresenter card summary", () => {
       "reject_always",
     );
 
-    expect(cards[0]?.header?.title?.content).toBe("已批准（本次）");
+    expect(cards[0]?.header?.title?.content).toBe("✅ 已批准（本次）");
     expect(cards[0]?.header?.template).toBe("green");
-    expect(cards[0]?.config?.summary?.content).toBe("已批准（本次）");
-    expect(cards[1]?.header?.title?.content).toBe("已批准（永久）");
+    expect(cards[0]?.config?.summary?.content).toBe("✅ 已批准（本次）");
+    expect(cards[1]?.header?.title?.content).toBe("✅ 已批准（永久）");
     expect(cards[1]?.header?.template).toBe("green");
-    expect(cards[1]?.config?.summary?.content).toBe("已批准（永久）");
-    expect(cards[2]?.header?.title?.content).toBe("已拒绝（本次）");
+    expect(cards[1]?.config?.summary?.content).toBe("✅ 已批准（永久）");
+    expect(cards[2]?.header?.title?.content).toBe("❌ 已拒绝（本次）");
     expect(cards[2]?.header?.template).toBe("red");
-    expect(cards[2]?.config?.summary?.content).toBe("已拒绝（本次）");
-    expect(cards[3]?.header?.title?.content).toBe("已拒绝（永久）");
+    expect(cards[2]?.config?.summary?.content).toBe("❌ 已拒绝（本次）");
+    expect(cards[3]?.header?.title?.content).toBe("❌ 已拒绝（永久）");
     expect(cards[3]?.header?.template).toBe("red");
-    expect(cards[3]?.config?.summary?.content).toBe("已拒绝（永久）");
+    expect(cards[3]?.config?.summary?.content).toBe("❌ 已拒绝（永久）");
   });
 
   it("sends topic cards as in-thread replies", async () => {

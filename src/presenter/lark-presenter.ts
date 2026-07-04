@@ -17,7 +17,7 @@ const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
   thinking: { content: "💭 思考中...", template: "wathet" },
-  calling_tool: { content: "🛠 调用工具...", template: "blue" },
+  calling_tool: { content: "🔄 处理中...", template: "blue" },
   responding: { content: "✍️ 回复中...", template: "blue" },
   sealed: { content: "✅ 已结束", template: "blue" },
   complete: { content: "✅ 已结束", template: "blue" },
@@ -116,36 +116,36 @@ function resolvedPermissionHeader(selectedKind: string | undefined): {
 } {
   if (selectedKind === "reject_once") {
     return {
-      title: "已拒绝（本次）",
+      title: "❌ 已拒绝（本次）",
       template: HEADER_TEMPLATE_REJECTED,
-      summary: "已拒绝（本次）",
+      summary: "❌ 已拒绝（本次）",
     };
   }
   if (selectedKind === "reject_always") {
     return {
-      title: "已拒绝（永久）",
+      title: "❌ 已拒绝（永久）",
       template: HEADER_TEMPLATE_REJECTED,
-      summary: "已拒绝（永久）",
+      summary: "❌ 已拒绝（永久）",
     };
   }
   if (selectedKind?.startsWith("reject_")) {
-    return { title: "已拒绝", template: HEADER_TEMPLATE_REJECTED, summary: "已拒绝" };
+    return { title: "❌ 已拒绝", template: HEADER_TEMPLATE_REJECTED, summary: "❌ 已拒绝" };
   }
   if (selectedKind === "allow_once") {
     return {
-      title: "已批准（本次）",
+      title: "✅ 已批准（本次）",
       template: HEADER_TEMPLATE_APPROVED,
-      summary: "已批准（本次）",
+      summary: "✅ 已批准（本次）",
     };
   }
   if (selectedKind === "allow_always") {
     return {
-      title: "已批准（永久）",
+      title: "✅ 已批准（永久）",
       template: HEADER_TEMPLATE_APPROVED,
-      summary: "已批准（永久）",
+      summary: "✅ 已批准（永久）",
     };
   }
-  return { title: "已批准", template: HEADER_TEMPLATE_APPROVED, summary: "已批准" };
+  return { title: "✅ 已批准", template: HEADER_TEMPLATE_APPROVED, summary: "✅ 已批准" };
 }
 
 function buildResolvedCard(
@@ -179,10 +179,10 @@ function buildNoticeCard(notice: NoticeCardSpec): object {
 
 function buildExpiredCard(reason: string): object {
   return buildV2Card(
-    "已失效",
+    "⛔ 已失效",
     HEADER_TEMPLATE_EXPIRED,
     [{ tag: "markdown", content: reason }],
-    "已失效",
+    "⛔ 已失效",
   );
 }
 

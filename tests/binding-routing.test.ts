@@ -143,8 +143,8 @@ describe("per-chat repo routing (integration)", () => {
     expect(await b.resolveBinding("oc_A")).toMatchObject({ cwd: repoA, explicit: true });
     expect(await b.resolveBinding("oc_B")).toMatchObject({ cwd: repoB, explicit: true });
 
-    // Both bind commands acked with a green "已绑定" card.
-    expect(presenter.notices.filter((n) => n.title === "已绑定").length).toBe(2);
+    // Both bind commands acked with a green "✅ 已绑定" card.
+    expect(presenter.notices.filter((n) => n.title === "✅ 已绑定").length).toBe(2);
   });
 
   it("persists bindings across a bridge/process restart", async () => {
@@ -174,7 +174,7 @@ describe("per-chat repo routing (integration)", () => {
       "om_1",
     );
     expect(await bindingStore.get("oc_A")).toBeNull();
-    expect(presenter.notices.some((n) => n.title === "绑定失败")).toBe(true);
+    expect(presenter.notices.some((n) => n.title === "⚠️ 绑定失败")).toBe(true);
   });
 
   it("unbound chat with no default resolves to null (bridge asks for /bind)", async () => {

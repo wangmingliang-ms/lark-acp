@@ -40,24 +40,24 @@ const HOME_PREFIX = "~";
 
 const COMMAND_NOTICES: Readonly<Record<"cancel" | "new" | "unbind", NoticeCardSpec>> = {
   cancel: {
-    title: "已取消",
+    title: "⛔ 已取消",
     body: "已取消当前任务，agent 进程保留以便后续消息继续。",
     template: "grey",
   },
   new: {
-    title: "已重置会话",
+    title: "✅ 已重置会话",
     body: "下次消息将启动一个全新的 agent 会话。",
     template: "green",
   },
   unbind: {
-    title: "已解绑",
+    title: "⛔ 已解绑",
     body: "本会话已解绑，agent 进程已停止。下次消息将使用默认配置（若已配置），否则请先 /bind <路径> [agent]。",
     template: "grey",
   },
 };
 
 const BIND_USAGE_NOTICE: NoticeCardSpec = {
-  title: "用法：/bind",
+  title: "ℹ️ 用法：/bind",
   body: [
     "把当前会话绑定到一个仓库目录 + agent：",
     "",
@@ -542,7 +542,7 @@ export class LarkBridge {
       const reason = err instanceof BindError ? err.message : formatBootstrapError(err);
       this.logger.warn({ err, chatId }, "bind rejected");
       await this.presenter.replyNoticeCard(messageId, {
-        title: "绑定失败",
+        title: "⚠️ 绑定失败",
         body: reason,
         template: "red",
       });
@@ -571,7 +571,7 @@ export class LarkBridge {
 
     this.logger.info({ chatId, cwd: target.cwd, agent: target.invocation.label }, "chat bound");
     await this.presenter.replyNoticeCard(messageId, {
-      title: "已绑定",
+      title: "✅ 已绑定",
       body: `本会话已绑定：\n• 目录：${target.cwd}\n• Agent：${target.invocation.label}\n\n下条消息将在该目录启动 agent。`,
       template: "green",
     });
@@ -581,7 +581,7 @@ export class LarkBridge {
     const existing = await this.bindingStore.get(chatId);
     if (!existing) {
       await this.presenter.replyNoticeCard(messageId, {
-        title: "未绑定",
+        title: "ℹ️ 未绑定",
         body: "本会话当前没有显式绑定。",
         template: "grey",
       });
@@ -598,7 +598,7 @@ export class LarkBridge {
     const binding = await this.resolveBinding(chatId);
     if (!binding) {
       await this.presenter.replyNoticeCard(messageId, {
-        title: "未绑定",
+        title: "ℹ️ 未绑定",
         body: "本会话尚未绑定，且没有配置默认目录。\n请先 /bind <路径> [agent]。",
         template: "orange",
       });
@@ -606,7 +606,7 @@ export class LarkBridge {
     }
     const source = binding.explicit ? "显式绑定" : "默认配置（未显式绑定）";
     await this.presenter.replyNoticeCard(messageId, {
-      title: "当前绑定",
+      title: "📍 当前绑定",
       body: `• 目录：${binding.cwd}\n• Agent：${binding.label}\n• 来源：${source}`,
       template: "blue",
     });
@@ -654,7 +654,7 @@ export class LarkBridge {
     if (!binding) {
       this.logger.info({ chatId }, "message in unbound chat — reception disabled, prompting /bind");
       await this.presenter.replyNoticeCard(messageId, {
-        title: "尚未绑定仓库",
+        title: "⚠️ 尚未绑定仓库",
         body: "本会话还没有绑定仓库目录。请先发送：\n/bind <路径> [agent]\n\n例如：/bind ~/workspace/copilot-intellij claude\n查看用法：/bind",
         template: "orange",
       });
