@@ -14,7 +14,7 @@ import type {
 const STATUS_MARKS: Record<ToolStatus, string> = {
   pending: ":OneSecond:",
   in_progress: ":OnIt:",
-  completed: ":OK:",
+  completed: ":CheckMark:",
   failed: ":ERROR:",
 };
 
@@ -27,7 +27,7 @@ const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> 
   calling_tool: { content: ":OnIt: 调用工具...", template: "blue" },
   responding: { content: ":Writing: 回复中...", template: "blue" },
   sealed: { content: ":OnIt: 进行当中", template: "blue" },
-  complete: { content: ":OK: 已完成", template: "green" },
+  complete: { content: ":CheckMark: 已完成", template: "green" },
   cancelled: { content: ":CrossMark: 已取消", template: "grey" },
   failed: { content: ":ERROR: 出错", template: "red" },
 };
@@ -44,7 +44,7 @@ const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 function summaryForStatus(status: AgentStatus): string {
   switch (status) {
     case "complete":
-      return ":OK: 已完成";
+      return ":CheckMark: 已完成";
     case "cancelled":
       return ":CrossMark: 已取消";
     case "failed":
@@ -148,7 +148,7 @@ function buildResolvedCard(toolKind: string, toolTitle: string, selectedName: st
         content: `**${toolKind}**: ${toolTitle}\n\n已选择: **${selectedName}**`,
       },
     ],
-    ":OK: 已完成",
+    ":CheckMark: 已完成",
   );
 }
 

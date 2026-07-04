@@ -73,7 +73,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
       ":OnIt: 处理中…",
       ":OneSecond: 等待确认",
-      ":OK: 已完成",
+      ":CheckMark: 已完成",
     ]);
     expect(cards[1]?.header?.title?.content).toBe(":OneSecond: 待确认");
   });
