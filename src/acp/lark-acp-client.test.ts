@@ -25,7 +25,13 @@ function cloneState(state: UnifiedCardState): UnifiedCardState {
   return structuredClone(state) as UnifiedCardState;
 }
 
-function recordingPresenter(ops: RenderOp[]): LarkPresenter {
+function recordingPresenter(
+  ops: RenderOp[],
+  opts: {
+    failUpdate?: (cardId: string, state: UnifiedCardState) => boolean;
+    delaySendUntil?: Promise<void>;
+  } = {},
+): LarkPresenter {
   let cardSeq = 0;
   return {
     replyText: async () => {},
@@ -38,24 +44,38 @@ function recordingPresenter(ops: RenderOp[]): LarkPresenter {
     replyNoticeCard: async () => {},
     sendUnifiedCard: async (_replyToMessageId, state) => {
       ops.push({ kind: "sendUnified", state: cloneState(state) });
+      if (opts.delaySendUntil) await opts.delaySendUntil;
       cardSeq += 1;
       return `card_${cardSeq}`;
     },
     updateUnifiedCard: async (cardId, state) => {
+      if (opts.failUpdate?.(cardId, state)) throw new Error("simulated update failure");
       ops.push({ kind: "updateUnified", cardId, state: cloneState(state) });
     },
   };
 }
 
-function makeClient(ops: RenderOp[]): LarkAcpClient {
+function makeClient(
+  ops: RenderOp[],
+  opts: {
+    failUpdate?: (cardId: string, state: UnifiedCardState) => boolean;
+    delaySendUntil?: Promise<void>;
+    postFlushDebounceMs?: number;
+    maxPostEdits?: number;
+  } = {},
+): LarkAcpClient {
   const client = new LarkAcpClient({
-    presenter: recordingPresenter(ops),
+    presenter: recordingPresenter(ops, opts),
     logger,
     showThoughts: true,
     showTools: true,
     showCancelButton: true,
     permissionTimeoutMs: 0,
     permissionMode: "alwaysAsk",
+    ...(opts.postFlushDebounceMs !== undefined
+      ? { postFlushDebounceMs: opts.postFlushDebounceMs }
+      : {}),
+    ...(opts.maxPostEdits !== undefined ? { maxPostEdits: opts.maxPostEdits } : {}),
   });
   client.setContext("om_user", "oc_chat", "omt_thread");
   return client;
@@ -89,8 +109,8 @@ function completedToolUpdate(): acp.SessionNotification {
   };
 }
 
-async function waitForFlush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 160));
+async function waitForFlush(ms = 160): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("LarkAcpClient chronological permission rendering", () => {
@@ -400,7 +420,7 @@ describe("LarkAcpClient chronological permission rendering", () => {
 
   it("renders text after a tool in a new message card", async () => {
     const ops: RenderOp[] = [];
-    const client = makeClient(ops);
+    const client = makeClient(ops, { postFlushDebounceMs: 1 });
 
     await client.sessionUpdate({
       sessionId: "sess_1",
@@ -460,5 +480,187 @@ describe("LarkAcpClient chronological permission rendering", () => {
     );
     expect(finalTextPatch?.state.entries).toEqual([{ kind: "text", text: "After tool." }]);
     expect(finalTextPatch?.state.cancellable).toBe(false);
+  });
+
+  it("rotates long streaming text before exhausting a post edit budget", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops, { postFlushDebounceMs: 1, maxPostEdits: 2 });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "A" },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "B" },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "C" },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "D" },
+      },
+    });
+    await waitForFlush(20);
+
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+
+    expect(sends).toHaveLength(2);
+    expect(patches.map((op) => op.cardId)).toEqual(["card_1", "card_1"]);
+    expect(sends[0]?.state.entries).toEqual([{ kind: "text", text: "A" }]);
+    expect(sends[1]?.state.entries).toEqual([{ kind: "text", text: "D" }]);
+  });
+
+  it("sends a continuation post when updating a streamed post fails", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops, {
+      postFlushDebounceMs: 1,
+      failUpdate: (cardId) => cardId === "card_1",
+    });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Hello" },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: " world" },
+      },
+    });
+    await waitForFlush(20);
+
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+
+    expect(patches).toHaveLength(0);
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.state.entries).toEqual([{ kind: "text", text: "Hello" }]);
+    expect(sends[1]?.state.entries).toEqual([{ kind: "text", text: " world" }]);
+  });
+
+  it("sends only the tail when a racing first update fails after initial send", async () => {
+    const ops: RenderOp[] = [];
+    let releaseSend!: () => void;
+    const delaySendUntil = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const client = makeClient(ops, {
+      postFlushDebounceMs: 1,
+      delaySendUntil,
+      failUpdate: (cardId) => cardId === "card_1",
+    });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Head" },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: " tail" },
+      },
+    });
+    releaseSend();
+    await waitForFlush(40);
+
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+
+    expect(patches).toHaveLength(0);
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.state.entries).toEqual([{ kind: "text", text: "Head" }]);
+    expect(sends[1]?.state.entries).toEqual([{ kind: "text", text: " tail" }]);
+  });
+
+  it("recreates a tool post when its edit budget is exhausted", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops, { maxPostEdits: 1 });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_read",
+        title: "Read file",
+        kind: "read",
+        status: "pending",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool_read",
+        status: "in_progress",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool_read",
+        status: "completed",
+      },
+    });
+
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+
+    expect(sends).toHaveLength(2);
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.cardId).toBe("card_1");
+    expect(sends[1]?.state.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool_read",
+        title: "Read file",
+        toolKind: "read",
+        status: "completed",
+      },
+    ]);
   });
 });

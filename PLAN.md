@@ -72,13 +72,14 @@ bin/
 type TimelineEntry =
   | { kind: "text"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "tool"; toolCallId; title; toolKind; status; detail? };
+  | { kind: "tool"; toolCallId; title; toolKind; status };
 ```
 
 - 同类型相邻条目会合并（`appendText` 把连续的 chunk 拼到最后一项）；
 - ToolCall 是时间线切分点：出现工具调用前会先结束当前 message segment；工具调用自己作为简洁的一行 post 消息展示，后续工具状态通过 `updatePost` 更新同一条消息；工具之后继续输出文本时开新的 message segment；
 - 思考以引用块形式展示，工具调用以 `⏸/⏳/✅/❌ **kind**: title` 的紧凑格式展示，不把大 diff 塞进正文；
-- `scheduleFlush()` 用 100ms debounce 合并连续事件，避免高频更新触发限流。`flushing` 标志防止首次创建消息时与 update 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 update。
+- 流式刷新参考 Hermes Agent 的 Feishu 策略：`scheduleFlush()` 默认 800ms debounce，避免把 token 级更新直接打到 `im.v1.message.update`；每条 post 维护安全编辑预算（默认 18 次），到预算后 seal 当前 post、另起 post 只续写未显示的 tail；如果 `updatePost` 失败（例如飞书编辑次数 / 限频 / 网络错误），调用方不会吞错，会 fallback 发新 post 续写，避免最终内容冻结或丢失；
+- `flushing` 标志防止首次创建消息时与 update 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 update 或 continuation fallback。
 
 ### 中断 / 取消链路
 

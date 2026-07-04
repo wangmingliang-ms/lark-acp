@@ -133,9 +133,7 @@ function assertNever(x: never): never {
   throw new Error(`unexpected timeline entry: ${String(x)}`);
 }
 
-/** Render one non-thought timeline entry to a markdown snippet. Thought
- *  entries take a separate path (a collapsible panel) since Lark's
- *  markdown element does not render blockquote styling. */
+/** Render one timeline entry to the markdown carried by a Feishu post. */
 function nonThoughtEntryToMarkdown(entry: Exclude<TimelineEntry, { kind: "thought" }>): string {
   switch (entry.kind) {
     case "text":
@@ -173,8 +171,8 @@ export interface LarkCardPresenterOptions {
 }
 
 /**
- * Default {@link LarkPresenter} implementation using Lark
- * interactive cards via {@link LarkHttpClient}.
+ * Default {@link LarkPresenter} implementation. Ordinary agent output is
+ * rendered as Feishu `post` messages; approval prompts remain interactive cards.
  */
 export class LarkCardPresenter implements LarkPresenter {
   private readonly http: LarkHttpClient;
@@ -249,10 +247,6 @@ export class LarkCardPresenter implements LarkPresenter {
   }
 
   async updateUnifiedCard(cardMessageId: string, state: UnifiedCardState): Promise<void> {
-    try {
-      await this.http.updatePost(cardMessageId, markdownToPost(buildUnifiedPostMarkdown(state)));
-    } catch (err) {
-      this.logger.warn({ err, cardMessageId }, "updateUnifiedPost failed");
-    }
+    await this.http.updatePost(cardMessageId, markdownToPost(buildUnifiedPostMarkdown(state)));
   }
 }

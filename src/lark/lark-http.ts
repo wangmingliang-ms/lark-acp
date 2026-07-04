@@ -157,7 +157,11 @@ export class LarkHttpClient {
     return res.data?.message_id ?? null;
   }
 
-  /** PATCH an existing `post` rich-text message with new content. */
+  /**
+   * PATCH an existing `post` rich-text message with new content.
+   *
+   * @throws when the underlying SDK call rejects.
+   */
   async updatePost(messageId: string, post: object): Promise<void> {
     await this.client.im.v1.message.update({
       path: { message_id: messageId },

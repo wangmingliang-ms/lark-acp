@@ -8,7 +8,7 @@ export type AgentStatus =
 export type ToolStatus = "pending" | "in_progress" | "completed" | "failed";
 
 /**
- * One entry in the unified card timeline. Entries appear in agent-emit
+ * One entry in the agent output timeline. Entries appear in agent-emit
  * order; consecutive text / thought entries are coalesced upstream.
  */
 export type TimelineEntry =
@@ -20,7 +20,6 @@ export type TimelineEntry =
       title: string;
       toolKind: string;
       status: ToolStatus;
-      detail?: string;
     };
 
 /**
@@ -110,6 +109,11 @@ export interface LarkPresenter {
    */
   sendUnifiedCard(replyToMessageId: string, state: UnifiedCardState): Promise<string | null>;
 
-  /** Patch an existing agent output segment with a new state. */
+  /**
+   * Patch an existing agent output segment with a new state.
+   *
+   * @throws when the underlying transport rejects, allowing callers to fall
+   * back to a fresh message instead of silently dropping streamed content.
+   */
   updateUnifiedCard(cardMessageId: string, state: UnifiedCardState): Promise<void>;
 }
