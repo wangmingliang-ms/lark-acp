@@ -71,11 +71,11 @@ describe("LarkCardPresenter card summary", () => {
     });
 
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
-      ":OnIt: 处理中…",
-      ":OneSecond: 等待确认",
-      ":CheckMark: 已完成",
+      "🔄 处理中…",
+      "⏳ 等待确认",
+      "✅ 已完成",
     ]);
-    expect(cards[1]?.header?.title?.content).toBe("待确认");
+    expect(cards[1]?.header?.title?.content).toBe("⏳ 待确认");
   });
 
   it("renders sealed message cards as still-in-progress", async () => {
@@ -90,8 +90,8 @@ describe("LarkCardPresenter card summary", () => {
       threadId: null,
     });
 
-    expect(cards[0]?.header?.title?.content).toBe("进行当中");
-    expect(cards[0]?.config?.summary?.content).toBe(":OnIt: 处理中…");
+    expect(cards[0]?.header?.title?.content).toBe("🔄 进行当中");
+    expect(cards[0]?.config?.summary?.content).toBe("🔄 处理中…");
   });
 
   it("sends topic cards as in-thread replies", async () => {
