@@ -322,4 +322,49 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       });
     });
   });
+
+  it("can put status reactions on a topic root while keeping cards anchored to the current message", async () => {
+    const states: UnifiedCardState[] = [];
+    const reactions: ReactionOp[] = [];
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(),
+      threadId: "omt_topic",
+      presenter: recordingPresenter(states, reactions),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "hello from topic" }],
+      messageId: "om_topic_reply",
+      statusMessageId: "om_topic_root",
+      chatId: "oc_test",
+    });
+
+    await vi.waitFor(() => {
+      expect(reactions).toContainEqual({
+        kind: "add",
+        messageId: "om_topic_root",
+        emoji: "OnIt",
+        reactionId: "reaction_1",
+      });
+    });
+
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => {
+      expect(reactions).toContainEqual({
+        kind: "add",
+        messageId: "om_topic_root",
+        emoji: "DONE",
+        reactionId: "reaction_2",
+      });
+      expect(reactions).toContainEqual({
+        kind: "remove",
+        messageId: "om_topic_root",
+        reactionId: "reaction_1",
+      });
+    });
+  });
 });
