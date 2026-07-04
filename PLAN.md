@@ -76,7 +76,7 @@ type TimelineEntry =
 ```
 
 - 同类型相邻条目会合并（`appendText` 把连续的 chunk 拼到最后一项）；
-- ToolCall 是时间线切分点：出现工具调用前会先结束当前 message segment；工具调用自己作为简洁的一行 post 消息展示，后续工具状态通过 `updatePost` 更新同一条消息；工具之后继续输出文本时开新的 message segment；
+- ToolCall 是时间线切分点：出现工具调用前会先结束当前 message segment；连续工具调用会像 Hermes Agent 的 progress bubble 一样合并到同一条可编辑 post，后续工具状态通过 `updatePost` 更新同一条消息；当工具之后有 assistant 文本落地时，会 seal 当前工具组，后续工具调用再开新的工具组 post，保持 `text → tools → text → tools` 的自然顺序；
 - 思考以引用块形式展示，工具调用以 `⏸/⏳/✅/❌ **kind**: title` 的紧凑格式展示，不把大 diff 塞进正文；
 - 流式刷新参考 Hermes Agent 的 Feishu 策略：`scheduleFlush()` 默认 800ms debounce，避免把 token 级更新直接打到 `im.v1.message.update`；每条 post 维护安全编辑预算（默认 18 次），到预算后 seal 当前 post、另起 post 只续写未显示的 tail；如果 `updatePost` 失败（例如飞书编辑次数 / 限频 / 网络错误），调用方不会吞错，会 fallback 发新 post 续写，避免最终内容冻结或丢失；
 - `flushing` 标志防止首次创建消息时与 update 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 update 或 continuation fallback。

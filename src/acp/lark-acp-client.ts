@@ -60,10 +60,15 @@ interface SealedToolMeta {
 
 type ToolEntry = Extract<TimelineEntry, { kind: "tool" }>;
 
-interface ToolCardState {
+interface ToolGroupState {
   cardId: string | null;
   cardCreating: Promise<string | null> | null;
   editCount: number;
+  entries: ToolEntry[];
+}
+
+interface ToolEntryState {
+  group: ToolGroupState;
   entry: ToolEntry;
 }
 
@@ -173,9 +178,9 @@ export interface LarkAcpClientOptions {
 
 /**
  * `acp.Client` implementation for one Lark chat. Builds a unified
- * timeline cards for assistant text/thoughts, split whenever a tool call
- * interrupts the assistant message. Each tool call gets its own standalone
- * card so large tool outputs do not bloat any message card.
+ * post timelines for assistant text/thoughts, split whenever a tool call
+ * interrupts the assistant message. Consecutive tool calls are grouped into
+ * an editable tool-progress post until assistant text lands below them.
  *
  * One instance per chat — it holds per-prompt state (current message id,
  * timeline entries, unified card id, pending permissions).
@@ -198,9 +203,11 @@ export class LarkAcpClient implements acp.Client {
 
   private readonly pendingPermissions = new Map<string, PendingPermission>();
 
-  /** Tool-call id → its standalone card state. */
-  private readonly toolCards = new Map<string, ToolCardState>();
-  /** Tool metadata captured at permission boundaries; used to restore sparse updates in standalone tool cards. */
+  /** Consecutive tool calls are grouped into editable post bubbles, mirroring Hermes Agent. */
+  private readonly toolEntries = new Map<string, ToolEntryState>();
+  private readonly toolGroups: ToolGroupState[] = [];
+  private currentToolGroup: ToolGroupState | null = null;
+  /** Tool metadata captured at permission boundaries; used to restore sparse updates. */
   private readonly sealedToolMeta = new Map<string, SealedToolMeta>();
 
   private cardId: string | null = null;
@@ -307,6 +314,7 @@ export class LarkAcpClient implements acp.Client {
 
     this.status = "complete";
     await this.renderCard({ cancellable: false });
+    this.sealCurrentToolGroup();
 
     this.resetMainPostState();
     this.status = "thinking";
@@ -431,7 +439,7 @@ export class LarkAcpClient implements acp.Client {
   }
 
   /**
-   * Finalise the current message card with the given terminal status, then
+   * Finalise the current message post with the given terminal status, then
    * reset per-prompt state so the next prompt starts clean.
    */
   async finalize(status: AgentStatus): Promise<void> {
@@ -445,11 +453,11 @@ export class LarkAcpClient implements acp.Client {
     const hasRenderableState =
       this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
     const shouldSkipEmptyFinalCard =
-      !hasRenderableState && (this.permissionBoundaryThisPrompt || this.toolCards.size > 0);
+      !hasRenderableState && (this.permissionBoundaryThisPrompt || this.toolEntries.size > 0);
     if (!shouldSkipEmptyFinalCard) await this.renderCard({ cancellable: false });
     await this.finalizeOutstandingToolCards(status);
     this.resetMainPostState();
-    this.toolCards.clear();
+    this.resetToolGroups();
     this.sealedToolMeta.clear();
     this.permissionBoundaryThisPrompt = false;
     this.status = "thinking";
@@ -471,15 +479,19 @@ export class LarkAcpClient implements acp.Client {
   private resolveToolUpdateStatus(toolCallId: string, update: acp.ToolCallUpdate): ToolStatus {
     if (update.status !== undefined && update.status !== null) return update.status as ToolStatus;
     if (hasToolUpdateResult(update)) return "completed";
-    return this.toolCards.get(toolCallId)?.entry.status ?? "in_progress";
+    return this.toolEntries.get(toolCallId)?.entry.status ?? "in_progress";
   }
 
   private async finalizeOutstandingToolCards(promptStatus: AgentStatus): Promise<void> {
     const terminalStatus: ToolStatus = promptStatus === "complete" ? "completed" : "failed";
-    for (const [toolCallId, tool] of this.toolCards) {
+    const touchedGroups = new Set<ToolGroupState>();
+    for (const tool of this.toolEntries.values()) {
       if (tool.entry.status === "completed" || tool.entry.status === "failed") continue;
       tool.entry.status = terminalStatus;
-      await this.renderToolCard(toolCallId);
+      touchedGroups.add(tool.group);
+    }
+    for (const group of touchedGroups) {
+      await this.renderToolGroup(group);
     }
   }
 
@@ -489,12 +501,12 @@ export class LarkAcpClient implements acp.Client {
     toolKind: string,
     status: ToolStatus,
   ): Promise<void> {
-    const existing = this.toolCards.get(toolCallId);
+    const existing = this.toolEntries.get(toolCallId);
     if (existing !== undefined) {
       if (title !== "unknown") existing.entry.title = title;
       if (toolKind !== "tool") existing.entry.toolKind = toolKind;
       existing.entry.status = status;
-      await this.renderToolCard(toolCallId);
+      await this.renderToolGroup(existing.group);
       return;
     }
 
@@ -502,68 +514,122 @@ export class LarkAcpClient implements acp.Client {
     if (meta !== undefined) this.sealedToolMeta.delete(toolCallId);
     const resolvedTitle = title !== "unknown" ? title : (meta?.title ?? title);
     const resolvedKind = toolKind !== "tool" ? toolKind : (meta?.kind ?? toolKind);
-    this.toolCards.set(toolCallId, {
+    const group = this.ensureToolGroup();
+    const entry: ToolEntry = {
+      kind: "tool",
+      toolCallId,
+      title: resolvedTitle,
+      toolKind: resolvedKind,
+      status,
+    };
+    group.entries.push(entry);
+    this.toolEntries.set(toolCallId, { group, entry });
+    await this.renderToolGroup(group);
+  }
+
+  private ensureToolGroup(): ToolGroupState {
+    if (this.currentToolGroup) return this.currentToolGroup;
+    const group: ToolGroupState = {
       cardId: null,
       cardCreating: null,
       editCount: 0,
-      entry: {
-        kind: "tool",
-        toolCallId,
-        title: resolvedTitle,
-        toolKind: resolvedKind,
-        status,
-      },
-    });
-    await this.renderToolCard(toolCallId);
+      entries: [],
+    };
+    this.toolGroups.push(group);
+    this.currentToolGroup = group;
+    return group;
   }
 
-  private async renderToolCard(toolCallId: string): Promise<void> {
+  private sealCurrentToolGroup(): void {
+    this.currentToolGroup = null;
+  }
+
+  private resetToolGroups(): void {
+    this.toolEntries.clear();
+    this.toolGroups.length = 0;
+    this.currentToolGroup = null;
+  }
+
+  private async renderToolGroup(group: ToolGroupState): Promise<void> {
     if (!this.currentMessageId) return;
-    const tool = this.toolCards.get(toolCallId);
-    if (!tool) return;
 
     const state: UnifiedCardState = {
-      status: toolStatusToAgentStatus(tool.entry.status),
-      entries: cloneEntries([tool.entry]),
+      status: this.toolGroupStatus(group),
+      entries: cloneEntries(group.entries),
       cancellable: false,
       chatId: this.currentChatId,
       threadId: this.currentThreadId,
     };
 
-    if (tool.cardId) {
-      if (tool.editCount >= this.maxPostEdits) {
-        await this.recreateToolPost(tool, state);
+    if (group.cardId) {
+      if (group.editCount >= this.maxPostEdits) {
+        await this.recreateToolGroupPost(group, state);
         return;
       }
       try {
-        await this.presenter.updateUnifiedCard(tool.cardId, state);
-        tool.editCount += 1;
+        await this.presenter.updateUnifiedCard(group.cardId, state);
+        group.editCount += 1;
       } catch (err) {
-        this.logger.warn({ err, toolCallId }, "tool post update failed; sending fresh post");
-        await this.recreateToolPost(tool, state);
+        this.logger.warn({ err }, "tool group post update failed; sending fresh post");
+        await this.recreateToolGroupPost(group, state);
       }
       return;
     }
-    if (tool.cardCreating) {
-      const id = await tool.cardCreating;
+    if (group.cardCreating) {
+      const id = await group.cardCreating;
       if (id) {
-        tool.cardId = id;
-        await this.updateToolPostOrRecreate(toolCallId, tool, id, state);
+        group.cardId = id;
+        await this.updateToolGroupPostOrRecreate(group, id, state);
       }
       return;
     }
 
     const promise = this.presenter.sendUnifiedCard(this.currentMessageId, state);
-    tool.cardCreating = promise;
+    group.cardCreating = promise;
     try {
       const id = await promise;
       if (id) {
-        tool.cardId = id;
-        tool.editCount = 0;
+        group.cardId = id;
+        group.editCount = 0;
       }
     } finally {
-      tool.cardCreating = null;
+      group.cardCreating = null;
     }
+  }
+
+  private toolGroupStatus(group: ToolGroupState): AgentStatus {
+    if (group.entries.some((entry) => entry.status === "failed")) return "failed";
+    if (group.entries.every((entry) => entry.status === "completed")) return "complete";
+    return "calling_tool";
+  }
+
+  private async updateToolGroupPostOrRecreate(
+    group: ToolGroupState,
+    postId: string,
+    state: UnifiedCardState,
+  ): Promise<void> {
+    try {
+      await this.presenter.updateUnifiedCard(postId, state);
+      group.cardId = postId;
+      group.editCount += 1;
+    } catch (err) {
+      this.logger.warn(
+        { err },
+        "tool group post update failed during creation; sending fresh post",
+      );
+      await this.recreateToolGroupPost(group, state);
+    }
+  }
+
+  private async recreateToolGroupPost(
+    group: ToolGroupState,
+    state: UnifiedCardState,
+  ): Promise<void> {
+    group.cardId = null;
+    group.cardCreating = null;
+    group.editCount = 0;
+    const id = await this.presenter.sendUnifiedCard(this.currentMessageId, state);
+    if (id) group.cardId = id;
   }
 
   private resetMainPostState(): void {
@@ -638,38 +704,11 @@ export class LarkAcpClient implements acp.Client {
     }
   }
 
-  private async updateToolPostOrRecreate(
-    toolCallId: string,
-    tool: ToolCardState,
-    postId: string,
-    state: UnifiedCardState,
-  ): Promise<void> {
-    try {
-      await this.presenter.updateUnifiedCard(postId, state);
-      tool.cardId = postId;
-      tool.editCount += 1;
-    } catch (err) {
-      this.logger.warn(
-        { err, toolCallId },
-        "tool post update failed during creation; sending fresh post",
-      );
-      await this.recreateToolPost(tool, state);
-    }
-  }
-
-  private async recreateToolPost(tool: ToolCardState, state: UnifiedCardState): Promise<void> {
-    tool.cardId = null;
-    tool.cardCreating = null;
-    tool.editCount = 0;
-    const id = await this.presenter.sendUnifiedCard(this.currentMessageId, state);
-    if (id) tool.cardId = id;
-  }
-
   private hasMainRenderableState(): boolean {
     return this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
   }
 
-  // ----- Card flush -------------------------------------------------------
+  // ----- Post flush -------------------------------------------------------
 
   private scheduleFlush(): void {
     if (!this.currentMessageId) return;

@@ -293,7 +293,7 @@ describe("LarkAcpClient chronological permission rendering", () => {
     ]);
   });
 
-  it("renders each tool call in a separate card", async () => {
+  it("groups consecutive tool calls into one editable post", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
 
@@ -321,7 +321,12 @@ describe("LarkAcpClient chronological permission rendering", () => {
     const sends = ops.filter(
       (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
-    expect(sends).toHaveLength(2);
+    const patches = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+    expect(sends).toHaveLength(1);
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.cardId).toBe("card_1");
     expect(sends[0]?.state.entries).toEqual([
       {
         kind: "tool",
@@ -331,7 +336,73 @@ describe("LarkAcpClient chronological permission rendering", () => {
         status: "pending",
       },
     ]);
-    expect(sends[1]?.state.entries).toEqual([
+    expect(patches[0]?.state.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool_read",
+        title: "Read file",
+        toolKind: "read",
+        status: "pending",
+      },
+      {
+        kind: "tool",
+        toolCallId: "tool_edit",
+        title: "Edit file",
+        toolKind: "edit",
+        status: "pending",
+      },
+    ]);
+  });
+
+  it("starts a new tool group after assistant text lands below prior tools", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops, { postFlushDebounceMs: 1 });
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_read",
+        title: "Read file",
+        kind: "read",
+        status: "pending",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "After first tool." },
+      },
+    });
+    await waitForFlush(20);
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_edit",
+        title: "Edit file",
+        kind: "edit",
+        status: "pending",
+      },
+    });
+
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+
+    expect(sends).toHaveLength(3);
+    expect(sends[0]?.state.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool_read",
+        title: "Read file",
+        toolKind: "read",
+        status: "pending",
+      },
+    ]);
+    expect(sends[1]?.state.entries).toEqual([{ kind: "text", text: "After first tool." }]);
+    expect(sends[2]?.state.entries).toEqual([
       {
         kind: "tool",
         toolCallId: "tool_edit",
