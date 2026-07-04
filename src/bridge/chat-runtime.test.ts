@@ -90,11 +90,26 @@ describe("ChatRuntime idle-eviction getters (regression: evicted mid-spawn)", ()
 /** Records every card state the runtime renders, so we can assert the final
  *  one drops the cancel button. All methods are inert except the ones the
  *  cancel-on-disconnect path touches. */
-function recordingPresenter(states: UnifiedCardState[]): LarkPresenter {
+type ReactionOp =
+  | { kind: "add"; messageId: string; emoji: string | undefined; reactionId: string }
+  | { kind: "remove"; messageId: string; reactionId: string };
+
+function recordingPresenter(
+  states: UnifiedCardState[],
+  reactions: ReactionOp[] = [],
+): LarkPresenter {
+  let reactionSeq = 0;
   return {
     replyText: async () => {},
-    addReaction: async () => "reaction_1",
-    removeReaction: async () => {},
+    addReaction: async (messageId, emoji) => {
+      reactionSeq += 1;
+      const reactionId = `reaction_${reactionSeq}`;
+      reactions.push({ kind: "add", messageId, emoji, reactionId });
+      return reactionId;
+    },
+    removeReaction: async (messageId, reactionId) => {
+      reactions.push({ kind: "remove", messageId, reactionId });
+    },
     sendInterruptCard: async () => null,
     updatePermissionCard: async () => {},
     expirePermissionCard: async () => {},
@@ -263,5 +278,48 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     // Let any stray rejection from the losing race branch surface.
     await new Promise((r) => setTimeout(r, 50));
     expect(replies, "a clean turn must not produce an error/crash reply").toEqual([]);
+  });
+
+  it("updates the original message reaction from processing to the terminal status", async () => {
+    const states: UnifiedCardState[] = [];
+    const reactions: ReactionOp[] = [];
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states, reactions),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "hello" }],
+      messageId: "om_status",
+      chatId: "oc_test",
+    });
+
+    await vi.waitFor(() => {
+      expect(reactions).toContainEqual({
+        kind: "add",
+        messageId: "om_status",
+        emoji: "OnIt",
+        reactionId: "reaction_1",
+      });
+    });
+
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => {
+      expect(reactions).toContainEqual({
+        kind: "add",
+        messageId: "om_status",
+        emoji: "DONE",
+        reactionId: "reaction_2",
+      });
+      expect(reactions).toContainEqual({
+        kind: "remove",
+        messageId: "om_status",
+        reactionId: "reaction_1",
+      });
+    });
   });
 });

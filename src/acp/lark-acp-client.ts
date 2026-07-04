@@ -37,7 +37,11 @@ interface SealedSegment {
 export interface LarkAcpClientCallbacks {
   /** Called whenever the agent emits activity — used to refresh "typing" indicator. */
   onTyping: () => Promise<void>;
+  /** Called when the prompt's user-visible session status changes. */
+  onStatus: (status: SessionStatus) => Promise<void>;
 }
+
+export type SessionStatus = "processing" | "waiting" | "complete" | "failed" | "cancelled";
 
 /**
  * Strategy for handling agent-side permission requests.
@@ -156,6 +160,7 @@ export class LarkAcpClient implements acp.Client {
     }
 
     const requestId = crypto.randomUUID();
+    await this.updateSessionStatus("waiting");
     await this.sealCard(params);
     this.permissionBoundaryThisPrompt = true;
 
@@ -264,6 +269,7 @@ export class LarkAcpClient implements acp.Client {
     if (!pp) return false;
     this.disposePending(requestId);
     pp.resolve({ outcome: { outcome: "selected", optionId } });
+    this.updateSessionStatus("processing");
     return true;
   }
 
@@ -278,6 +284,7 @@ export class LarkAcpClient implements acp.Client {
     if (!pp) return;
     this.disposePending(requestId);
     pp.resolve({ outcome: { outcome: "cancelled" } });
+    this.updateSessionStatus("cancelled");
 
     const cardId = pp.cardMessageId;
     if (cardId) {
@@ -403,6 +410,7 @@ export class LarkAcpClient implements acp.Client {
     this.cardCreating = null;
     this.permissionBoundaryThisPrompt = false;
     this.lastTypingAt = 0;
+    await this.updateSessionStatus(statusToSessionStatus(status));
     this.status = "thinking";
   }
 
@@ -507,4 +515,32 @@ export class LarkAcpClient implements acp.Client {
     this.lastTypingAt = now;
     await this.callbacks.onTyping().catch((err) => this.logger.debug({ err }, "onTyping rejected"));
   }
+
+  private async updateSessionStatus(status: SessionStatus): Promise<void> {
+    await this.callbacks
+      .onStatus(status)
+      .catch((err) => this.logger.debug({ err, status }, "status reaction update rejected"));
+  }
+}
+
+function statusToSessionStatus(status: AgentStatus): SessionStatus {
+  switch (status) {
+    case "complete":
+      return "complete";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "thinking":
+    case "calling_tool":
+    case "responding":
+    case "sealed":
+      return "processing";
+    default:
+      return assertNeverAgentStatus(status);
+  }
+}
+
+function assertNeverAgentStatus(x: never): never {
+  throw new Error(`unexpected agent status: ${String(x)}`);
 }
