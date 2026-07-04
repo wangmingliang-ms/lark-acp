@@ -6,7 +6,7 @@ import type { LarkHttpClient } from "../lark/lark-http.js";
 
 interface CardWithConfig {
   config?: { summary?: { content?: string } };
-  header?: { title?: { content?: string } };
+  header?: { title?: { content?: string }; template?: string };
 }
 
 interface ReplyCardCall {
@@ -73,7 +73,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
       "🔄 处理中…",
       "⏳ 等待确认",
-      "✅ 已完成",
+      "✅ 已结束",
     ]);
     expect(cards[1]?.header?.title?.content).toBe("⏳ 待确认");
   });
@@ -90,8 +90,36 @@ describe("LarkCardPresenter card summary", () => {
       threadId: null,
     });
 
-    expect(cards[0]?.header?.title?.content).toBe("✅ 已完成");
-    expect(cards[0]?.config?.summary?.content).toBe("✅ 已完成");
+    expect(cards[0]?.header?.title?.content).toBe("✅ 已结束");
+    expect(cards[0]?.header?.template).toBe("grey");
+    expect(cards[0]?.config?.summary?.content).toBe("✅ 已结束");
+  });
+
+  it("distinguishes approved and rejected permission cards", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.updatePermissionCard(
+      "card_approve",
+      "edit",
+      "config.json",
+      "允许",
+      "allow_once",
+    );
+    await presenter.updatePermissionCard(
+      "card_reject",
+      "edit",
+      "config.json",
+      "拒绝",
+      "reject_once",
+    );
+
+    expect(cards[0]?.header?.title?.content).toBe("已批准");
+    expect(cards[0]?.header?.template).toBe("green");
+    expect(cards[0]?.config?.summary?.content).toBe("✅ 已批准");
+    expect(cards[1]?.header?.title?.content).toBe("已拒绝");
+    expect(cards[1]?.header?.template).toBe("red");
+    expect(cards[1]?.config?.summary?.content).toBe("❌ 已拒绝");
   });
 
   it("sends topic cards as in-thread replies", async () => {

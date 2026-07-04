@@ -11,15 +11,16 @@ import type {
 } from "./presenter.js";
 
 const HEADER_TEMPLATE_PERMISSION = "blue";
-const HEADER_TEMPLATE_RESOLVED = "green";
+const HEADER_TEMPLATE_APPROVED = "green";
+const HEADER_TEMPLATE_REJECTED = "red";
 const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
   thinking: { content: "💭 思考中...", template: "wathet" },
   calling_tool: { content: "🛠 调用工具...", template: "blue" },
   responding: { content: "✍️ 回复中...", template: "blue" },
-  sealed: { content: "✅ 已完成", template: "green" },
-  complete: { content: "✅ 已完成", template: "green" },
+  sealed: { content: "✅ 已结束", template: "grey" },
+  complete: { content: "✅ 已结束", template: "grey" },
   cancelled: { content: "⛔ 已取消", template: "grey" },
   failed: { content: "⚠️ 出错", template: "red" },
 };
@@ -36,7 +37,7 @@ const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 function summaryForStatus(status: AgentStatus): string {
   switch (status) {
     case "complete":
-      return "✅ 已完成";
+      return "✅ 已结束";
     case "cancelled":
       return "⛔ 已取消";
     case "failed":
@@ -46,7 +47,7 @@ function summaryForStatus(status: AgentStatus): string {
     case "responding":
       return "🔄 处理中…";
     case "sealed":
-      return "✅ 已完成";
+      return "✅ 已结束";
     default:
       return assertNeverStatus(status);
   }
@@ -112,6 +113,7 @@ function buildPermissionCard(
         r: requestId,
         o: opt.optionId,
         n: opt.name,
+        ok: opt.kind,
         k: toolKind,
         t: toolTitle,
         c: chatId,
@@ -126,17 +128,34 @@ function buildPermissionCard(
   return buildV2Card("⏳ 待确认", HEADER_TEMPLATE_PERMISSION, elements, "⏳ 等待确认");
 }
 
-function buildResolvedCard(toolKind: string, toolTitle: string, selectedName: string): object {
+function resolvedPermissionHeader(selectedKind: string | undefined): {
+  readonly title: string;
+  readonly template: string;
+  readonly summary: string;
+} {
+  if (selectedKind?.startsWith("reject_")) {
+    return { title: "已拒绝", template: HEADER_TEMPLATE_REJECTED, summary: "❌ 已拒绝" };
+  }
+  return { title: "已批准", template: HEADER_TEMPLATE_APPROVED, summary: "✅ 已批准" };
+}
+
+function buildResolvedCard(
+  toolKind: string,
+  toolTitle: string,
+  selectedName: string,
+  selectedKind?: string,
+): object {
+  const resolved = resolvedPermissionHeader(selectedKind);
   return buildV2Card(
-    "已确认",
-    HEADER_TEMPLATE_RESOLVED,
+    resolved.title,
+    resolved.template,
     [
       {
         tag: "markdown",
         content: `**${toolKind}**: ${toolTitle}\n\n已选择: **${selectedName}**`,
       },
     ],
-    "✅ 已完成",
+    resolved.summary,
   );
 }
 
@@ -286,8 +305,12 @@ export class LarkCardPresenter implements LarkPresenter {
     toolKind: string,
     toolTitle: string,
     selectedName: string,
+    selectedKind?: string,
   ): Promise<void> {
-    await this.http.patchCard(messageId, buildResolvedCard(toolKind, toolTitle, selectedName));
+    await this.http.patchCard(
+      messageId,
+      buildResolvedCard(toolKind, toolTitle, selectedName, selectedKind),
+    );
   }
 
   async expirePermissionCard(messageId: string, reason: string): Promise<void> {

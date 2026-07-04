@@ -92,6 +92,7 @@ export interface LarkPresenter {
     toolKind: string,
     toolTitle: string,
     selectedName: string,
+    selectedKind?: string,
   ): Promise<void>;
 
   /** Replace a permission card with a "no longer actionable" notice. */

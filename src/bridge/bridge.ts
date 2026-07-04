@@ -115,6 +115,8 @@ interface CardActionPayload {
   o?: string;
   /** Option display name (set on permission cards). */
   n?: string;
+  /** Option kind, e.g. allow_once / reject_once (set on permission cards). */
+  ok?: string;
   /** Tool kind (set on permission cards). */
   k?: string;
   /** Tool title (set on permission cards). */
@@ -938,6 +940,7 @@ export class LarkBridge {
       value.r,
       value.o,
       value.n,
+      value.ok,
       value.k,
       value.t,
     );
@@ -962,6 +965,7 @@ export class LarkBridge {
     requestId: string,
     optionId: string,
     optionName: string | undefined,
+    optionKind: string | undefined,
     toolKind: string | undefined,
     toolTitle: string | undefined,
   ): void {
@@ -983,7 +987,7 @@ export class LarkBridge {
 
     if (messageId && optionName && toolKind && toolTitle) {
       this.presenter
-        .updatePermissionCard(messageId, toolKind, toolTitle, optionName)
+        .updatePermissionCard(messageId, toolKind, toolTitle, optionName, optionKind)
         .catch((err) => this.logger.warn({ err }, "updatePermissionCard failed"));
     }
   }
