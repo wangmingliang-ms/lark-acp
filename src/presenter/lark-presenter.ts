@@ -23,13 +23,13 @@ const HEADER_TEMPLATE_RESOLVED = "green";
 const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
-  thinking: { content: ":Thinking: 思考中...", template: "wathet" },
-  calling_tool: { content: ":OnIt: 调用工具...", template: "blue" },
-  responding: { content: ":Writing: 回复中...", template: "blue" },
-  sealed: { content: ":OnIt: 进行当中", template: "blue" },
-  complete: { content: ":CheckMark: 已完成", template: "green" },
-  cancelled: { content: ":CrossMark: 已取消", template: "grey" },
-  failed: { content: ":ERROR: 出错", template: "red" },
+  thinking: { content: "思考中...", template: "wathet" },
+  calling_tool: { content: "调用工具...", template: "blue" },
+  responding: { content: "回复中...", template: "blue" },
+  sealed: { content: "进行当中", template: "blue" },
+  complete: { content: "已完成", template: "green" },
+  cancelled: { content: "已取消", template: "grey" },
+  failed: { content: "出错", template: "red" },
 };
 
 const CANCEL_BUTTON_TEXT = "中断当前任务";
@@ -130,12 +130,7 @@ function buildPermissionCard(
     );
   }
 
-  return buildV2Card(
-    ":OneSecond: 待确认",
-    HEADER_TEMPLATE_PERMISSION,
-    elements,
-    ":OneSecond: 等待确认",
-  );
+  return buildV2Card("待确认", HEADER_TEMPLATE_PERMISSION, elements, ":OneSecond: 等待确认");
 }
 
 function buildResolvedCard(toolKind: string, toolTitle: string, selectedName: string): object {
@@ -200,7 +195,7 @@ function buildThoughtPanel(text: string): object {
     tag: "collapsible_panel",
     expanded: false,
     header: {
-      title: { tag: "plain_text", content: ":Thinking: 思考" },
+      title: { tag: "plain_text", content: "思考" },
       vertical_align: "center",
       icon: {
         tag: "standard_icon",
