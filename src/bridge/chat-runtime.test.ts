@@ -312,7 +312,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       expect(reactions).toContainEqual({
         kind: "add",
         messageId: "om_status",
-        emoji: "DONE",
+        emoji: "CheckMark",
         reactionId: "reaction_2",
       });
       expect(reactions).toContainEqual({

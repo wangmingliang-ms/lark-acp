@@ -63,7 +63,7 @@ interface StatusReaction {
 const SESSION_STATUS_REACTION: Record<SessionStatus, string> = {
   processing: "OnIt",
   waiting: "OneSecond",
-  complete: "DONE",
+  complete: "CheckMark",
   failed: "ERROR",
   cancelled: "CrossMark",
 };
