@@ -35,26 +35,7 @@ const CARD_SCHEMA_V2 = "2.0";
 const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 
 function summaryForStatus(status: AgentStatus): string {
-  switch (status) {
-    case "complete":
-      return "✅ 已结束";
-    case "cancelled":
-      return "⛔ 已取消";
-    case "failed":
-      return "⚠️ 出错";
-    case "thinking":
-    case "calling_tool":
-    case "responding":
-      return "🔄 处理中…";
-    case "sealed":
-      return "✅ 已结束";
-    default:
-      return assertNeverStatus(status);
-  }
-}
-
-function assertNeverStatus(x: never): never {
-  throw new Error(`unexpected agent status: ${String(x)}`);
+  return STATUS_HEADER[status].content;
 }
 
 function buildV2Card(
@@ -125,7 +106,7 @@ function buildPermissionCard(
     );
   }
 
-  return buildV2Card("⏳ 待确认", HEADER_TEMPLATE_PERMISSION, elements, "⏳ 等待确认");
+  return buildV2Card("⏳ 待确认", HEADER_TEMPLATE_PERMISSION, elements, "⏳ 待确认");
 }
 
 function resolvedPermissionHeader(selectedKind: string | undefined): {
@@ -137,34 +118,34 @@ function resolvedPermissionHeader(selectedKind: string | undefined): {
     return {
       title: "已拒绝（本次）",
       template: HEADER_TEMPLATE_REJECTED,
-      summary: "❌ 已拒绝（本次）",
+      summary: "已拒绝（本次）",
     };
   }
   if (selectedKind === "reject_always") {
     return {
       title: "已拒绝（永久）",
       template: HEADER_TEMPLATE_REJECTED,
-      summary: "❌ 已拒绝（永久）",
+      summary: "已拒绝（永久）",
     };
   }
   if (selectedKind?.startsWith("reject_")) {
-    return { title: "已拒绝", template: HEADER_TEMPLATE_REJECTED, summary: "❌ 已拒绝" };
+    return { title: "已拒绝", template: HEADER_TEMPLATE_REJECTED, summary: "已拒绝" };
   }
   if (selectedKind === "allow_once") {
     return {
       title: "已批准（本次）",
       template: HEADER_TEMPLATE_APPROVED,
-      summary: "✅ 已批准（本次）",
+      summary: "已批准（本次）",
     };
   }
   if (selectedKind === "allow_always") {
     return {
       title: "已批准（永久）",
       template: HEADER_TEMPLATE_APPROVED,
-      summary: "✅ 已批准（永久）",
+      summary: "已批准（永久）",
     };
   }
-  return { title: "已批准", template: HEADER_TEMPLATE_APPROVED, summary: "✅ 已批准" };
+  return { title: "已批准", template: HEADER_TEMPLATE_APPROVED, summary: "已批准" };
 }
 
 function buildResolvedCard(
@@ -201,7 +182,7 @@ function buildExpiredCard(reason: string): object {
     "已失效",
     HEADER_TEMPLATE_EXPIRED,
     [{ tag: "markdown", content: reason }],
-    "⛔ 已取消",
+    "已失效",
   );
 }
 
