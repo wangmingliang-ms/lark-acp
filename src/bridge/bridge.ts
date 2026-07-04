@@ -691,8 +691,7 @@ export class LarkBridge {
     prompt.unshift({ type: "text", text: context });
 
     const runtime = this.acquireRuntime(chatId, threadId, binding);
-    const statusMessageId = threadId !== null ? (event.message.root_id ?? messageId) : messageId;
-    const pending: PendingMessage = { prompt, messageId, statusMessageId, chatId };
+    const pending: PendingMessage = { prompt, messageId, chatId };
     try {
       await runtime.enqueue(pending);
     } catch (err) {

@@ -16,8 +16,6 @@ export interface PendingMessage {
   prompt: acp.ContentBlock[];
   /** Message used as reply/card anchor for this prompt. */
   messageId: string;
-  /** Message whose reaction should represent this prompt's status in Feishu lists. */
-  statusMessageId?: string;
   chatId: string;
 }
 
@@ -192,8 +190,8 @@ export class ChatRuntime {
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
       permissionMode: this.opts.permissionMode,
       callbacks: {
-        onTyping: () => this.setStatusReaction(statusMessageIdFor(firstMessage), "processing"),
-        onStatus: (status) => this.setStatusReaction(statusMessageIdFor(firstMessage), status),
+        onTyping: () => this.setStatusReaction(firstMessage.messageId, "processing"),
+        onStatus: (status) => this.setStatusReaction(firstMessage.messageId, status),
       },
     });
 
@@ -269,11 +267,10 @@ export class ChatRuntime {
       while (state.queue.length > 0 && !this.aborted) {
         const pending = state.queue.shift()!;
         state.lastMessageId = pending.messageId;
-        const statusMessageId = statusMessageIdFor(pending);
 
         state.client.updateCallbacks({
-          onTyping: () => this.setStatusReaction(statusMessageId, "processing"),
-          onStatus: (status) => this.setStatusReaction(statusMessageId, status),
+          onTyping: () => this.setStatusReaction(pending.messageId, "processing"),
+          onStatus: (status) => this.setStatusReaction(pending.messageId, status),
         });
 
         state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
@@ -294,7 +291,7 @@ export class ChatRuntime {
   }
 
   private async runPrompt(state: ChatRuntimeState, pending: PendingMessage): Promise<void> {
-    await this.setStatusReaction(statusMessageIdFor(pending), "processing");
+    await this.setStatusReaction(pending.messageId, "processing");
     this.logger.info("sending prompt to agent");
 
     const result = await this.promptOrDisconnect(state, pending);
@@ -433,10 +430,6 @@ export class ChatRuntime {
       });
     }
   }
-}
-
-function statusMessageIdFor(message: PendingMessage): string {
-  return message.statusMessageId ?? message.messageId;
 }
 
 function stopReasonToStatus(reason: acp.StopReason): AgentStatus {

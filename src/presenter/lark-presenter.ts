@@ -288,7 +288,13 @@ export class LarkCardPresenter implements LarkPresenter {
     chatId: string,
     threadId: string | null,
   ): Promise<string | null> {
-    return this.http.replyCard(messageId, buildPermissionCard(params, requestId, chatId, threadId));
+    return this.http.replyCard(
+      messageId,
+      buildPermissionCard(params, requestId, chatId, threadId),
+      {
+        replyInThread: threadId !== null,
+      },
+    );
   }
 
   async updatePermissionCard(
@@ -318,7 +324,9 @@ export class LarkCardPresenter implements LarkPresenter {
 
   async sendUnifiedCard(replyToMessageId: string, state: UnifiedCardState): Promise<string | null> {
     try {
-      return await this.http.replyCard(replyToMessageId, buildUnifiedCard(state));
+      return await this.http.replyCard(replyToMessageId, buildUnifiedCard(state), {
+        replyInThread: state.threadId !== null,
+      });
     } catch (err) {
       this.logger.warn({ err, replyToMessageId }, "sendUnifiedCard failed");
       return null;

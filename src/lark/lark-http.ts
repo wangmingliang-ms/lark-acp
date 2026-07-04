@@ -120,13 +120,17 @@ export class LarkHttpClient {
    *
    * @throws when the underlying SDK call rejects.
    */
-  async replyCard(messageId: string, card: object): Promise<string | null> {
+  async replyCard(
+    messageId: string,
+    card: object,
+    opts: { replyInThread?: boolean } = {},
+  ): Promise<string | null> {
     const res = await this.client.im.message.reply({
       path: { message_id: messageId },
       data: {
         content: JSON.stringify(card),
         msg_type: "interactive",
-        reply_in_thread: false,
+        ...(opts.replyInThread !== undefined ? { reply_in_thread: opts.replyInThread } : {}),
       },
     });
     return res.data?.message_id ?? null;
@@ -139,13 +143,17 @@ export class LarkHttpClient {
    *
    * @throws when the underlying SDK call rejects.
    */
-  async replyPost(messageId: string, post: object): Promise<string | null> {
+  async replyPost(
+    messageId: string,
+    post: object,
+    opts: { replyInThread?: boolean } = {},
+  ): Promise<string | null> {
     const res = await this.client.im.message.reply({
       path: { message_id: messageId },
       data: {
         content: JSON.stringify({ zh_cn: post }),
         msg_type: "post",
-        reply_in_thread: false,
+        ...(opts.replyInThread !== undefined ? { reply_in_thread: opts.replyInThread } : {}),
       },
     });
     return res.data?.message_id ?? null;

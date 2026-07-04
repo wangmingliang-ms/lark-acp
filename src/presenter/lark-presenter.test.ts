@@ -9,6 +9,11 @@ interface CardWithConfig {
   header?: { title?: { content?: string } };
 }
 
+interface ReplyCardCall {
+  card: CardWithConfig;
+  opts?: { replyInThread?: boolean };
+}
+
 const logger: LarkLogger = {
   debug: () => {},
   info: () => {},
@@ -17,10 +22,16 @@ const logger: LarkLogger = {
   child: () => logger,
 };
 
-function makePresenter(captured: CardWithConfig[]): LarkCardPresenter {
+function makePresenter(captured: CardWithConfig[], calls: ReplyCardCall[] = []): LarkCardPresenter {
   const http = {
-    replyCard: async (_messageId: string, card: object): Promise<string> => {
-      captured.push(card as CardWithConfig);
+    replyCard: async (
+      _messageId: string,
+      card: object,
+      opts?: { replyInThread?: boolean },
+    ): Promise<string> => {
+      const typed = card as CardWithConfig;
+      captured.push(typed);
+      calls.push({ card: typed, opts });
       return "card_1";
     },
     patchCard: async (_messageId: string, card: object): Promise<void> => {
@@ -81,5 +92,22 @@ describe("LarkCardPresenter card summary", () => {
 
     expect(cards[0]?.header?.title?.content).toBe("🔄 进行当中");
     expect(cards[0]?.config?.summary?.content).toBe("🔄 处理中…");
+  });
+
+  it("sends topic cards as in-thread replies", async () => {
+    const cards: CardWithConfig[] = [];
+    const calls: ReplyCardCall[] = [];
+    const presenter = makePresenter(cards, calls);
+
+    await presenter.sendUnifiedCard("om_1", {
+      status: "thinking",
+      entries: [],
+      cancellable: true,
+      chatId: "oc_1",
+      threadId: "omt_1",
+    });
+    await presenter.sendInterruptCard("om_1", permissionRequest(), "req_1", "oc_1", "omt_1");
+
+    expect(calls.map((call) => call.opts?.replyInThread)).toEqual([true, true]);
   });
 });
