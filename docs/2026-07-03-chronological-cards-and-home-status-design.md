@@ -41,11 +41,11 @@
 
 ## 4. 名词：飞书里的三个状态层
 
-| # | 机制 | 代码位置 | 会话内可见 | **主页列表可见** |
-|---|---|---|---|---|
-| ① 反应 emoji | `addReaction(messageId,"THINKING")` | `chat-runtime.ts` prompt 起止 | ✅ | ❌ |
-| ② 卡片 header | `STATUS_HEADER` | `lark-presenter.ts` | ✅ | ❌ |
-| ③ 列表预览 summary | `config.summary.content`（**当前未用**） | — | — | ✅ **唯一能透到主页** |
+| #                  | 机制                                     | 代码位置                      | 会话内可见 | **主页列表可见**      |
+| ------------------ | ---------------------------------------- | ----------------------------- | ---------- | --------------------- |
+| ① 反应 emoji       | `addReaction(messageId,"THINKING")`      | `chat-runtime.ts` prompt 起止 | ✅         | ❌                    |
+| ② 卡片 header      | `STATUS_HEADER`                          | `lark-presenter.ts`           | ✅         | ❌                    |
+| ③ 列表预览 summary | `config.summary.content`（**当前未用**） | —                             | —          | ✅ **唯一能透到主页** |
 
 G2 只能靠 ③ 实现；① / ② 都到不了主页列表。
 
@@ -113,11 +113,11 @@ Approve 通过后 agent 才发 `tool_call_update`(completed)。此时 `toolIndex
 
 ### 6.2 三态映射
 
-| 语义 | summary.content | 何时的卡片 |
-|---|---|---|
-| 🔄 正在进行 | `🔄 处理中…` | 会话卡 C1/C2（thinking / calling_tool / responding / sealed） |
-| ⏳ 等我 Approve | `⏳ 等待确认` | 审批卡 A1（seal 之后紧接发出的新消息） |
-| ✅ 已处理结束 | `✅ 已完成`（失败 `⚠️ 出错` / 取消 `⛔ 已取消`） | finalize 后的会话卡 |
+| 语义            | summary.content                                  | 何时的卡片                                                    |
+| --------------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| 🔄 正在进行     | `🔄 处理中…`                                     | 会话卡 C1/C2（thinking / calling_tool / responding / sealed） |
+| ⏳ 等我 Approve | `⏳ 等待确认`                                    | 审批卡 A1（seal 之后紧接发出的新消息）                        |
+| ✅ 已处理结束   | `✅ 已完成`（失败 `⚠️ 出错` / 取消 `⛔ 已取消`） | finalize 后的会话卡                                           |
 
 因方案 A 保证消息严格时序，"话题列表里最新一条消息" = "当前状态卡"，故列表 summary
 自动等于当前状态。每个话题独立 ListItem、各自最新卡片带各自 summary，天然隔离。

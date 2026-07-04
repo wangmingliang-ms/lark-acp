@@ -21,7 +21,7 @@ chat.
 
 - **Binding stays chat-scoped.** `/bind` / `/unbind` / `/where` and the
   `bindings["<chatId>"]` settings entry are unchanged — a repo+agent is chosen
-  per *chat*, and every topic in that chat inherits it. (One repo, many topics,
+  per _chat_, and every topic in that chat inherits it. (One repo, many topics,
   many sessions.)
 - **Session is thread-scoped, `threadId` nullable.** Runtime + ACP session are
   keyed by `(chatId, threadId)`. `threadId` is `string | null`; `null` = the
@@ -71,7 +71,7 @@ so a topic key can never collide with a bare chatId.
 ## 5. Changed code points
 
 - **`src/session-store/session-store.ts`** — `SessionRecord.threadId:
-  string | null`; new `listByThread(chatId, threadId)`;
+string | null`; new `listByThread(chatId, threadId)`;
   `getLatest(chatId, threadId)` now topic-filtered; `listByChat` retained for
   chat-wide clears.
 - **`src/session-store/file-session-store.ts`** — persists/filters by
@@ -102,7 +102,7 @@ so a topic key can never collide with a bare chatId.
 ## 6. Backward compatibility
 
 - Existing chats: main-conversation runtime + session key unchanged (`null →
-  chatId`).
+chatId`).
 - Existing `sessions.json`: legacy records read back as `threadId: null` (main).
 - Existing/in-flight cards without `th`: `?? null` maps them to the main
   conversation.
@@ -110,10 +110,10 @@ so a topic key can never collide with a bare chatId.
 
 ## 7. Non-goals
 
-- Per-topic *repo* binding (each topic → different repo). Binding stays
+- Per-topic _repo_ binding (each topic → different repo). Binding stays
   chat-scoped; all topics share the chat's repo+agent.
 - Cross-topic memory / shared context between a chat's topics.
-- Changing the concurrency/eviction *policy* (only the counting unit changed
+- Changing the concurrency/eviction _policy_ (only the counting unit changed
   from chat to `(chatId, threadId)`).
 
 ## 8. Tests
@@ -128,7 +128,7 @@ so a topic key can never collide with a bare chatId.
   param; call sites pass `null`.
 - **`src/bridge/chat-runtime.test.ts`** — opts include `threadId: null`.
 - Full suite: **61 passed**. (Store `flush failed` stderr lines under the temp
-  teardown are the *designed* caught fallback, not failures.)
+  teardown are the _designed_ caught fallback, not failures.)
 
 ## 9. Live validation (pending hand-off)
 

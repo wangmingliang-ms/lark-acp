@@ -81,15 +81,10 @@ export class FileSessionStore implements SessionStore {
     return [...records].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  async listByThread(
-    chatId: string,
-    threadId: string | null,
-  ): Promise<readonly SessionRecord[]> {
+  async listByThread(chatId: string, threadId: string | null): Promise<readonly SessionRecord[]> {
     const records = this.data.get(chatId);
     if (!records) return [];
-    return records
-      .filter((r) => r.threadId === threadId)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return records.filter((r) => r.threadId === threadId).sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getLatest(chatId: string, threadId: string | null): Promise<SessionRecord | null> {

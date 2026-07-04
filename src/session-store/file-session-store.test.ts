@@ -15,7 +15,9 @@ import type { SessionRecord } from "./session-store.js";
 let dir: string;
 let store: FileSessionStore;
 
-function record(over: Partial<SessionRecord> & Pick<SessionRecord, "chatId" | "sessionId">): SessionRecord {
+function record(
+  over: Partial<SessionRecord> & Pick<SessionRecord, "chatId" | "sessionId">,
+): SessionRecord {
   return {
     threadId: null,
     agentCommand: "node",
@@ -40,9 +42,15 @@ afterEach(async () => {
 
 describe("FileSessionStore thread scoping", () => {
   it("getLatest isolates threads: each topic resumes its own session", async () => {
-    await store.save(record({ chatId: "oc_A", threadId: null, sessionId: "s_main", updatedAt: 10 }));
-    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_t1", updatedAt: 20 }));
-    await store.save(record({ chatId: "oc_A", threadId: "th_2", sessionId: "s_t2", updatedAt: 30 }));
+    await store.save(
+      record({ chatId: "oc_A", threadId: null, sessionId: "s_main", updatedAt: 10 }),
+    );
+    await store.save(
+      record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_t1", updatedAt: 20 }),
+    );
+    await store.save(
+      record({ chatId: "oc_A", threadId: "th_2", sessionId: "s_t2", updatedAt: 30 }),
+    );
 
     expect(await store.getLatest("oc_A", null)).toMatchObject({ sessionId: "s_main" });
     expect(await store.getLatest("oc_A", "th_1")).toMatchObject({ sessionId: "s_t1" });
@@ -56,8 +64,12 @@ describe("FileSessionStore thread scoping", () => {
   });
 
   it("getLatest picks the most recently updated session within a thread", async () => {
-    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_old", updatedAt: 100 }));
-    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_new", updatedAt: 200 }));
+    await store.save(
+      record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_old", updatedAt: 100 }),
+    );
+    await store.save(
+      record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_new", updatedAt: 200 }),
+    );
     expect(await store.getLatest("oc_A", "th_1")).toMatchObject({ sessionId: "s_new" });
   });
 

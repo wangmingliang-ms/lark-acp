@@ -120,9 +120,7 @@ export function buildRegistry(
       continue;
     }
     if (!patch.command || !patch.label) {
-      throw new Error(
-        `agent preset "${id}" is new and must define both \`label\` and \`command\``,
-      );
+      throw new Error(`agent preset "${id}" is new and must define both \`label\` and \`command\``);
     }
     out.set(id, {
       preset: {

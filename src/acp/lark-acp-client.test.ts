@@ -282,7 +282,7 @@ describe("LarkAcpClient chronological permission rendering", () => {
     expect(ops.filter((op) => op.kind === "sendUnified")).toHaveLength(1);
   });
 
-  it("updates a sealed message card to the terminal status when the prompt finishes", async () => {
+  it("finishes the current message card before rendering a tool card", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
 
@@ -293,24 +293,104 @@ describe("LarkAcpClient chronological permission rendering", () => {
         content: { type: "text", text: "I will edit that." },
       },
     });
-    const responsePromise = client.requestPermission(permissionRequest());
-    await waitForFlush();
-    const permission = ops.find(
-      (op): op is Extract<RenderOp, { kind: "permission" }> => op.kind === "permission",
-    );
-    if (!permission) throw new Error("expected permission request");
-    client.handleCardAction(permission.requestId, "allow");
-    await responsePromise;
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_edit",
+        title: "Edit file",
+        kind: "edit",
+        status: "pending",
+      },
+    });
 
-    await client.sessionUpdate(completedToolUpdate());
+    expect(ops[0]).toMatchObject({
+      kind: "sendUnified",
+      state: {
+        status: "complete",
+        cancellable: false,
+        entries: [{ kind: "text", text: "I will edit that." }],
+      },
+    });
+    expect(ops[1]).toMatchObject({
+      kind: "sendUnified",
+      state: {
+        status: "calling_tool",
+        cancellable: false,
+        entries: [
+          {
+            kind: "tool",
+            toolCallId: "tool_edit",
+            title: "Edit file",
+            toolKind: "edit",
+            status: "pending",
+          },
+        ],
+      },
+    });
+  });
+
+  it("renders text after a tool in a new message card", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Before tool." },
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_read",
+        title: "Read file",
+        kind: "read",
+        status: "pending",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool_read",
+        status: "completed",
+      },
+    });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "After tool." },
+      },
+    });
     await waitForFlush();
     await client.finalize("complete");
 
-    const sealedFinalPatch = ops.find(
-      (op): op is Extract<RenderOp, { kind: "updateUnified" }> =>
-        op.kind === "updateUnified" && op.cardId === "card_1" && op.state.status === "complete",
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
-    expect(sealedFinalPatch?.state.entries).toEqual([{ kind: "text", text: "I will edit that." }]);
-    expect(sealedFinalPatch?.state.cancellable).toBe(false);
+    expect(sends).toHaveLength(3);
+    expect(sends[0]?.state.entries).toEqual([{ kind: "text", text: "Before tool." }]);
+    expect(sends[0]?.state.status).toBe("complete");
+    expect(sends[1]?.state.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool_read",
+        title: "Read file",
+        toolKind: "read",
+        status: "pending",
+      },
+    ]);
+    expect(sends[2]?.state.entries).toEqual([{ kind: "text", text: "After tool." }]);
+
+    const finalTextPatch = ops.find(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> =>
+        op.kind === "updateUnified" && op.cardId === "card_3" && op.state.status === "complete",
+    );
+    expect(finalTextPatch?.state.entries).toEqual([{ kind: "text", text: "After tool." }]);
+    expect(finalTextPatch?.state.cancellable).toBe(false);
   });
 });

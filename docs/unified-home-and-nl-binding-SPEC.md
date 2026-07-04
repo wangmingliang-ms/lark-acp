@@ -16,9 +16,10 @@ Decided interactively; this doc is the durable record so context survives.
    - log wherever the launcher points (`/tmp/lark-acp.log` in our runs)
 2. **Binding UX is clumsy.** Binding a chat needs an absolute path
    (`/bind ~/workspace/copilot-rewrite claude`), painful from a phone.
-   Miller wants to bind by *talking to the agent* in natural language.
+   Miller wants to bind by _talking to the agent_ in natural language.
 
 Miller's decisions:
+
 - Consolidate everything under a single home dir **`~/.lark-acp/`**, created
   on startup if missing. It holds config, logs, session/binding state — the
   one place lark-acp manages.
@@ -52,7 +53,7 @@ works exactly as before.
     lark-acp.log       # default log target (see 1.4)
     inbox/             # reserved for future received-file storage
   ```
-  NOTE: bindings move *into* settings.json (1.2), so there is no separate
+  NOTE: bindings move _into_ settings.json (1.2), so there is no separate
   bindings.json in the new layout.
 
 #### 1.2 `settings.json` schema (superset of today's config.json)
@@ -61,20 +62,21 @@ works exactly as before.
 {
   "credentials": { "appId": "cli_...", "appSecret": "..." },
   "runtime": {
-    "cwd": "...",                    // optional default cwd (unchanged)
+    "cwd": "...", // optional default cwd (unchanged)
     "idleTimeoutMinutes": 1440,
     "maxChats": 10,
     "hideThoughts": false,
     "hideTools": false,
     "hideCancelButton": false,
     "permissionMode": "alwaysAsk",
-    "groupRequireMention": false,     // already implemented on prior branch
-    "unboundCwd": "~/.lark-acp"       // phase 2: reception area for unbound chats
+    "groupRequireMention": false, // already implemented on prior branch
+    "unboundCwd": "~/.lark-acp", // phase 2: reception area for unbound chats
   },
-  "agents": { /* user preset patches, unchanged */ },
-  "bindings": {                       // chatId -> binding (moved out of bindings.json)
-    "oc_xxxx": { "cwd": "/abs/path", "agent": "claude" }
-  }
+  "agents": {/* user preset patches, unchanged */},
+  "bindings": {
+    // chatId -> binding (moved out of bindings.json)
+    "oc_xxxx": { "cwd": "/abs/path", "agent": "claude" },
+  },
 }
 ```
 
@@ -105,6 +107,7 @@ works exactly as before.
 #### 1.5 Migration (must-have — do not lose Miller's live creds/bindings)
 
 On startup, if `~/.lark-acp/settings.json` does NOT exist:
+
 1. If old `~/.config/lark-acp/config.json` exists → read it, and read old
    `~/.local/share/lark-acp/bindings.json` if present → compose a fresh
    `settings.json` (config fields + `bindings` block) and write it.
@@ -112,7 +115,7 @@ On startup, if `~/.lark-acp/settings.json` does NOT exist:
    if the new one is absent.
 3. Leave the old files in place (non-destructive); log a one-line
    "migrated to ~/.lark-acp" notice.
-Idempotent: once settings.json exists, migration is skipped.
+   Idempotent: once settings.json exists, migration is skipped.
 
 #### 1.6 Backward-compat / flags
 
@@ -155,7 +158,7 @@ Three pieces, each with a real pitfall to handle:
   AND drop a short instruction file into the reception cwd (an
   `AGENTS.md` / `CLAUDE.md` the agent auto-reads) explaining:
   "To bind this chat to a repo, set bindings[<this chatId>] = { cwd, agent }
-   in ~/.lark-acp/settings.json. Your chat id is $LARK_ACP_CHAT_ID."
+  in ~/.lark-acp/settings.json. Your chat id is $LARK_ACP_CHAT_ID."
 - So the agent writes the correct `bindings[chatId]` entry, not a guess.
 
 #### 2.3 Hot-reload (NEW — does not exist today)

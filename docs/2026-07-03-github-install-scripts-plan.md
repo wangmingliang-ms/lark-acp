@@ -19,6 +19,7 @@
 - Modify: `README.md` — add "从 GitHub 安装" subsection after the existing `### 安装与运行` block (around line 42), and add a warning note to the now-broken `npm i -g lark-acp` line.
 
 Notes for the implementer:
+
 - The unscoped npm name `lark-acp` is taken by an **unrelated** package on the public registry, so `npm i -g lark-acp` installs the wrong thing. These scripts are the correct install path.
 - `shellcheck` and `pwsh` are **not** installed on the dev machine. POSIX scripts are verified with `sh -n`. The PowerShell parse-check step is optional — skip with a note if `pwsh` is unavailable.
 - Prettier does not format `.sh` / `.ps1` files, so no formatting conflict. Only `README.md` must stay prettier-clean (`printWidth: 100`).
@@ -28,6 +29,7 @@ Notes for the implementer:
 ## Task 1: `install.sh`
 
 **Files:**
+
 - Create: `install.sh`
 
 - [ ] **Step 1: Write the script**
@@ -112,6 +114,7 @@ git commit -m "feat: add install.sh for GitHub-based global install"
 ## Task 2: `uninstall.sh`
 
 **Files:**
+
 - Create: `uninstall.sh`
 
 - [ ] **Step 1: Write the script**
@@ -161,6 +164,7 @@ git commit -m "feat: add uninstall.sh"
 ## Task 3: `install.ps1`
 
 **Files:**
+
 - Create: `install.ps1`
 
 - [ ] **Step 1: Write the script**
@@ -236,6 +240,7 @@ git commit -m "feat: add install.ps1 for GitHub-based global install on Windows"
 ## Task 4: `uninstall.ps1`
 
 **Files:**
+
 - Create: `uninstall.ps1`
 
 - [ ] **Step 1: Write the script**
@@ -282,6 +287,7 @@ git commit -m "feat: add uninstall.ps1"
 ## Task 5: README "从 GitHub 安装" subsection + broken-npm warning
 
 **Files:**
+
 - Modify: `README.md` (insert new subsection between the `### 安装与运行` block's closing note at line 42 and `### 命令格式` at line 44; annotate the `npm i -g lark-acp` line at ~31)
 
 - [ ] **Step 1: Add a warning note under the existing npm method**
@@ -318,7 +324,7 @@ npx -y "github:wangmingliang-ms/lark-acp" --help
 
 - [ ] **Step 2: Insert the new subsection**
 
-Immediately after the blockquote line ending `撤销：\`npm rm -g lark-acp\`。` (line 42) and its following blank line, before `### 命令格式`, insert:
+Immediately after the blockquote line ending `撤销：\`npm rm -g lark-acp\`。`(line 42) and its following blank line, before`### 命令格式`, insert:
 
 ````markdown
 ### 从 GitHub 安装
