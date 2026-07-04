@@ -157,6 +157,17 @@ export class LarkHttpClient {
     return res.data?.message_id ?? null;
   }
 
+  /** PATCH an existing `post` rich-text message with new content. */
+  async updatePost(messageId: string, post: object): Promise<void> {
+    await this.client.im.v1.message.update({
+      path: { message_id: messageId },
+      data: {
+        content: JSON.stringify({ zh_cn: post }),
+        msg_type: "post",
+      },
+    });
+  }
+
   /** Send a fresh interactive card to a chat (no reply context). */
   async sendCardToChat(chatId: string, card: object): Promise<string | null> {
     const res = await this.client.im.message.create({

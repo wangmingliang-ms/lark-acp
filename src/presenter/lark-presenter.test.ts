@@ -9,9 +9,23 @@ interface CardWithConfig {
   header?: { title?: { content?: string } };
 }
 
+interface PostPayload {
+  content?: Array<Array<{ tag?: string; text?: string }>>;
+}
+
 interface ReplyCardCall {
   card: CardWithConfig;
   opts?: { replyInThread?: boolean };
+}
+
+interface ReplyPostCall {
+  post: PostPayload;
+  opts?: { replyInThread?: boolean };
+}
+
+interface UpdatePostCall {
+  messageId: string;
+  post: PostPayload;
 }
 
 const logger: LarkLogger = {
@@ -22,20 +36,37 @@ const logger: LarkLogger = {
   child: () => logger,
 };
 
-function makePresenter(captured: CardWithConfig[], calls: ReplyCardCall[] = []): LarkCardPresenter {
+function postText(post: PostPayload | undefined): string {
+  return post?.content?.flatMap((row) => row.map((item) => item.text ?? "")).join("\n") ?? "";
+}
+
+function makePresenter(captured: {
+  cards?: ReplyCardCall[];
+  posts?: ReplyPostCall[];
+  updates?: UpdatePostCall[];
+}): LarkCardPresenter {
   const http = {
     replyCard: async (
       _messageId: string,
       card: object,
       opts?: { replyInThread?: boolean },
     ): Promise<string> => {
-      const typed = card as CardWithConfig;
-      captured.push(typed);
-      calls.push({ card: typed, opts });
+      captured.cards?.push({ card: card as CardWithConfig, opts });
       return "card_1";
     },
     patchCard: async (_messageId: string, card: object): Promise<void> => {
-      captured.push(card as CardWithConfig);
+      captured.cards?.push({ card: card as CardWithConfig });
+    },
+    replyPost: async (
+      _messageId: string,
+      post: object,
+      opts?: { replyInThread?: boolean },
+    ): Promise<string> => {
+      captured.posts?.push({ post: post as PostPayload, opts });
+      return "post_1";
+    },
+    updatePost: async (messageId: string, post: object): Promise<void> => {
+      captured.updates?.push({ messageId, post: post as PostPayload });
     },
   } as unknown as LarkHttpClient;
   return new LarkCardPresenter({ http, logger });
@@ -49,20 +80,45 @@ function permissionRequest(): acp.RequestPermissionRequest {
   };
 }
 
-describe("LarkCardPresenter card summary", () => {
-  it("adds processing / waiting / terminal summaries for home-list status", async () => {
-    const cards: CardWithConfig[] = [];
-    const presenter = makePresenter(cards);
+describe("LarkCardPresenter Hermes-style rendering", () => {
+  it("renders agent output as rich-text post messages instead of interactive cards", async () => {
+    const cards: ReplyCardCall[] = [];
+    const posts: ReplyPostCall[] = [];
+    const presenter = makePresenter({ cards, posts });
 
     await presenter.sendUnifiedCard("om_1", {
-      status: "thinking",
-      entries: [],
+      status: "responding",
+      entries: [
+        { kind: "text", text: "Hello **world**" },
+        { kind: "thought", text: "Need to inspect files" },
+        {
+          kind: "tool",
+          toolCallId: "tool_read",
+          title: "Read file",
+          toolKind: "read",
+          status: "completed",
+        },
+      ],
       cancellable: true,
       chatId: "oc_1",
       threadId: null,
     });
-    await presenter.sendInterruptCard("om_1", permissionRequest(), "req_1", "oc_1", null);
-    await presenter.updateUnifiedCard("card_1", {
+
+    expect(cards).toHaveLength(0);
+    expect(posts).toHaveLength(1);
+    const text = postText(posts[0]?.post);
+    expect(text).toContain("Hello **world**");
+    expect(text).toContain("💭 思考");
+    expect(text).toContain("Need to inspect files");
+    expect(text).toContain("✅ **read**: Read file");
+    expect(text).not.toContain("中断当前任务");
+  });
+
+  it("patches existing agent output by updating the post message", async () => {
+    const updates: UpdatePostCall[] = [];
+    const presenter = makePresenter({ updates });
+
+    await presenter.updateUnifiedCard("post_1", {
       status: "complete",
       entries: [{ kind: "text", text: "done" }],
       cancellable: false,
@@ -70,44 +126,37 @@ describe("LarkCardPresenter card summary", () => {
       threadId: null,
     });
 
-    expect(cards.map((card) => card.config?.summary?.content)).toEqual([
-      "🔄 处理中…",
-      "⏳ 等待确认",
-      "✅ 已完成",
-    ]);
-    expect(cards[1]?.header?.title?.content).toBe("⏳ 待确认");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.messageId).toBe("post_1");
+    expect(postText(updates[0]?.post)).toContain("done");
   });
 
-  it("renders sealed message cards as still-in-progress", async () => {
-    const cards: CardWithConfig[] = [];
-    const presenter = makePresenter(cards);
+  it("keeps approval prompts as interactive cards with waiting summary", async () => {
+    const cards: ReplyCardCall[] = [];
+    const presenter = makePresenter({ cards });
 
-    await presenter.sendUnifiedCard("om_1", {
-      status: "sealed",
-      entries: [{ kind: "text", text: "before approve" }],
-      cancellable: false,
-      chatId: "oc_1",
-      threadId: null,
-    });
+    await presenter.sendInterruptCard("om_1", permissionRequest(), "req_1", "oc_1", null);
 
-    expect(cards[0]?.header?.title?.content).toBe("🔄 进行当中");
-    expect(cards[0]?.config?.summary?.content).toBe("🔄 处理中…");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.card.config?.summary?.content).toBe("⏳ 等待确认");
+    expect(cards[0]?.card.header?.title?.content).toBe("⏳ 待确认");
   });
 
-  it("sends topic cards as in-thread replies", async () => {
-    const cards: CardWithConfig[] = [];
-    const calls: ReplyCardCall[] = [];
-    const presenter = makePresenter(cards, calls);
+  it("sends both post output and approval cards as in-thread replies", async () => {
+    const cards: ReplyCardCall[] = [];
+    const posts: ReplyPostCall[] = [];
+    const presenter = makePresenter({ cards, posts });
 
     await presenter.sendUnifiedCard("om_1", {
       status: "thinking",
-      entries: [],
+      entries: [{ kind: "text", text: "Working" }],
       cancellable: true,
       chatId: "oc_1",
       threadId: "omt_1",
     });
     await presenter.sendInterruptCard("om_1", permissionRequest(), "req_1", "oc_1", "omt_1");
 
-    expect(calls.map((call) => call.opts?.replyInThread)).toEqual([true, true]);
+    expect(posts.map((call) => call.opts?.replyInThread)).toEqual([true]);
+    expect(cards.map((call) => call.opts?.replyInThread)).toEqual([true]);
   });
 });

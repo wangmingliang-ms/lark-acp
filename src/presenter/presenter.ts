@@ -36,12 +36,12 @@ export interface NoticeCardSpec {
   readonly template: NoticeTemplate;
 }
 
-/** Snapshot the presenter renders into a single Lark interactive card. */
+/** Snapshot the presenter renders into a single agent output message. */
 export interface UnifiedCardState {
   status: AgentStatus;
   entries: readonly TimelineEntry[];
-  /** Show the bottom "cancel" button. Typically true while the agent is
-   *  still working. */
+  /** Whether this segment is still cancellable. Post renderers cannot show a
+   *  button, but alternate renderers may expose one. */
   cancellable: boolean;
   /** Chat id — embedded in the cancel button's action payload so the
    *  bridge can route the click back to the right runtime. */
@@ -54,7 +54,7 @@ export interface UnifiedCardState {
 
 /**
  * Surface the bridge uses to render itself to the user — every visible
- * artefact (replies, reactions, permission cards, unified timeline card)
+ * artefact (replies, permission cards, agent output messages)
  * goes through this interface.
  *
  * Default implementation is {@link LarkCardPresenter}. Replace for
@@ -63,8 +63,8 @@ export interface UnifiedCardState {
 export interface LarkPresenter {
   /**
    * Reply to `messageId` with plain-ish text (rendered as a Lark `post`
-   * rich-text message). Used for system notices — agent output is
-   * rendered into the unified card instead.
+   * rich-text message). Used for system notices — agent output is rendered
+   * through {@link sendUnifiedCard} / {@link updateUnifiedCard} instead.
    *
    * @throws when the underlying transport rejects.
    */
@@ -105,11 +105,11 @@ export interface LarkPresenter {
   replyNoticeCard(replyToMessageId: string, notice: NoticeCardSpec): Promise<void>;
 
   /**
-   * Send the per-prompt unified card. Returns the card's message id so
-   * the caller can patch it as the timeline grows.
+   * Send one agent output segment. Returns the message id so the caller can
+   * patch it as the segment grows.
    */
   sendUnifiedCard(replyToMessageId: string, state: UnifiedCardState): Promise<string | null>;
 
-  /** Patch an existing unified card with a new state. */
+  /** Patch an existing agent output segment with a new state. */
   updateUnifiedCard(cardMessageId: string, state: UnifiedCardState): Promise<void>;
 }

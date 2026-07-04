@@ -62,9 +62,11 @@ bin/
     │  patchCard(final) ◄────────┤ finalize(status)                   │
 ```
 
-### Unified Card：一张卡片承载整轮对话
+### Hermes-style 输出流：post 消息 + Approval 卡片
 
-为避免每次 thought / text / tool 切换都新发一张卡片刷屏，桥接层在 `LarkAcpClient` 内部维护一条**结构化时间线**（`TimelineEntry[]`），每次 ACP 流事件追加 / 更新条目，再 debounce 后整体渲染成一张飞书互动卡片：
+普通 agent 输出不再使用大 interactive card 作为主载体，而是参考 Hermes Agent：用飞书 `post` 富文本消息展示文本、思考和工具调用；只有需要按钮的场景（例如 `requestPermission` approval）仍使用 interactive card。
+
+`LarkAcpClient` 内部仍维护结构化时间线（`TimelineEntry[]`），每次 ACP 流事件追加 / 更新条目，再 debounce 后渲染/更新为一条飞书 post 消息：
 
 ```ts
 type TimelineEntry =
@@ -74,32 +76,22 @@ type TimelineEntry =
 ```
 
 - 同类型相邻条目会合并（`appendText` 把连续的 chunk 拼到最后一项）；
-- 工具条目通过 `toolCallId → index` 索引表 O(1) 查找更新（`tool_call_update` 事件）；
-- 渲染时连续条目用 `hr` 分隔，思考用 v2 `collapsible_panel` 折叠展示；
-- 卡片头部 `STATUS_HEADER` 实时反映 Agent 状态：`thinking` / `calling_tool` / `responding` / `complete` / `cancelled` / `failed`；
-- 运行中卡片底部带"中断当前任务"按钮；finalize 时按钮消失、头部变为终态色。
-
-`scheduleFlush()` 用 100ms 的 debounce 合并连续事件，避免高频 `patchCard` 触发限流。`flushing` 标志防止首次创建卡片时与 patch 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 patch。
+- ToolCall 是时间线切分点：出现工具调用前会先结束当前 message segment；工具调用自己作为简洁的一行 post 消息展示，后续工具状态通过 `updatePost` 更新同一条消息；工具之后继续输出文本时开新的 message segment；
+- 思考以引用块形式展示，工具调用以 `⏸/⏳/✅/❌ **kind**: title` 的紧凑格式展示，不把大 diff 塞进正文；
+- `scheduleFlush()` 用 100ms debounce 合并连续事件，避免高频更新触发限流。`flushing` 标志防止首次创建消息时与 update 竞态。`finalize(status)` 会等待 in-flight flush 完成，再做最后一次 update。
 
 ### 中断 / 取消链路
 
-用户有两种方式中断当前 prompt：
-
-1. `/cancel`、`取消`、`/stop`、`停止` 任意命令消息；
-2. 点击运行中卡片底部的"中断当前任务"按钮。
-
-两条路径最终都进入 `ChatRuntime.cancel()`：
+用户通过 `/cancel`、`取消`、`/stop`、`停止` 任意命令消息中断当前 prompt。普通 post 消息无法承载按钮；需要交互按钮的 approval 仍走 card。
 
 ```
-按钮点击 → bridge.handleCardAction
-              └─ value.cancel === true → handleCancelButton(chatId)
-                                          └─ runtime.cancel()
-                                              ├─ client.cancelPendingPermission()
-                                              ├─ connection.cancel({ sessionId })
-                                              └─ queue.length = 0
+取消命令 → ChatRuntime.cancel()
+            ├─ client.cancelPendingPermission()
+            ├─ connection.cancel({ sessionId })
+            └─ queue.length = 0
 ```
 
-Agent 收到 cancel 后 `prompt()` 以 `stopReason: "cancelled"` 返回，`finalize("cancelled")` 把卡片头改成 "⛔ 已取消"。Agent 子进程**不会**被杀掉——下次消息直接复用同一 session。`shutdown()` 才会真正杀掉子进程，用在 `/new` / `/restart` 命令、空闲超时、或 Agent 认证失败 / 已死等场景。
+Agent 收到 cancel 后 `prompt()` 以 `stopReason: "cancelled"` 返回。Agent 子进程**不会**被杀掉——下次消息直接复用同一 session。`shutdown()` 才会真正杀掉子进程，用在 `/new` / `/restart` 命令、空闲超时、或 Agent 认证失败 / 已死等场景。
 
 ### 工具调用授权流程
 

@@ -3,7 +3,6 @@ import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 import { markdownToPost, splitMarkdown } from "./lark-markdown.js";
 import type {
-  AgentStatus,
   LarkPresenter,
   NoticeCardSpec,
   TimelineEntry,
@@ -22,46 +21,11 @@ const HEADER_TEMPLATE_PERMISSION = "blue";
 const HEADER_TEMPLATE_RESOLVED = "green";
 const HEADER_TEMPLATE_EXPIRED = "grey";
 
-const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
-  thinking: { content: "💭 思考中...", template: "wathet" },
-  calling_tool: { content: "🛠 调用工具...", template: "blue" },
-  responding: { content: "✍️ 回复中...", template: "blue" },
-  sealed: { content: "🔄 进行当中", template: "blue" },
-  complete: { content: "✅ 已完成", template: "green" },
-  cancelled: { content: "⛔ 已取消", template: "grey" },
-  failed: { content: "⚠️ 出错", template: "red" },
-};
-
-const CANCEL_BUTTON_TEXT = "中断当前任务";
-
-// Card JSON 2.0 — required for the `collapsible_panel` element used by
-// thought entries. v1.0 cards silently degrade unknown components to
-// plaintext, which is why thoughts previously rendered uncollapsed.
+// Card JSON 2.0 — used only for interactive approval / notice cards now that
+// ordinary agent output follows Hermes-style rich-text post messages.
 // https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-structure
 const CARD_SCHEMA_V2 = "2.0";
 const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
-
-function summaryForStatus(status: AgentStatus): string {
-  switch (status) {
-    case "complete":
-      return "✅ 已完成";
-    case "cancelled":
-      return "⛔ 已取消";
-    case "failed":
-      return "⚠️ 出错";
-    case "thinking":
-    case "calling_tool":
-    case "responding":
-    case "sealed":
-      return "🔄 处理中…";
-    default:
-      return assertNeverStatus(status);
-  }
-}
-
-function assertNeverStatus(x: never): never {
-  throw new Error(`unexpected agent status: ${String(x)}`);
-}
 
 function buildV2Card(
   headerContent: string,
@@ -178,74 +142,29 @@ function nonThoughtEntryToMarkdown(entry: Exclude<TimelineEntry, { kind: "though
       return entry.text;
     case "tool": {
       const mark = STATUS_MARKS[entry.status];
-      const head = `${mark} **${entry.toolKind}**: ${entry.title}`;
-      return entry.detail ? `${head}\n\n${entry.detail}` : head;
+      return `${mark} **${entry.toolKind}**: ${entry.title}`;
     }
     default:
       return assertNever(entry);
   }
 }
 
-function buildThoughtPanel(text: string): object {
-  // Aligned with the canonical v2 sample (plain_text title, icon_position
-  // "right"). Lark's v2 renderer falls back to plaintext when any field on
-  // collapsible_panel is unrecognized — so deviate from the sample only
-  // when necessary.
-  return {
-    tag: "collapsible_panel",
-    expanded: false,
-    header: {
-      title: { tag: "plain_text", content: "💭 思考" },
-      vertical_align: "center",
-      icon: {
-        tag: "standard_icon",
-        token: "down-small-ccm_outlined",
-        color: "",
-        size: "16px 16px",
-      },
-      icon_position: "right",
-      icon_expanded_angle: -180,
-    },
-    border: { color: "grey", corner_radius: "5px" },
-    vertical_spacing: "8px",
-    padding: "8px 8px 8px 8px",
-    elements: [{ tag: "markdown", content: text }],
-  };
+function thoughtToMarkdown(text: string): string {
+  const quoted = text
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `> 💭 思考\n${quoted}`;
 }
 
-function entryToCardElement(entry: TimelineEntry): object {
-  if (entry.kind === "thought") return buildThoughtPanel(entry.text);
-  return { tag: "markdown", content: nonThoughtEntryToMarkdown(entry) };
+function timelineEntryToMarkdown(entry: TimelineEntry): string {
+  if (entry.kind === "thought") return thoughtToMarkdown(entry.text);
+  return nonThoughtEntryToMarkdown(entry);
 }
 
-function buildUnifiedCard(state: UnifiedCardState): object {
-  const elements: object[] = [];
-
-  if (state.entries.length === 0) {
-    elements.push({ tag: "markdown", content: "_准备中..._" });
-  } else {
-    state.entries.forEach((entry, i) => {
-      // Don't draw a divider directly above a collapsible panel — the
-      // panel already has its own border and the extra hr looks noisy.
-      if (i > 0 && entry.kind !== "thought") elements.push({ tag: "hr" });
-      elements.push(entryToCardElement(entry));
-    });
-  }
-
-  if (state.cancellable) {
-    elements.push({ tag: "hr" });
-    elements.push(
-      buildCallbackButton(CANCEL_BUTTON_TEXT, "danger", {
-        cancel: true,
-        c: state.chatId,
-        // See buildPermissionCard: `th` omitted for the main conversation.
-        ...(state.threadId !== null ? { th: state.threadId } : {}),
-      }),
-    );
-  }
-
-  const header = STATUS_HEADER[state.status];
-  return buildV2Card(header.content, header.template, elements, summaryForStatus(state.status));
+function buildUnifiedPostMarkdown(state: UnifiedCardState): string {
+  if (state.entries.length === 0) return "_准备中..._";
+  return state.entries.map(timelineEntryToMarkdown).join("\n\n---\n\n");
 }
 
 export interface LarkCardPresenterOptions {
@@ -316,20 +235,24 @@ export class LarkCardPresenter implements LarkPresenter {
 
   async sendUnifiedCard(replyToMessageId: string, state: UnifiedCardState): Promise<string | null> {
     try {
-      return await this.http.replyCard(replyToMessageId, buildUnifiedCard(state), {
-        replyInThread: state.threadId !== null,
-      });
+      return await this.http.replyPost(
+        replyToMessageId,
+        markdownToPost(buildUnifiedPostMarkdown(state)),
+        {
+          replyInThread: state.threadId !== null,
+        },
+      );
     } catch (err) {
-      this.logger.warn({ err, replyToMessageId }, "sendUnifiedCard failed");
+      this.logger.warn({ err, replyToMessageId }, "sendUnifiedPost failed");
       return null;
     }
   }
 
   async updateUnifiedCard(cardMessageId: string, state: UnifiedCardState): Promise<void> {
     try {
-      await this.http.patchCard(cardMessageId, buildUnifiedCard(state));
+      await this.http.updatePost(cardMessageId, markdownToPost(buildUnifiedPostMarkdown(state)));
     } catch (err) {
-      this.logger.warn({ err, cardMessageId }, "updateUnifiedCard failed");
+      this.logger.warn({ err, cardMessageId }, "updateUnifiedPost failed");
     }
   }
 }
