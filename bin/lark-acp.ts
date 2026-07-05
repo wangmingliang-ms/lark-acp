@@ -38,9 +38,11 @@ import {
 import type {
   LarkLogger,
   PermissionMode,
+  SessionControls,
   AgentResolver,
   ResolvedAgentInvocation,
 } from "../src/index.js";
+import { sendControlRequest } from "../src/bridge/control-server.js";
 import {
   buildRegistry,
   resolveAgent,
@@ -53,6 +55,7 @@ import {
   stopBridge,
   statusBridge,
   tailLog,
+  bridgeControlSocketPath,
   bridgeRestartMarkerPath,
   markBridgeRestart,
   clearBridgeRestartMarker,
@@ -497,7 +500,17 @@ function optStringArrayField(label: string, value: unknown): Record<string, read
 
 type ParsedArgs = {
   readonly command:
-    "proxy" | "agents" | "help" | "version" | "start" | "stop" | "restart" | "status" | "logs";
+    | "proxy"
+    | "agents"
+    | "help"
+    | "version"
+    | "start"
+    | "stop"
+    | "restart"
+    | "status"
+    | "logs"
+    | "control"
+    | "sessions";
   /** Preset id (`--agent <id>`); resolved against the registry in {@link runProxy}. */
   readonly agentPreset?: string;
   /** Raw command from `proxy -- <cmd>`; mutually exclusive with `agentPreset`. */
@@ -527,6 +540,11 @@ type ParsedArgs = {
   readonly logsFollow?: boolean;
   /** `logs -n <N>` — number of trailing lines. */
   readonly logsLines?: number;
+  readonly controlAction?: "capabilities";
+  readonly sessionsAction?: "set-control";
+  readonly targetChatId?: string;
+  readonly targetThreadId?: string | null;
+  readonly controlJson?: string | boolean;
 };
 
 const HELP_FLAGS = new Set(["-h", "--help"]);
@@ -601,6 +619,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (token === "stop") return finalize("stop");
     if (token === "status") return finalize("status");
     if (token === "logs") return finalize("logs", undefined, [], parseLogsFlags(argv, i + 1));
+    if (token === "control")
+      return finalize("control", undefined, [], parseControlFlags(argv, i + 1));
+    if (token === "sessions")
+      return finalize("sessions", undefined, [], parseSessionsFlags(argv, i + 1));
 
     switch (token) {
       case "--cwd":
@@ -710,6 +732,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly subcommandIndex?: number;
       readonly logsFollow?: boolean;
       readonly logsLines?: number;
+      readonly controlAction?: "capabilities";
+      readonly sessionsAction?: "set-control";
+      readonly targetChatId?: string;
+      readonly targetThreadId?: string | null;
+      readonly controlJson?: string | boolean;
     } = {},
   ): ParsedArgs {
     return {
@@ -733,6 +760,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(extra.subcommandIndex !== undefined ? { subcommandIndex: extra.subcommandIndex } : {}),
       ...(extra.logsFollow !== undefined ? { logsFollow: extra.logsFollow } : {}),
       ...(extra.logsLines !== undefined ? { logsLines: extra.logsLines } : {}),
+      ...(extra.controlAction !== undefined ? { controlAction: extra.controlAction } : {}),
+      ...(extra.sessionsAction !== undefined ? { sessionsAction: extra.sessionsAction } : {}),
+      ...(extra.targetChatId !== undefined ? { targetChatId: extra.targetChatId } : {}),
+      ...(extra.targetThreadId !== undefined ? { targetThreadId: extra.targetThreadId } : {}),
+      ...(extra.controlJson !== undefined ? { controlJson: extra.controlJson } : {}),
     };
   }
 }
@@ -770,6 +802,93 @@ function parseLogsFlags(
     i++;
   }
   return { logsFollow: follow, logsLines: lines };
+}
+
+function parseControlFlags(
+  argv: readonly string[],
+  start: number,
+): {
+  readonly controlAction: "capabilities";
+  readonly targetChatId: string;
+  readonly targetThreadId?: string | null;
+} {
+  const action = argv[start];
+  if (action !== "capabilities") throw new CliError("control requires subcommand: capabilities");
+  const parsed = parseTargetFlags(argv, start + 1);
+  return {
+    controlAction: "capabilities",
+    targetChatId: parsed.chatId,
+    ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+  };
+}
+
+function parseSessionsFlags(
+  argv: readonly string[],
+  start: number,
+): {
+  readonly sessionsAction: "set-control";
+  readonly targetChatId: string;
+  readonly targetThreadId?: string | null;
+  readonly controlJson: string;
+} {
+  const action = argv[start];
+  if (action !== "set-control") throw new CliError("sessions requires subcommand: set-control");
+  const parsed = parseTargetFlags(argv, start + 1);
+  if (typeof parsed.json !== "string")
+    throw new CliError("sessions set-control requires --json <json>");
+  return {
+    sessionsAction: "set-control",
+    targetChatId: parsed.chatId,
+    ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+    controlJson: parsed.json,
+  };
+}
+
+function parseTargetFlags(
+  argv: readonly string[],
+  start: number,
+): {
+  readonly chatId: string;
+  readonly threadId?: string | null;
+  readonly json?: string | boolean;
+} {
+  let chatId: string | undefined;
+  let threadId: string | null | undefined;
+  let json: string | boolean | undefined;
+  let i = start;
+  while (i < argv.length) {
+    const token = argv[i];
+    const value = argv[i + 1];
+    if (token === "--chat-id") {
+      if (value === undefined) throw new CliError("--chat-id requires a value");
+      chatId = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--thread-id") {
+      if (value === undefined) throw new CliError("--thread-id requires a value");
+      threadId = value === "" || value === "null" || value === "<main>" ? null : value;
+      i += 2;
+      continue;
+    }
+    if (token === "--json") {
+      if (value === undefined || value.startsWith("--")) {
+        json = true;
+        i += 1;
+      } else {
+        json = value;
+        i += 2;
+      }
+      continue;
+    }
+    throw new CliError(`unknown control option: ${token ?? "<none>"}`);
+  }
+  if (!chatId) throw new CliError("--chat-id is required");
+  return {
+    chatId,
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(json !== undefined ? { json } : {}),
+  };
 }
 
 // ---------- effective config ---------------------------------------------
@@ -930,6 +1049,8 @@ function printHelp(): void {
     `  ${APP_NAME} [global-options] start [--agent <preset>]   (run proxy in background)`,
     `  ${APP_NAME} [global-options] stop | restart | status`,
     `  ${APP_NAME} logs [-f] [-n <lines>]`,
+    `  ${APP_NAME} control capabilities --chat-id <id> [--thread-id <id>] [--json]`,
+    `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
     `  ${APP_NAME} version`,
@@ -981,6 +1102,16 @@ function printHelp(): void {
     `  status                 Show whether the bridge is running (PID + uptime).`,
     `  logs [-f] [-n <lines>] Print the tail of bridge.log; -f follows output,`,
     `                         -n sets how many trailing lines (default ${DEFAULT_LOG_LINES}).`,
+    ``,
+    `Session controls (live bridge required):`,
+    `  control capabilities --chat-id <id> [--thread-id <id>] [--json]`,
+    `                         Print live ACP session capabilities: models, modes,`,
+    `                         configOptions, plus bridgePermissionModes.`,
+    `  sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
+    `                         Persist controls to sessions.json and apply them to`,
+    `                         the live runtime when present. The controls JSON uses`,
+    `                         ACP-shaped fields: modelId, modeId, config, plus`,
+    `                         lark-acp bridgePermissionMode.`,
     ``,
     `Settings file (${SETTINGS_FILE}, under the home dir):`,
     `  {`,
@@ -1060,6 +1191,137 @@ function printAgents(registry: Registry): void {
   lines.push(`Add or override entries via the \`agents\` field of ${CONFIG_FILE}.`);
   lines.push("");
   process.stdout.write(lines.join("\n"));
+}
+
+function parseControlJson(raw: string): SessionControls {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new CliError(`invalid --json controls: ${formatError(err)}`);
+  }
+  return validateSessionControls(parsed);
+}
+
+function validateSessionControls(value: unknown): SessionControls {
+  if (!isRecord(value)) throw new CliError("controls JSON must be an object");
+  const out: {
+    modelId?: string;
+    modeId?: string;
+    bridgePermissionMode?: PermissionMode;
+    config?: Record<
+      string,
+      { readonly type: "boolean"; readonly value: boolean } | { readonly value: string }
+    >;
+  } = {};
+
+  const modelId = value["modelId"];
+  if (modelId !== undefined) {
+    if (typeof modelId !== "string" || modelId.length === 0) {
+      throw new CliError("controls.modelId must be a non-empty string");
+    }
+    out.modelId = modelId;
+  }
+
+  const modeId = value["modeId"];
+  if (modeId !== undefined) {
+    if (typeof modeId !== "string" || modeId.length === 0) {
+      throw new CliError("controls.modeId must be a non-empty string");
+    }
+    out.modeId = modeId;
+  }
+
+  const bridgePermissionMode = value["bridgePermissionMode"];
+  if (bridgePermissionMode !== undefined) {
+    if (typeof bridgePermissionMode !== "string" || !isPermissionMode(bridgePermissionMode)) {
+      throw new CliError(
+        `controls.bridgePermissionMode must be one of: ${PERMISSION_MODES.join(" | ")}`,
+      );
+    }
+    out.bridgePermissionMode = bridgePermissionMode;
+  }
+
+  const config = value["config"];
+  if (config !== undefined) {
+    if (!isRecord(config))
+      throw new CliError("controls.config must be an object keyed by configId");
+    const parsedConfig: Record<
+      string,
+      { readonly type: "boolean"; readonly value: boolean } | { readonly value: string }
+    > = {};
+    for (const [configId, rawValue] of Object.entries(config)) {
+      if (!isRecord(rawValue)) throw new CliError(`controls.config.${configId} must be an object`);
+      const type = rawValue["type"];
+      const optionValue = rawValue["value"];
+      if (type === "boolean") {
+        if (typeof optionValue !== "boolean") {
+          throw new CliError(`controls.config.${configId}.value must be a boolean`);
+        }
+        parsedConfig[configId] = { type: "boolean", value: optionValue };
+        continue;
+      }
+      // ACP select config requests are `{ configId, sessionId, value: <valueId> }`
+      // with no `type` field. For convenience, tolerate `type: "select"` in CLI
+      // input but do not persist it.
+      if (type !== undefined && type !== "select") {
+        throw new CliError(`controls.config.${configId}.type must be "boolean" or "select"`);
+      }
+      if (typeof optionValue !== "string" || optionValue.length === 0) {
+        throw new CliError(`controls.config.${configId}.value must be a non-empty string`);
+      }
+      parsedConfig[configId] = { value: optionValue };
+    }
+    out.config = parsedConfig;
+  }
+
+  if (
+    out.modelId === undefined &&
+    out.modeId === undefined &&
+    out.bridgePermissionMode === undefined &&
+    out.config === undefined
+  ) {
+    throw new CliError("controls JSON must contain at least one control field");
+  }
+
+  return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function runControl(args: ParsedArgs): Promise<void> {
+  if (args.controlAction !== "capabilities")
+    throw new CliError("control requires subcommand: capabilities");
+  const chatId = args.targetChatId;
+  if (!chatId) throw new CliError("control capabilities requires --chat-id <id>");
+  const homeDir = resolveHomeDir(args.home);
+  const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
+    method: "capabilities",
+    params: { chatId, threadId: args.targetThreadId ?? null },
+  });
+  if (!response.ok) throw new CliError(response.error);
+  process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
+}
+
+async function runSessions(args: ParsedArgs): Promise<void> {
+  if (args.sessionsAction !== "set-control") {
+    throw new CliError("sessions requires subcommand: set-control");
+  }
+  const chatId = args.targetChatId;
+  if (!chatId) throw new CliError("sessions set-control requires --chat-id <id>");
+  if (typeof args.controlJson !== "string") {
+    throw new CliError("sessions set-control requires --json <controls>");
+  }
+
+  const controls = parseControlJson(args.controlJson);
+  const homeDir = resolveHomeDir(args.home);
+  const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
+    method: "setControls",
+    params: { chatId, threadId: args.targetThreadId ?? null, controls },
+  });
+  if (!response.ok) throw new CliError(response.error);
+  process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
 }
 
 // ---------- main ---------------------------------------------------------
@@ -1222,6 +1484,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     groupRequireMention: cfg.groupRequireMention,
     unboundCwd: cfg.unboundCwd,
     settingsPath: configPath,
+    controlSocketPath: bridgeControlSocketPath(homeDir),
     lifecycle: {
       notificationChatIds: cfg.lifecycleNotifyChatIds,
       restartMarkerPath: bridgeRestartMarkerPath(homeDir),
@@ -1350,6 +1613,12 @@ async function main(): Promise<void> {
         lines: args.logsLines ?? DEFAULT_LOG_LINES,
       });
       return;
+    case "control":
+      await runControl(args);
+      return;
+    case "sessions":
+      await runSessions(args);
+      return;
     default:
       assertNever(args.command);
   }
@@ -1399,6 +1668,7 @@ export {
   readConfigFile,
   migrateLegacyIfNeeded,
   resolveHomeDir,
+  parseControlJson,
   DEFAULT_AGENT,
 };
 export type { ParsedArgs };

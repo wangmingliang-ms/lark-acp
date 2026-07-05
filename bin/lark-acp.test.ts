@@ -21,6 +21,8 @@ import {
   resolveDefaultAgent,
   readConfigFile,
   migrateLegacyIfNeeded,
+  resolveHomeDir,
+  parseControlJson,
   DEFAULT_AGENT,
   type ParsedArgs,
 } from "./lark-acp.js";
@@ -65,6 +67,75 @@ describe("parseArgs — bare subcommands need no --agent", () => {
     const args = parseArgs(["proxy", "--", "node", "./my-acp.js", "--flag"]);
     expect(args.agentRawCommand).toBe("node");
     expect(args.agentExtraArgs).toEqual(["./my-acp.js", "--flag"]);
+  });
+});
+
+describe("parseArgs — control and session-control subcommands", () => {
+  it("parses live capabilities target flags", () => {
+    const args = parseArgs([
+      "control",
+      "capabilities",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--json",
+    ]);
+    expect(args.command).toBe("control");
+    expect(args.controlAction).toBe("capabilities");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBe("th_1");
+  });
+
+  it("parses set-control JSON payloads", () => {
+    const json = '{"modeId":"agent"}';
+    const args = parseArgs([
+      "sessions",
+      "set-control",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "<main>",
+      "--json",
+      json,
+    ]);
+    expect(args.command).toBe("sessions");
+    expect(args.sessionsAction).toBe("set-control");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBeNull();
+    expect(args.controlJson).toBe(json);
+  });
+});
+
+describe("parseControlJson", () => {
+  it("accepts ACP-shaped controls and normalizes select config values", () => {
+    expect(
+      parseControlJson(
+        JSON.stringify({
+          modelId: "model-new",
+          modeId: "agent",
+          bridgePermissionMode: "alwaysAsk",
+          config: {
+            auto_edit: { type: "boolean", value: true },
+            approval_mode: { type: "select", value: "auto" },
+          },
+        }),
+      ),
+    ).toEqual({
+      modelId: "model-new",
+      modeId: "agent",
+      bridgePermissionMode: "alwaysAsk",
+      config: {
+        auto_edit: { type: "boolean", value: true },
+        approval_mode: { value: "auto" },
+      },
+    });
+  });
+
+  it("rejects invalid permission modes", () => {
+    expect(() => parseControlJson('{"bridgePermissionMode":"bypass"}')).toThrowError(
+      /bridgePermissionMode/,
+    );
   });
 });
 

@@ -1,7 +1,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
 import type { AgentStatus, LarkPresenter } from "../presenter/presenter.js";
-import { LarkAcpClient, type PermissionMode } from "../acp/lark-acp-client.js";
+import { LarkAcpClient, PERMISSION_MODES, type PermissionMode } from "../acp/lark-acp-client.js";
 import {
   spawnAgent,
   spawnAndResumeAgent,
@@ -10,7 +10,11 @@ import {
   type AgentProcess,
   type SpawnAgentOptions,
 } from "../acp/agent-process.js";
-import type { SessionStore } from "../session-store/session-store.js";
+import type {
+  SessionCapabilitiesSnapshot,
+  SessionControls,
+  SessionStore,
+} from "../session-store/session-store.js";
 
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
@@ -36,6 +40,7 @@ export interface ChatRuntimeOptions {
   showCancelButton: boolean;
   permissionTimeoutMs: number;
   permissionMode: PermissionMode;
+  agentLabel?: string;
   presenter: LarkPresenter;
   sessionStore: SessionStore;
   logger: LarkLogger;
@@ -44,6 +49,7 @@ export interface ChatRuntimeOptions {
 interface ChatRuntimeState {
   client: LarkAcpClient;
   agent: AgentProcess;
+  sessionCapabilities: SessionCapabilitiesSnapshot;
   queue: PendingMessage[];
   processing: boolean;
   lastActivity: number;
@@ -168,9 +174,26 @@ export class ChatRuntime {
     return this.state?.client.handleCardAction(requestId, optionId) ?? false;
   }
 
+  capabilities(): SessionCapabilitiesSnapshot {
+    const state = this.state;
+    if (!state) throw new Error("session runtime is not started yet");
+    return {
+      ...state.sessionCapabilities,
+      bridgePermissionMode: state.client.getPermissionMode(),
+    };
+  }
+
+  async applyControls(controls: SessionControls): Promise<void> {
+    const state = this.state;
+    if (!state) throw new Error("session runtime is not started yet");
+    await this.applyControlsToState(state, controls);
+    await this.persistSession(state.agent.sessionId, controls);
+  }
+
   private async bootstrap(firstMessage: PendingMessage): Promise<ChatRuntimeState> {
     this.logger.info("creating chat runtime");
 
+    const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
     const client = new LarkAcpClient({
       presenter: this.opts.presenter,
       logger: this.logger,
@@ -178,7 +201,7 @@ export class ChatRuntime {
       showTools: this.opts.showTools,
       showCancelButton: this.opts.showCancelButton,
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
-      permissionMode: this.opts.permissionMode,
+      permissionMode: latest?.controls?.bridgePermissionMode ?? this.opts.permissionMode,
     });
 
     const spawnOpts: SpawnAgentOptions = {
@@ -190,7 +213,6 @@ export class ChatRuntime {
       logger: this.logger,
     };
 
-    const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
     let agent: AgentProcess;
     if (latest) {
       this.logger.info({ previousSessionId: latest.sessionId }, "attempting resume");
@@ -202,18 +224,93 @@ export class ChatRuntime {
 
     await this.persistSession(agent.sessionId);
 
-    agent.process.on("exit", (code, signal) => {
-      this.handleUnexpectedExit(code, signal);
-    });
-
-    return {
+    const state: ChatRuntimeState = {
       client,
       agent,
+      sessionCapabilities: this.buildCapabilitiesSnapshot(agent, client),
       queue: [],
       processing: false,
       lastActivity: Date.now(),
       lastMessageId: firstMessage.messageId,
     };
+
+    agent.process.on("exit", (code, signal) => {
+      this.handleUnexpectedExit(code, signal);
+    });
+
+    if (latest?.controls) await this.applyControlsToState(state, latest.controls);
+
+    return state;
+  }
+
+  private buildCapabilitiesSnapshot(
+    agent: AgentProcess,
+    client: LarkAcpClient,
+  ): SessionCapabilitiesSnapshot {
+    return {
+      session: {
+        chatId: this.opts.chatId,
+        threadId: this.opts.threadId,
+        sessionId: agent.sessionId,
+      },
+      agent: {
+        ...(this.opts.agentLabel !== undefined ? { label: this.opts.agentLabel } : {}),
+        command: this.opts.agentCommand,
+        args: this.opts.agentArgs,
+        cwd: this.opts.agentCwd,
+      },
+      ...agent.sessionCapabilities,
+      bridgePermissionModes: PERMISSION_MODES,
+      bridgePermissionMode: client.getPermissionMode(),
+    };
+  }
+
+  private async applyControlsToState(
+    state: ChatRuntimeState,
+    controls: SessionControls,
+  ): Promise<void> {
+    if (controls.modelId !== undefined) {
+      await state.agent.connection.unstable_setSessionModel({
+        sessionId: state.agent.sessionId,
+        modelId: controls.modelId,
+      });
+      if (state.sessionCapabilities.models) {
+        state.sessionCapabilities = {
+          ...state.sessionCapabilities,
+          models: { ...state.sessionCapabilities.models, currentModelId: controls.modelId },
+        };
+      }
+    }
+    if (controls.modeId !== undefined) {
+      await state.agent.connection.setSessionMode({
+        sessionId: state.agent.sessionId,
+        modeId: controls.modeId,
+      });
+      if (state.sessionCapabilities.modes) {
+        state.sessionCapabilities = {
+          ...state.sessionCapabilities,
+          modes: { ...state.sessionCapabilities.modes, currentModeId: controls.modeId },
+        };
+      }
+    }
+    for (const [configId, value] of Object.entries(controls.config ?? {})) {
+      const response = await state.agent.connection.setSessionConfigOption({
+        sessionId: state.agent.sessionId,
+        configId,
+        ...value,
+      });
+      state.sessionCapabilities = {
+        ...state.sessionCapabilities,
+        configOptions: response.configOptions,
+      };
+    }
+    if (controls.bridgePermissionMode !== undefined) {
+      state.client.setPermissionMode(controls.bridgePermissionMode);
+      state.sessionCapabilities = {
+        ...state.sessionCapabilities,
+        bridgePermissionMode: controls.bridgePermissionMode,
+      };
+    }
   }
 
   private handleUnexpectedExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -374,23 +471,43 @@ export class ChatRuntime {
       .catch((sendErr) => this.logger.warn({ err: sendErr }, "error reply failed"));
   }
 
-  private async persistSession(sessionId: string): Promise<void> {
+  private async persistSession(sessionId: string, controls?: SessionControls): Promise<void> {
     const now = Date.now();
     try {
+      const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
+      const previous = latest?.sessionId === sessionId ? latest : null;
       await this.opts.sessionStore.save({
         chatId: this.opts.chatId,
         threadId: this.opts.threadId,
         sessionId,
+        ...(this.opts.agentLabel !== undefined ? { agentLabel: this.opts.agentLabel } : {}),
         agentCommand: this.opts.agentCommand,
         agentArgs: this.opts.agentArgs,
         cwd: this.opts.agentCwd,
-        createdAt: now,
+        ...(previous?.controls !== undefined || controls !== undefined
+          ? { controls: mergeSessionControls(previous?.controls, controls) }
+          : {}),
+        createdAt: previous?.createdAt ?? now,
         updatedAt: now,
       });
     } catch (err) {
       this.logger.warn({ err }, "session store save failed");
     }
   }
+}
+
+function mergeSessionControls(
+  existing: SessionControls | undefined,
+  patch: SessionControls | undefined,
+): SessionControls {
+  return {
+    ...(existing ?? {}),
+    ...(patch ?? {}),
+    config: {
+      ...(existing?.config ?? {}),
+      ...(patch?.config ?? {}),
+    },
+  };
 }
 
 function formatExitCode(code: number | null, signal: NodeJS.Signals | null | undefined): string {

@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { SessionRecord, SessionStore } from "./session-store.js";
+import type {
+  SessionControlTarget,
+  SessionControls,
+  SessionRecord,
+  SessionStore,
+} from "./session-store.js";
 
 const SESSIONS_FILE_NAME = "sessions.json";
 
@@ -110,6 +115,20 @@ export class FileSessionStore implements SessionStore {
     this.scheduleFlush();
   }
 
+  async setControls(
+    target: SessionControlTarget,
+    controls: SessionControls,
+  ): Promise<SessionRecord> {
+    const record = await this.findControlTarget(target);
+    const updated: SessionRecord = {
+      ...record,
+      controls: mergeControls(record.controls, controls),
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return updated;
+  }
+
   async delete(chatId: string, sessionId: string): Promise<void> {
     const records = this.data.get(chatId);
     if (!records) return;
@@ -118,6 +137,24 @@ export class FileSessionStore implements SessionStore {
     records.splice(idx, 1);
     if (!records.length) this.data.delete(chatId);
     this.scheduleFlush();
+  }
+
+  private async findControlTarget(target: SessionControlTarget): Promise<SessionRecord> {
+    const records = this.data.get(target.chatId) ?? [];
+    let record: SessionRecord | undefined;
+    if (target.sessionId !== undefined) {
+      record = records.find((r) => r.sessionId === target.sessionId);
+    } else {
+      record = records
+        .filter((r) => r.threadId === target.threadId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    }
+    if (record === undefined) {
+      throw new SessionStoreControlError(
+        `no session found for chat=${target.chatId}, thread=${target.threadId ?? "<main>"}`,
+      );
+    }
+    return record;
   }
 
   private scheduleFlush(): void {
@@ -166,4 +203,22 @@ export class FileSessionStore implements SessionStore {
     }
     this.scheduleFlush();
   }
+}
+
+export class SessionStoreControlError extends Error {
+  override readonly name = "SessionStoreControlError";
+}
+
+function mergeControls(
+  existing: SessionControls | undefined,
+  patch: SessionControls,
+): SessionControls {
+  return {
+    ...(existing ?? {}),
+    ...patch,
+    config: {
+      ...(existing?.config ?? {}),
+      ...(patch.config ?? {}),
+    },
+  };
 }

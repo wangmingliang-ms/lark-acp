@@ -38,8 +38,16 @@ export type {
 export { LarkCardPresenter } from "./presenter/lark-presenter.js";
 export type { LarkCardPresenterOptions } from "./presenter/lark-presenter.js";
 
-export type { SessionStore, SessionRecord } from "./session-store/session-store.js";
-export { FileSessionStore } from "./session-store/file-session-store.js";
+export type {
+  PermissionMode as SessionPermissionMode,
+  SessionCapabilitiesSnapshot,
+  SessionConfigControlValue,
+  SessionControlTarget,
+  SessionControls,
+  SessionRecord,
+  SessionStore,
+} from "./session-store/session-store.js";
+export { FileSessionStore, SessionStoreControlError } from "./session-store/file-session-store.js";
 
 export type { BindingStore, ChatBinding } from "./binding-store/binding-store.js";
 export { FileBindingStore, BindingStoreIoError } from "./binding-store/file-binding-store.js";

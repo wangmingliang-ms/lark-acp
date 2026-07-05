@@ -2,6 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Writable, Readable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
+import {
+  capabilitiesFromSessionResponse,
+  type SessionRuntimeCapabilities,
+} from "./session-capabilities.js";
 
 const STDIO_PIPED: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"];
 const WIN32_PLATFORM = "win32";
@@ -46,6 +50,7 @@ export interface AgentProcess {
   connection: acp.ClientSideConnection;
   sessionId: string;
   capabilities: Record<string, unknown>;
+  sessionCapabilities: SessionRuntimeCapabilities;
   /** Most recent stderr lines (up to {@link STDERR_BUFFER_LINES}). */
   getRecentStderr: () => readonly string[];
 }
@@ -162,6 +167,7 @@ export async function spawnAgent(opts: SpawnAgentOptions): Promise<AgentProcess>
     connection,
     sessionId: sessionResult.sessionId,
     capabilities: (initResult.agentCapabilities ?? {}) as Record<string, unknown>,
+    sessionCapabilities: capabilitiesFromSessionResponse(sessionResult),
     getRecentStderr,
   };
 }
@@ -189,18 +195,21 @@ export async function spawnAndResumeAgent(
 
   if (hasResume || hasLoad) {
     try {
+      let sessionCaps: SessionRuntimeCapabilities;
       if (hasResume) {
-        await connection.unstable_resumeSession({
+        const resumeResult = await connection.unstable_resumeSession({
           sessionId: previousSessionId,
           cwd: opts.cwd,
           mcpServers: [],
         });
+        sessionCaps = capabilitiesFromSessionResponse(resumeResult);
       } else {
-        await connection.loadSession({
+        const loadResult = await connection.loadSession({
           sessionId: previousSessionId,
           cwd: opts.cwd,
           mcpServers: [],
         });
+        sessionCaps = capabilitiesFromSessionResponse(loadResult);
       }
       opts.logger.info(
         { sessionId: previousSessionId, mode: hasResume ? "resume" : "load" },
@@ -212,6 +221,7 @@ export async function spawnAndResumeAgent(
           connection,
           sessionId: previousSessionId,
           capabilities: caps,
+          sessionCapabilities: sessionCaps,
           getRecentStderr,
         },
         resumed: true,
@@ -238,6 +248,7 @@ export async function spawnAndResumeAgent(
       connection,
       sessionId: sessionResult.sessionId,
       capabilities: caps,
+      sessionCapabilities: capabilitiesFromSessionResponse(sessionResult),
       getRecentStderr,
     },
     resumed: false,

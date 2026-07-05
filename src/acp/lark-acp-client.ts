@@ -215,7 +215,7 @@ export class LarkAcpClient implements acp.Client {
   private readonly showTools: boolean;
   private readonly showCancelButton: boolean;
   private readonly permissionTimeoutMs: number;
-  private readonly permissionMode: PermissionMode;
+  private permissionMode: PermissionMode;
   private timeline: TimelineEntry[] = [];
   private status: AgentStatus = "thinking";
   private currentMessageId = "";
@@ -241,6 +241,14 @@ export class LarkAcpClient implements acp.Client {
     this.showCancelButton = opts.showCancelButton;
     this.permissionTimeoutMs = opts.permissionTimeoutMs;
     this.permissionMode = opts.permissionMode;
+  }
+
+  setPermissionMode(mode: PermissionMode): void {
+    this.permissionMode = mode;
+  }
+
+  getPermissionMode(): PermissionMode {
+    return this.permissionMode;
   }
 
   /** Bind the current Lark message context so cards reply to the right message. */
@@ -478,6 +486,17 @@ export class LarkAcpClient implements acp.Client {
         this.scheduleFlush();
         return;
       }
+
+      // Session-control updates are consumed by ChatRuntime's capability
+      // tracker. They are not user-renderable timeline content.
+      case "current_mode_update":
+      case "config_option_update":
+      case "session_info_update":
+      case "usage_update":
+      case "available_commands_update":
+      case "plan":
+      case "user_message_chunk":
+        return;
     }
   }
 

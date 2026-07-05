@@ -8,6 +8,7 @@ import { sendLifecycleNotice, type LifecycleNoticeKind } from "../lark/lifecycle
 import { LarkWsConnection } from "../lark/lark-ws.js";
 import { LarkCardPresenter } from "../presenter/lark-presenter.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
+import { BridgeControlServer } from "./control-server.js";
 import {
   interpretLarkMessage,
   type InterpretedMessage,
@@ -17,7 +18,11 @@ import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
 import type { PermissionMode } from "../acp/lark-acp-client.js";
 import { AgentAuthError } from "../acp/agent-process.js";
 import type { NoticeCardSpec } from "../presenter/presenter.js";
-import type { SessionStore } from "../session-store/session-store.js";
+import type {
+  SessionCapabilitiesSnapshot,
+  SessionControls,
+  SessionStore,
+} from "../session-store/session-store.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
 import type * as acp from "@agentclientprotocol/sdk";
 
@@ -31,6 +36,7 @@ const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
 /** Debounce for settings.json change events (fs.watch double-fires). */
 const SETTINGS_RELOAD_DEBOUNCE_MS = 300;
+const LARK_ACP_DOC_NAMES = ["AGENTS.md", "CLAUDE.md"] as const;
 
 const ORPHAN_CARD_REASON = "会话已结束，本次确认已失效";
 
@@ -248,6 +254,9 @@ export interface LarkBridgeOptions {
    */
   settingsPath?: string | null;
 
+  /** Unix-domain socket for local `lark-acp control …` requests. */
+  controlSocketPath?: string | null;
+
   sessionStore: SessionStore;
   /** Persistent per-chat repo + agent binding (one bot → many repos). */
   bindingStore: BindingStore;
@@ -317,6 +326,7 @@ export class LarkBridge {
   private readonly groupRequireMention: boolean;
   private readonly unboundCwd: string | null;
   private readonly settingsPath: string | null;
+  private readonly controlSocketPath: string | null;
   private readonly lark: LarkBridgeLarkOptions;
   private readonly lifecycleNotificationChatIds: readonly string[];
   private readonly restartMarkerPath: string | null;
@@ -325,6 +335,7 @@ export class LarkBridge {
   private readonly chats = new Map<string, ChatRuntime>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private ws: LarkWsConnection | null = null;
+  private controlServer: BridgeControlServer | null = null;
   private started = false;
   /** fs.watch handle for hot-reloading settings.json (null when disabled). */
   private settingsWatcher: fs.FSWatcher | null = null;
@@ -363,6 +374,7 @@ export class LarkBridge {
     this.groupRequireMention = opts.groupRequireMention ?? false;
     this.unboundCwd = opts.unboundCwd ?? null;
     this.settingsPath = opts.settingsPath ?? null;
+    this.controlSocketPath = opts.controlSocketPath ?? null;
     this.lifecycleNotificationChatIds = opts.lifecycle?.notificationChatIds ?? [];
     this.restartMarkerPath = opts.lifecycle?.restartMarkerPath ?? null;
     this.lifecycleNoticeTimeoutMs = opts.lifecycle?.noticeTimeoutMs;
@@ -385,6 +397,8 @@ export class LarkBridge {
     // restart.
     await this.snapshotBindings();
     this.startSettingsWatcher();
+    this.writeHomeInstructions();
+    await this.startControlServer();
 
     this.cleanupTimer = setInterval(() => this.evictIdle(), IDLE_CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
@@ -413,6 +427,8 @@ export class LarkBridge {
       this.settingsWatcher.close();
       this.settingsWatcher = null;
     }
+    await this.controlServer?.stop();
+    this.controlServer = null;
     for (const runtime of this.chats.values()) runtime.shutdown();
     this.chats.clear();
     await this.sessionStore.close();
@@ -459,6 +475,41 @@ export class LarkBridge {
   /** Active chat runtime count (mostly for tests / metrics). */
   get activeChatCount(): number {
     return this.chats.size;
+  }
+
+  private async startControlServer(): Promise<void> {
+    if (!this.controlSocketPath) return;
+    this.controlServer = new BridgeControlServer({
+      socketPath: this.controlSocketPath,
+      logger: this.logger,
+      handlers: {
+        capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
+        setControls: (chatId, threadId, controls) =>
+          this.controlSetControls(chatId, threadId, controls),
+      },
+    });
+    await this.controlServer.start();
+  }
+
+  private async controlCapabilities(
+    chatId: string,
+    threadId: string | null,
+  ): Promise<SessionCapabilitiesSnapshot> {
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    if (!runtime) throw new Error("session runtime is not started yet");
+    return runtime.capabilities();
+  }
+
+  private async controlSetControls(
+    chatId: string,
+    threadId: string | null,
+    controls: SessionControls,
+  ): Promise<{ readonly applied: boolean; readonly recordSessionId: string }> {
+    const record = await this.sessionStore.setControls({ chatId, threadId }, controls);
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    if (!runtime) return { applied: false, recordSessionId: record.sessionId };
+    await runtime.applyControls(controls);
+    return { applied: true, recordSessionId: record.sessionId };
   }
 
   // ----- WS event handlers ------------------------------------------------
@@ -728,24 +779,9 @@ export class LarkBridge {
       ? `[上下文: 群聊 "${chatName}" (${chatId}) 中用户 ${userName} (${userId}) 的消息]`
       : `[上下文: 用户 ${userName} (${userId}) 的私聊消息]`;
 
-    // Tell the agent — inline, every turn — how to (re)bind this chat by
-    // editing settings.json. Injected for BOTH reception and already-bound
-    // chats, so the user can say "换绑到另一个仓库" from any chat. We inject
-    // inline rather than only via AGENTS.md so already-bound chats (running in
-    // a project repo we must not pollute) also know how.
-    const bindHint = binding.reception
-      ? `[lark-acp: 本会话尚未绑定到具体仓库，当前运行在接待区。若用户要求绑定/切换到某个仓库，` +
-        `请编辑 settings.json（路径见环境变量 LARK_ACP_SETTINGS）的 bindings["${chatId}"] = ` +
-        `{ cwd, agent }（agent 可为 claude/codex/copilot/gemini/opencode，用户指定则从其指定）。` +
-        `若用户明确给出了另一个 chatId（形如 oc_...），则改写该 chatId 的条目，而非本会话；` +
-        `这可用于从本会话远程绑定其它会话。保存后 lark-acp 会自动重新路由，无需重启。本会话 chatId: ${chatId}]`
-      : `[lark-acp: 若用户要求「改绑/换绑/重新绑定」到另一个仓库或更换 agent，请编辑 ` +
-        `settings.json（路径见环境变量 LARK_ACP_SETTINGS，通常是 ~/.lark-acp/settings.json）的 ` +
-        `bindings["${chatId}"] = { cwd, agent }（agent 可为 claude/codex/copilot/gemini/opencode）。` +
-        `若用户明确给出了另一个 chatId（形如 oc_...），则改写该 chatId 的条目，而非本会话——` +
-        `据此可从本会话远程绑定/改绑其它会话。保存后 lark-acp 会自动重新路由到新仓库，无需重启。` +
-        `仅在用户明确要求绑定/改绑时才这样做；否则忽略本提示，正常处理用户消息。本会话 chatId: ${chatId}]`;
-    prompt.unshift({ type: "text", text: bindHint });
+    // Keep the prompt small: durable lark-acp operating instructions live in
+    // ~/.lark-acp/AGENTS.md and ~/.lark-acp/CLAUDE.md, not inline every turn.
+    prompt.unshift({ type: "text", text: renderInlineControlHint(chatId, threadId) });
 
     prompt.unshift({ type: "text", text: context });
 
@@ -825,7 +861,7 @@ export class LarkBridge {
     // Inject the chat id + settings path so the agent can bind this chat by
     // editing settings.json. In the reception area also drop instruction files
     // that explain how (the agent reads AGENTS.md / CLAUDE.md on start).
-    const injectedEnv = this.buildAgentEnv(chatId, binding);
+    const injectedEnv = this.buildAgentEnv(chatId, threadId, binding);
     if (binding.reception) this.writeBindInstructions(binding.cwd, chatId);
 
     const runtime = new ChatRuntime({
@@ -840,6 +876,7 @@ export class LarkBridge {
       showCancelButton: this.display.showCancelButton,
       permissionTimeoutMs: this.display.permissionTimeoutMs,
       permissionMode: this.display.permissionMode,
+      agentLabel: binding.label,
       presenter: this.presenter,
       sessionStore: this.sessionStore,
       logger: this.logger,
@@ -855,11 +892,14 @@ export class LarkBridge {
    */
   private buildAgentEnv(
     chatId: string,
+    threadId: string | null,
     binding: EffectiveBinding,
   ): Record<string, string> | undefined {
     const base: Record<string, string> = { ...(binding.env ?? {}) };
     base["LARK_ACP_CHAT_ID"] = chatId;
+    base["LARK_ACP_THREAD_ID"] = threadId ?? "";
     if (this.settingsPath) base["LARK_ACP_SETTINGS"] = this.settingsPath;
+    if (this.controlSocketPath) base["LARK_ACP_CONTROL_SOCKET"] = this.controlSocketPath;
     return Object.keys(base).length > 0 ? base : undefined;
   }
 
@@ -870,12 +910,30 @@ export class LarkBridge {
    */
   private writeBindInstructions(cwd: string, chatId: string): void {
     if (!this.settingsPath) return;
-    const doc = renderBindInstructions(chatId, this.settingsPath);
+    const doc = renderBindInstructions(chatId, this.settingsPath, this.controlSocketPath);
     for (const name of ["AGENTS.md", "CLAUDE.md"]) {
       try {
         fs.writeFileSync(path.join(cwd, name), doc, "utf-8");
       } catch (err) {
         this.logger.warn({ err, cwd, name }, "failed to write bind instructions");
+      }
+    }
+  }
+
+  private writeHomeInstructions(): void {
+    const settingsPath = this.settingsPath;
+    if (!settingsPath) return;
+    const homeDir = path.dirname(settingsPath);
+    const doc = renderHomeInstructions({
+      settingsPath,
+      socketPath: this.controlSocketPath,
+    });
+    for (const name of LARK_ACP_DOC_NAMES) {
+      try {
+        fs.mkdirSync(homeDir, { recursive: true });
+        fs.writeFileSync(path.join(homeDir, name), doc, "utf-8");
+      } catch (err) {
+        this.logger.warn({ err, homeDir, name }, "failed to write lark-acp home instructions");
       }
     }
   }
@@ -1131,12 +1189,108 @@ export class LarkBridge {
   }
 }
 
+function renderInlineControlHint(chatId: string, threadId: string | null): string {
+  return `[lark-acp: 若用户要求绑定/改绑仓库或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.lark-acp/AGENTS.md（或 CLAUDE.md）中的 lark-acp 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
+}
+
+function renderHomeInstructions(opts: {
+  readonly settingsPath: string;
+  readonly socketPath: string | null;
+}): string {
+  return [
+    "# lark-acp operating guide",
+    "",
+    "This file is the durable lark-acp guide. Do not rely on long inline prompt",
+    "knowledge: when a user asks to change lark-acp settings or session controls,",
+    "read this file first and follow it exactly.",
+    "",
+    "## Settings / bindings",
+    "",
+    `Global settings live at: ${opts.settingsPath}`,
+    "",
+    "Use settings.json for global config, credentials, runtime defaults, agent presets,",
+    "and chat bindings only. Preserve unrelated keys. Never print or copy secrets.",
+    "To bind or rebind a chat, update the top-level bindings object:",
+    "",
+    "```json",
+    "{",
+    '  "bindings": {',
+    '    "<chatId>": { "cwd": "/absolute/path/to/repo", "agent": "claude" }',
+    "  }",
+    "}",
+    "```",
+    "",
+    "## Session controls",
+    "",
+    "Session-specific controls live in ~/.lark-acp/sessions.json and are changed",
+    "through the lark-acp CLI, not by hand-editing JSON unless the CLI is unavailable.",
+    "The controls schema intentionally follows ACP request/capability shapes closely.",
+    "",
+    "Before changing model/mode/config/permission controls, always query live capabilities",
+    "for the current chat/thread. Do not guess ids or values from memory.",
+    "",
+    "```bash",
+    'lark-acp control capabilities --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json',
+    "```",
+    "",
+    "The response keeps ACP-native fields as-is where possible:",
+    "",
+    "- models: ACP SessionModelState, with currentModelId and availableModels",
+    "- modes: ACP SessionModeState, with currentModeId and availableModes",
+    "- configOptions: ACP SessionConfigOption[]",
+    "- bridgePermissionModes / bridgePermissionMode: lark-acp client-side policy, not ACP-native",
+    "",
+    "Only choose ids/values that appear in that live response. If the requested target",
+    "does not exist, tell the user and do not write controls.",
+    "",
+    "Set controls with one JSON payload:",
+    "",
+    "```bash",
+    'lark-acp sessions set-control --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json \'{',
+    '  "modelId": "<one models.availableModels[].id>",',
+    '  "modeId": "<one modes.availableModes[].id>",',
+    '  "config": {',
+    '    "<boolean config id>": { "type": "boolean", "value": true },',
+    '    "<select config id>": { "value": "<one select option value>" }',
+    "  },",
+    '  "bridgePermissionMode": "alwaysAsk"',
+    "}'",
+    "```",
+    "",
+    "All fields are optional; include only the controls the user asked to change.",
+    "ACP select config requests use { value: <valueId> } with no type field. The CLI",
+    "also tolerates type=select but persists the ACP-shaped form without type.",
+    "",
+    "Meaning of each field:",
+    "",
+    "- modelId -> ACP session/set_model, from models.availableModels[].id",
+    "- modeId -> ACP session/set_mode, from modes.availableModes[].id",
+    "- config[configId] -> ACP session/set_config_option, from configOptions[].id",
+    "- bridgePermissionMode -> lark-acp local handling of ACP requestPermission",
+    "",
+    "Important distinction: ACP has per-tool requestPermission approvals, but no",
+    "standard global permission mode. If an agent exposes Plan/Edit/Bypass as modes,",
+    "set modeId. If it exposes approval/bypass as a config option, set config. Only use",
+    "bridgePermissionMode for lark-acp's own approval-card policy.",
+    "",
+    "After set-control succeeds, say what was requested and note whether the CLI reported",
+    "applied=true. If applied=false, the value was persisted for the session but no live",
+    "runtime was available to apply immediately.",
+    "",
+    ...(opts.socketPath ? ["Control socket:", "", `- ${opts.socketPath}`, ""] : []),
+  ].join("\n");
+}
+
 /**
  * Render the bind-instruction doc dropped into the reception cwd. It tells the
  * agent how to bind THIS chat to a repo by editing settings.json — including
  * that it may pick any agent (claude / codex / copilot / gemini / opencode).
  */
-function renderBindInstructions(chatId: string, settingsPath: string): string {
+function renderBindInstructions(
+  chatId: string,
+  settingsPath: string,
+  socketPath: string | null,
+): string {
   return [
     "# lark-acp — how to bind this chat to a repository",
     "",
@@ -1172,6 +1326,11 @@ function renderBindInstructions(chatId: string, settingsPath: string): string {
     "",
     "Do not delete other chats' bindings or other top-level keys (credentials,",
     "runtime, agents).",
+    "",
+    "For model/mode/config/permission session controls, read ~/.lark-acp/AGENTS.md",
+    "or ~/.lark-acp/CLAUDE.md and use the lark-acp control/sessions CLI. Do not",
+    "guess model/mode/config ids; query live capabilities first.",
+    ...(socketPath ? ["", `Control socket: ${socketPath}`] : []),
     "",
   ].join("\n");
 }

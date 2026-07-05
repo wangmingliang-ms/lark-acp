@@ -121,6 +121,9 @@ function stubSessionStore(): SessionStore {
     listByThread: async () => [],
     getLatest: async () => null,
     save: async () => {},
+    setControls: async () => {
+      throw new Error("setControls not implemented in stub");
+    },
     delete: async () => {},
   };
 }
@@ -170,6 +173,9 @@ function makeFakeAgent(): FakeAgentHandle {
     // that the SDK never rejects this when the stream closes.
     prompt: () => promptResult,
     cancel: async () => {},
+    unstable_setSessionModel: async () => ({}),
+    setSessionMode: async () => ({}),
+    setSessionConfigOption: async () => ({ configOptions: [] }),
     get closed() {
       return closed;
     },
@@ -183,6 +189,23 @@ function makeFakeAgent(): FakeAgentHandle {
     connection,
     sessionId: "sess_fake",
     capabilities: {},
+    sessionCapabilities: {
+      models: {
+        currentModelId: "model-old",
+        availableModels: [
+          { id: "model-old", name: "Old" },
+          { id: "model-new", name: "New" },
+        ],
+      },
+      modes: {
+        currentModeId: "ask",
+        availableModes: [
+          { id: "ask", name: "Ask" },
+          { id: "agent", name: "Agent" },
+        ],
+      },
+      configOptions: [{ id: "auto_edit", name: "Auto Edit", type: "boolean", currentValue: false }],
+    } as AgentProcess["sessionCapabilities"],
     getRecentStderr: () => ["fatal: boom"],
   };
 
@@ -353,5 +376,80 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     // Let any stray rejection from the losing race branch surface.
     await new Promise((r) => setTimeout(r, 50));
     expect(replies, "a clean turn must not produce an error/crash reply").toEqual([]);
+  });
+
+  it("applies and reports session controls with ACP-shaped requests", async () => {
+    const fake = makeFakeAgent();
+    const setModel = vi.fn(async () => ({}));
+    const setMode = vi.fn(async () => ({}));
+    const setConfig = vi.fn(async () => ({
+      configOptions: [{ id: "auto_edit", name: "Auto Edit", type: "boolean", currentValue: true }],
+    }));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      unstable_setSessionModel: setModel,
+      setSessionMode: setMode,
+      setSessionConfigOption: setConfig,
+    } as AgentProcess["connection"];
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const saved: unknown[] = [];
+    const store: SessionStore = {
+      ...stubSessionStore(),
+      save: async (record) => {
+        saved.push(record);
+      },
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: store,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "hello" }],
+      messageId: "om_controls",
+      chatId: "oc_test",
+    });
+
+    await runtime.applyControls({
+      modelId: "model-new",
+      modeId: "agent",
+      config: {
+        auto_edit: { type: "boolean", value: true },
+        approval_mode: { value: "auto" },
+      },
+      bridgePermissionMode: "alwaysAsk",
+    });
+
+    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
+    expect(setMode).toHaveBeenCalledWith({ sessionId: "sess_fake", modeId: "agent" });
+    expect(setConfig).toHaveBeenCalledWith({
+      sessionId: "sess_fake",
+      configId: "auto_edit",
+      type: "boolean",
+      value: true,
+    });
+    expect(setConfig).toHaveBeenCalledWith({
+      sessionId: "sess_fake",
+      configId: "approval_mode",
+      value: "auto",
+    });
+    expect(runtime.capabilities()).toMatchObject({
+      models: { currentModelId: "model-new" },
+      modes: { currentModeId: "agent" },
+      bridgePermissionMode: "alwaysAsk",
+    });
+    expect(saved.at(-1)).toMatchObject({
+      controls: {
+        modelId: "model-new",
+        modeId: "agent",
+        config: {
+          auto_edit: { type: "boolean", value: true },
+          approval_mode: { value: "auto" },
+        },
+        bridgePermissionMode: "alwaysAsk",
+      },
+    });
   });
 });

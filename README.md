@@ -82,6 +82,8 @@ lark-acp [global-options] proxy -- <agent-cmd> [agent-args...]
 lark-acp [global-options] start [--agent <preset>]   # 后台运行 proxy
 lark-acp [global-options] stop | restart | status
 lark-acp logs [-f] [-n <lines>]
+lark-acp control capabilities --chat-id <id> [--thread-id <id>] [--json]
+lark-acp sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'
 lark-acp agents
 lark-acp help
 lark-acp version
@@ -183,6 +185,51 @@ lark-acp stop                    # 停止后台 bridge
   是硬终止。
 - **崩溃自愈 / 开机自启不在此范围**：交给平台原生托管（Linux systemd unit、Windows 计划
   任务），由它们调用 `lark-acp start`（见下文「systemd 托管」）。
+
+### Session controls / live capabilities
+
+运行中的 bridge 会在 home 目录下打开本地 control socket（默认 `~/.lark-acp/control.sock`），供本机 CLI 查询当前 ACP session 的 live capabilities，并受控写入 `sessions.json`。
+
+查询当前会话可用的 ACP 原生能力：
+
+```bash
+lark-acp control capabilities --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json
+```
+
+返回会尽量保持 ACP 原生结构：
+
+- `models`: ACP `SessionModelState`，包含 `currentModelId` / `availableModels`。
+- `modes`: ACP `SessionModeState`，包含 `currentModeId` / `availableModes`。
+- `configOptions`: ACP `SessionConfigOption[]`。
+- `bridgePermissionModes` / `bridgePermissionMode`: lark-acp 自己的 permission-card 策略，不是 ACP 原生字段。
+
+设置 session controls 时传一个完整 JSON payload；CLI 会写入 `sessions.json`，如果对应 runtime 正在运行，会立刻拆成 ACP 单项调用：
+
+```bash
+lark-acp sessions set-control \
+  --chat-id "$LARK_ACP_CHAT_ID" \
+  --thread-id "$LARK_ACP_THREAD_ID" \
+  --json '{
+    "modelId": "<models.availableModels[].id>",
+    "modeId": "<modes.availableModes[].id>",
+    "config": {
+      "<boolean-config-id>": { "type": "boolean", "value": true },
+      "<select-config-id>": { "value": "<select-option-value>" }
+    },
+    "bridgePermissionMode": "alwaysAsk"
+  }'
+```
+
+字段含义：
+
+- `modelId` → ACP `session/set_model`（unstable）。
+- `modeId` → ACP `session/set_mode`。
+- `config[configId]` → ACP `session/set_config_option`；select 类型按 ACP request shape 只需要 `{ "value": "..." }`。
+- `bridgePermissionMode` → lark-acp 本地处理 ACP `requestPermission` 的策略：`alwaysAsk` / `alwaysAllow` / `alwaysDeny`。
+
+注意：ACP 没有统一的全局 permission mode。Claude Code / Copilot 等 agent 可能把“plan / edit automatically / bypass permission”暴露成 mode，也可能暴露成 config option；以 `control capabilities` 的 live 返回为准，不要硬编码。
+
+为了避免每轮 prompt 携带大段知识，bridge 会在 `~/.lark-acp/AGENTS.md` 和 `~/.lark-acp/CLAUDE.md` 写入完整操作指引；会话内只注入一句短提示，让 agent 在需要修改 settings 或 session controls 时先读这些文件。
 
 ### 配置文件
 

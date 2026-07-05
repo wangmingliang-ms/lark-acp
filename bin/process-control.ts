@@ -27,6 +27,7 @@ const APP_NAME = "lark-acp";
 const PID_FILE = "bridge.pid";
 const LOG_FILE = "bridge.log";
 const RESTART_MARKER_FILE = "bridge.restart";
+const CONTROL_SOCKET_FILE = "control.sock";
 const SYSTEMD_UNIT_PREFIX = "lark-acp-bridge";
 const SYSTEMD_UNIT_SUFFIX = ".service";
 
@@ -72,6 +73,11 @@ export function bridgeLogPath(homeDir: string): string {
 /** Absolute path of the restart marker consumed by the foreground bridge. */
 export function bridgeRestartMarkerPath(homeDir: string): string {
   return path.join(homeDir, RESTART_MARKER_FILE);
+}
+
+/** Unix-domain socket used by `lark-acp control …` to query the live bridge. */
+export function bridgeControlSocketPath(homeDir: string): string {
+  return path.join(homeDir, CONTROL_SOCKET_FILE);
 }
 
 /** Mark the next managed shutdown/start as a restart, not a plain stop/start. */

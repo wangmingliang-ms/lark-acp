@@ -1,2 +1,10 @@
-export type { SessionRecord, SessionStore } from "./session-store.js";
-export { FileSessionStore } from "./file-session-store.js";
+export type {
+  PermissionMode,
+  SessionCapabilitiesSnapshot,
+  SessionConfigControlValue,
+  SessionControlTarget,
+  SessionControls,
+  SessionRecord,
+  SessionStore,
+} from "./session-store.js";
+export { FileSessionStore, SessionStoreControlError } from "./file-session-store.js";

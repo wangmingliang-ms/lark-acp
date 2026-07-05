@@ -133,3 +133,50 @@ describe("FileSessionStore thread scoping", () => {
     }
   });
 });
+
+describe("FileSessionStore session controls", () => {
+  it("merges ACP-shaped controls into the latest thread session", async () => {
+    await store.save(
+      record({
+        chatId: "oc_A",
+        threadId: "th_1",
+        sessionId: "s_t1",
+        controls: {
+          modelId: "model-old",
+          config: { approval_mode: { value: "ask" } },
+        },
+      }),
+    );
+
+    const updated = await store.setControls(
+      { chatId: "oc_A", threadId: "th_1" },
+      {
+        modeId: "agent",
+        config: {
+          approval_mode: { value: "auto" },
+          auto_edit: { type: "boolean", value: true },
+        },
+        bridgePermissionMode: "alwaysAsk",
+      },
+    );
+
+    expect(updated).toMatchObject({
+      sessionId: "s_t1",
+      controls: {
+        modelId: "model-old",
+        modeId: "agent",
+        bridgePermissionMode: "alwaysAsk",
+        config: {
+          approval_mode: { value: "auto" },
+          auto_edit: { type: "boolean", value: true },
+        },
+      },
+    });
+  });
+
+  it("throws when setControls targets a missing session", async () => {
+    await expect(
+      store.setControls({ chatId: "oc_missing", threadId: null }, { modeId: "agent" }),
+    ).rejects.toThrow(/no session found/);
+  });
+});
