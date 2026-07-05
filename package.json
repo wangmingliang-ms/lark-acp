@@ -6,7 +6,6 @@
   "files": [
     "dist/",
     "templates/",
-    "scripts/postinstall.mjs",
     "README.md",
     "package.json"
   ],
@@ -28,7 +27,6 @@
   "scripts": {
     "build": "tsc && node scripts/chmod-bins.mjs",
     "prepare": "npm run build",
-    "postinstall": "node scripts/postinstall.mjs",
     "start": "node dist/bin/lark-acp.js",
     "dev": "tsc --watch",
     "test": "vitest run",

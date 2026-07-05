@@ -23,6 +23,7 @@ import {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  runInstall,
   DEFAULT_AGENT,
   type ParsedArgs,
 } from "./lark-acp.js";
@@ -56,6 +57,12 @@ describe("parseArgs — bare subcommands need no --agent", () => {
     // the handler can rewrite `start` -> `proxy` verbatim.
     expect(args.rawArgv).toEqual(["start"]);
     expect(args.subcommandIndex).toBe(0);
+  });
+
+  it("accepts explicit install without spawning the bridge", () => {
+    const args = parseArgs(["--home", "/tmp/lark-acp-home", "install"]);
+    expect(args.command).toBe("install");
+    expect(args.home).toBe("/tmp/lark-acp-home");
   });
 
   it("still parses an explicit --agent preset", () => {
@@ -138,6 +145,57 @@ describe("parseControlJson", () => {
     );
   });
 });
+
+describe("runInstall", () => {
+  let dir: string;
+  let stdoutSpy: ReturnType<typeof viSpyWrite>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "lark-acp-install-"));
+    stdoutSpy = viSpyWrite();
+  });
+
+  afterEach(() => {
+    stdoutSpy.restore();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("seeds templates/examples but does not create live settings or sessions", async () => {
+    const home = path.join(dir, "home");
+    await runInstall(parseArgs(["--home", home, "install"]));
+
+    expect(fs.existsSync(path.join(home, "AGENTS.md"))).toBe(true);
+    expect(fs.existsSync(path.join(home, "CLAUDE.md"))).toBe(true);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(home, "settings.back.json"), "utf-8")),
+    ).toMatchObject({
+      runtime: { agent: "claude" },
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(home, "sessions.back.json"), "utf-8")),
+    ).toMatchObject({
+      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAsk" } }],
+    });
+    expect(fs.existsSync(path.join(home, "settings.json"))).toBe(false);
+    expect(fs.existsSync(path.join(home, "sessions.json"))).toBe(false);
+    expect(stdoutSpy.output()).toContain("installed lark-acp home templates");
+  });
+});
+
+function viSpyWrite(): { output(): string; restore(): void } {
+  const chunks: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  return {
+    output: () => chunks.join(""),
+    restore: () => {
+      process.stdout.write = original;
+    },
+  };
+}
 
 /** Build a ParsedArgs the way parseArgs would, for the CLI-precedence cases. */
 function argsFor(argv: readonly string[]): ParsedArgs {

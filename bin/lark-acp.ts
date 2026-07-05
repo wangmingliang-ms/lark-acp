@@ -511,7 +511,8 @@ type ParsedArgs = {
     | "status"
     | "logs"
     | "control"
-    | "sessions";
+    | "sessions"
+    | "install";
   /** Preset id (`--agent <id>`); resolved against the registry in {@link runProxy}. */
   readonly agentPreset?: string;
   /** Raw command from `proxy -- <cmd>`; mutually exclusive with `agentPreset`. */
@@ -608,6 +609,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       break;
     }
     if (token === "agents") return finalize("agents");
+    if (token === "install") return finalize("install");
     if (token === "help") return finalize("help");
     if (token === "version") return finalize("version");
     // Process-management subcommands. `start`/`restart` capture the full argv +
@@ -1048,6 +1050,7 @@ function printHelp(): void {
     `  ${APP_NAME} [global-options] proxy [--agent <preset>] [-- <extra-args>...]`,
     `  ${APP_NAME} [global-options] proxy -- <agent-cmd> [agent-args]...`,
     `  ${APP_NAME} [global-options] start [--agent <preset>]   (run proxy in background)`,
+    `  ${APP_NAME} [global-options] install                    (seed home templates)`,
     `  ${APP_NAME} [global-options] stop | restart | status`,
     `  ${APP_NAME} logs [-f] [-n <lines>]`,
     `  ${APP_NAME} control capabilities --chat-id <id> [--thread-id <id>] [--json]`,
@@ -1092,6 +1095,9 @@ function printHelp(): void {
     `                         Combined with --agent, extra tokens are appended to the`,
     `                         preset's args.`,
     `  agents                 List built-in agent presets and exit.`,
+    `  install                Create/update lark-acp home templates and examples:`,
+    `                         AGENTS.md, CLAUDE.md, settings.back.json, sessions.back.json.`,
+    `                         Does NOT create live settings.json or sessions.json.`,
     ``,
     `Process management (run the bridge in the background; cross-platform):`,
     `  start                  Launch \`proxy\` (same options) in the background.`,
@@ -1147,6 +1153,7 @@ function printHelp(): void {
     `  add user presets and must define both \`label\` and \`command\`.`,
     ``,
     `Examples:`,
+    `  ${APP_NAME} install                       # seed home guide + example JSON`,
     `  ${APP_NAME} proxy --agent claude`,
     `  ${APP_NAME} start --agent claude          # run in the background`,
     `  ${APP_NAME} status                        # is it up? which PID?`,
@@ -1558,6 +1565,30 @@ async function runRestart(args: ParsedArgs): Promise<void> {
   }
 }
 
+async function runInstall(args: ParsedArgs): Promise<void> {
+  const homeDir = resolveHomeDir(args.home);
+  const configPath = resolveSettingsPath(args.configPath, homeDir);
+  installHomeTemplates({
+    homeDir,
+    settingsPath: configPath,
+    sessionsPath: path.join(homeDir, "sessions.json"),
+    controlSocketPath: bridgeControlSocketPath(homeDir),
+    overwriteDocs: true,
+  });
+  process.stdout.write(
+    [
+      `installed lark-acp home templates in ${homeDir}:`,
+      `  AGENTS.md`,
+      `  CLAUDE.md`,
+      `  settings.back.json`,
+      `  sessions.back.json`,
+      ``,
+      `Note: settings.json and sessions.json were not created. Copy/edit the .back.json files if you want to configure them manually.`,
+      ``,
+    ].join("\n"),
+  );
+}
+
 /**
  * Turn a `start`/`restart` invocation into the `proxy` argv to background.
  *
@@ -1598,6 +1629,9 @@ async function main(): Promise<void> {
       printAgents(buildRegistry(file.agents));
       return;
     }
+    case "install":
+      await runInstall(args);
+      return;
     case "proxy":
       await runProxy(args);
       return;
@@ -1677,6 +1711,7 @@ export {
   resolveHomeDir,
   parseControlJson,
   runProxy,
+  runInstall,
   DEFAULT_AGENT,
 };
 export type { ParsedArgs };
