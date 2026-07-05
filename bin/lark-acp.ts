@@ -35,6 +35,7 @@ import {
   createPinoLogger,
   PERMISSION_MODES,
 } from "../src/index.js";
+import { installHomeTemplates } from "../src/home-templates.js";
 import type {
   LarkLogger,
   PermissionMode,
@@ -1420,6 +1421,12 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   const cliLogger: LarkLogger = rootLogger.child({ name: "cli" });
 
   const configPath = resolveSettingsPath(args.configPath, homeDir);
+  installHomeTemplates({
+    homeDir,
+    settingsPath: configPath,
+    sessionsPath: path.join(homeDir, "sessions.json"),
+    controlSocketPath: bridgeControlSocketPath(homeDir),
+  });
   // Migrate a pre-~/.lark-acp install into settings.json before reading it.
   migrateLegacyIfNeeded(homeDir, configPath, cliLogger);
 
@@ -1669,6 +1676,7 @@ export {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  runProxy,
   DEFAULT_AGENT,
 };
 export type { ParsedArgs };

@@ -1,0 +1,31 @@
+{
+  "credentials": {
+    "appId": "cli_xxxxxxxxxxxxxxxx",
+    "appSecret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "runtime": {
+    "agent": "claude",
+    "idleTimeoutMinutes": 1440,
+    "maxChats": 10,
+    "hideThoughts": false,
+    "hideTools": false,
+    "hideCancelButton": false,
+    "permissionMode": "alwaysAsk",
+    "lifecycleNotifyChatIds": []
+  },
+  "agents": {
+    "my-agent": {
+      "label": "My ACP Agent",
+      "command": "node",
+      "args": ["/absolute/path/to/my-agent.js", "--acp"],
+      "description": "Custom ACP agent",
+      "env": {}
+    }
+  },
+  "bindings": {
+    "oc_example_chat_id": {
+      "cwd": "/absolute/path/to/repo",
+      "agent": "claude"
+    }
+  }
+}

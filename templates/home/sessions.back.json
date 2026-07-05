@@ -1,0 +1,30 @@
+{
+  "oc_example_chat_id": [
+    {
+      "chatId": "oc_example_chat_id",
+      "threadId": null,
+      "sessionId": "sess_example",
+      "title": "Example conversation",
+      "agentLabel": "claude",
+      "agentCommand": "npx",
+      "agentArgs": ["-y", "@zed-industries/claude-code-acp"],
+      "cwd": "/absolute/path/to/repo",
+      "controls": {
+        "modelId": "example-model-id",
+        "modeId": "example-mode-id",
+        "bridgePermissionMode": "alwaysAsk",
+        "config": {
+          "example_boolean_config": {
+            "type": "boolean",
+            "value": true
+          },
+          "example_select_config": {
+            "value": "example-option-id"
+          }
+        }
+      },
+      "createdAt": 1783250000000,
+      "updatedAt": 1783250000000
+    }
+  ]
+}

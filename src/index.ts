@@ -63,3 +63,6 @@ export {
   sendLifecycleNotice,
 } from "./lark/lifecycle-notifier.js";
 export type { LifecycleNoticeKind, LifecycleNoticeOptions } from "./lark/lifecycle-notifier.js";
+
+export { installHomeTemplates } from "./home-templates.js";
+export type { HomeTemplatePaths, InstallHomeTemplatesOptions } from "./home-templates.js";

@@ -7,6 +7,7 @@ import { LarkHttpClient } from "../lark/lark-http.js";
 import { sendLifecycleNotice, type LifecycleNoticeKind } from "../lark/lifecycle-notifier.js";
 import { LarkWsConnection } from "../lark/lark-ws.js";
 import { LarkCardPresenter } from "../presenter/lark-presenter.js";
+import { installHomeTemplates } from "../home-templates.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
 import { BridgeControlServer } from "./control-server.js";
 import {
@@ -36,7 +37,6 @@ const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
 /** Debounce for settings.json change events (fs.watch double-fires). */
 const SETTINGS_RELOAD_DEBOUNCE_MS = 300;
-const LARK_ACP_DOC_NAMES = ["AGENTS.md", "CLAUDE.md"] as const;
 
 const ORPHAN_CARD_REASON = "会话已结束，本次确认已失效";
 
@@ -927,17 +927,16 @@ export class LarkBridge {
     const settingsPath = this.settingsPath;
     if (!settingsPath) return;
     const homeDir = path.dirname(settingsPath);
-    const doc = renderHomeInstructions({
-      settingsPath,
-      socketPath: this.controlSocketPath,
-    });
-    for (const name of LARK_ACP_DOC_NAMES) {
-      try {
-        fs.mkdirSync(homeDir, { recursive: true });
-        fs.writeFileSync(path.join(homeDir, name), doc, "utf-8");
-      } catch (err) {
-        this.logger.warn({ err, homeDir, name }, "failed to write lark-acp home instructions");
-      }
+    try {
+      installHomeTemplates({
+        homeDir,
+        settingsPath,
+        sessionsPath: path.join(homeDir, "sessions.json"),
+        controlSocketPath: this.controlSocketPath,
+        overwriteDocs: true,
+      });
+    } catch (err) {
+      this.logger.warn({ err, homeDir }, "failed to install lark-acp home templates");
     }
   }
 
@@ -1194,94 +1193,6 @@ export class LarkBridge {
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
   return `[lark-acp: 若用户要求绑定/改绑仓库或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.lark-acp/AGENTS.md（或 CLAUDE.md）中的 lark-acp 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
-}
-
-function renderHomeInstructions(opts: {
-  readonly settingsPath: string;
-  readonly socketPath: string | null;
-}): string {
-  return [
-    "# lark-acp operating guide",
-    "",
-    "This file is the durable lark-acp guide. Do not rely on long inline prompt",
-    "knowledge: when a user asks to change lark-acp settings or session controls,",
-    "read this file first and follow it exactly.",
-    "",
-    "## Settings / bindings",
-    "",
-    `Global settings live at: ${opts.settingsPath}`,
-    "",
-    "Use settings.json for global config, credentials, runtime defaults, agent presets,",
-    "and chat bindings only. Preserve unrelated keys. Never print or copy secrets.",
-    "To bind or rebind a chat, update the top-level bindings object:",
-    "",
-    "```json",
-    "{",
-    '  "bindings": {',
-    '    "<chatId>": { "cwd": "/absolute/path/to/repo", "agent": "claude" }',
-    "  }",
-    "}",
-    "```",
-    "",
-    "## Session controls",
-    "",
-    "Session-specific controls live in ~/.lark-acp/sessions.json and are changed",
-    "through the lark-acp CLI, not by hand-editing JSON unless the CLI is unavailable.",
-    "The controls schema intentionally follows ACP request/capability shapes closely.",
-    "",
-    "Before changing model/mode/config/permission controls, always query live capabilities",
-    "for the current chat/thread. Do not guess ids or values from memory.",
-    "",
-    "```bash",
-    'lark-acp control capabilities --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json',
-    "```",
-    "",
-    "The response keeps ACP-native fields as-is where possible:",
-    "",
-    "- models: ACP SessionModelState, with currentModelId and availableModels",
-    "- modes: ACP SessionModeState, with currentModeId and availableModes",
-    "- configOptions: ACP SessionConfigOption[]",
-    "- bridgePermissionModes / bridgePermissionMode: lark-acp client-side policy, not ACP-native",
-    "",
-    "Only choose ids/values that appear in that live response. If the requested target",
-    "does not exist, tell the user and do not write controls.",
-    "",
-    "Set controls with one JSON payload:",
-    "",
-    "```bash",
-    'lark-acp sessions set-control --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json \'{',
-    '  "modelId": "<one models.availableModels[].id>",',
-    '  "modeId": "<one modes.availableModes[].id>",',
-    '  "config": {',
-    '    "<boolean config id>": { "type": "boolean", "value": true },',
-    '    "<select config id>": { "value": "<one select option value>" }',
-    "  },",
-    '  "bridgePermissionMode": "alwaysAsk"',
-    "}'",
-    "```",
-    "",
-    "All fields are optional; include only the controls the user asked to change.",
-    "ACP select config requests use { value: <valueId> } with no type field. The CLI",
-    "also tolerates type=select but persists the ACP-shaped form without type.",
-    "",
-    "Meaning of each field:",
-    "",
-    "- modelId -> ACP session/set_model, from models.availableModels[].id",
-    "- modeId -> ACP session/set_mode, from modes.availableModes[].id",
-    "- config[configId] -> ACP session/set_config_option, from configOptions[].id",
-    "- bridgePermissionMode -> lark-acp local handling of ACP requestPermission",
-    "",
-    "Important distinction: ACP has per-tool requestPermission approvals, but no",
-    "standard global permission mode. If an agent exposes Plan/Edit/Bypass as modes,",
-    "set modeId. If it exposes approval/bypass as a config option, set config. Only use",
-    "bridgePermissionMode for lark-acp's own approval-card policy.",
-    "",
-    "After set-control succeeds, say what was requested and note whether the CLI reported",
-    "applied=true. If applied=false, the value was persisted for the session but no live",
-    "runtime was available to apply immediately.",
-    "",
-    ...(opts.socketPath ? ["Control socket:", "", `- ${opts.socketPath}`, ""] : []),
-  ].join("\n");
 }
 
 /**

@@ -82,6 +82,7 @@ function makeBridge(opts?: { unboundCwd?: string | null }): LarkBridge {
     bindingStore,
     presenter,
     settingsPath,
+    controlSocketPath: path.join(home, "control.sock"),
     unboundCwd: opts && "unboundCwd" in opts ? opts.unboundCwd : home,
   });
 }
@@ -152,6 +153,30 @@ describe("reception area", () => {
     expect(agents).toContain("bindings");
     expect(agents).toContain(settingsPath);
     expect(claude).toEqual(agents);
+  });
+
+  it("installs home guide and example JSON files on bridge start", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    await bridge.start();
+
+    expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf-8")).toContain(
+      "lark-acp operating guide",
+    );
+    expect(fs.readFileSync(path.join(home, "CLAUDE.md"), "utf-8")).toContain(
+      "lark-acp operating guide",
+    );
+    expect(
+      JSON.parse(fs.readFileSync(path.join(home, "settings.back.json"), "utf-8")),
+    ).toMatchObject({ runtime: { agent: "claude" } });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(home, "sessions.back.json"), "utf-8")),
+    ).toMatchObject({
+      oc_example_chat_id: [
+        {
+          controls: { bridgePermissionMode: "alwaysAsk" },
+        },
+      ],
+    });
   });
 });
 
