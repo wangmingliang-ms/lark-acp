@@ -1,6 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
-import type { AgentStatus, LarkPresenter } from "../presenter/presenter.js";
+import type { AgentStatus, LarkPresenter, SessionCardMeta } from "../presenter/presenter.js";
 import { LarkAcpClient, PERMISSION_MODES, type PermissionMode } from "../acp/lark-acp-client.js";
 import {
   spawnAgent,
@@ -194,6 +194,25 @@ export class ChatRuntime {
     this.logger.info("creating chat runtime");
 
     const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
+    let stateRef: ChatRuntimeState | null = null;
+    let currentClient: LarkAcpClient;
+    const metaProvider = (): SessionCardMeta =>
+      stateRef
+        ? sessionMetaFromSnapshot({
+            ...stateRef.sessionCapabilities,
+            bridgePermissionMode: stateRef.client.getPermissionMode(),
+          })
+        : {
+            agent: displayAgent({
+              ...(this.opts.agentLabel !== undefined ? { label: this.opts.agentLabel } : {}),
+              command: this.opts.agentCommand,
+              args: this.opts.agentArgs,
+              cwd: this.opts.agentCwd,
+            }),
+            mode: "—",
+            model: "—",
+            permission: bridgePermissionLabel(currentClient.getPermissionMode()),
+          };
     const client = new LarkAcpClient({
       presenter: this.opts.presenter,
       logger: this.logger,
@@ -202,7 +221,9 @@ export class ChatRuntime {
       showCancelButton: this.opts.showCancelButton,
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
       permissionMode: latest?.controls?.bridgePermissionMode ?? this.opts.permissionMode,
+      metaProvider,
     });
+    currentClient = client;
 
     const spawnOpts: SpawnAgentOptions = {
       command: this.opts.agentCommand,
@@ -233,6 +254,7 @@ export class ChatRuntime {
       lastActivity: Date.now(),
       lastMessageId: firstMessage.messageId,
     };
+    stateRef = state;
 
     agent.process.on("exit", (code, signal) => {
       this.handleUnexpectedExit(code, signal);
@@ -493,6 +515,104 @@ export class ChatRuntime {
     } catch (err) {
       this.logger.warn({ err }, "session store save failed");
     }
+  }
+}
+
+function sessionMetaFromSnapshot(snapshot: SessionCapabilitiesSnapshot): SessionCardMeta {
+  return {
+    agent: displayAgent(snapshot.agent),
+    mode: displayMode(snapshot),
+    model: displayModel(snapshot),
+    permission: displayPermission(snapshot),
+  };
+}
+
+function displayAgent(agent: SessionCapabilitiesSnapshot["agent"]): string {
+  if (agent.label) return agent.label;
+  const base = agent.command.split(/[\\/]/).pop() || agent.command;
+  return base || "unknown";
+}
+
+function displayMode(snapshot: SessionCapabilitiesSnapshot): string {
+  const modeId = snapshot.modes?.currentModeId;
+  if (!modeId) return "—";
+  const mode = snapshot.modes?.availableModes.find((m) => m.id === modeId);
+  return mode?.name ?? modeId;
+}
+
+function displayModel(snapshot: SessionCapabilitiesSnapshot): string {
+  const modelId = snapshot.models?.currentModelId;
+  if (!modelId) return "—";
+  const model = snapshot.models?.availableModels.find((m) => m.modelId === modelId);
+  return model?.name ?? modelId;
+}
+
+function displayPermission(snapshot: SessionCapabilitiesSnapshot): string {
+  const explicit = permissionLikeConfigOptions(snapshot);
+  if (explicit.length > 0) return explicit.join(" · ");
+  return bridgePermissionLabel(snapshot.bridgePermissionMode);
+}
+
+function permissionLikeConfigOptions(snapshot: SessionCapabilitiesSnapshot): string[] {
+  const options = snapshot.configOptions ?? [];
+  return options
+    .filter((option) => isPermissionLikeConfig(option))
+    .map((option) => `${option.name}: ${displayConfigCurrentValue(option)}`);
+}
+
+function isPermissionLikeConfig(
+  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+): boolean {
+  const haystack =
+    `${option.id} ${option.name} ${option.description ?? ""} ${option.category ?? ""}`.toLowerCase();
+  return (
+    haystack.includes("permission") ||
+    haystack.includes("approval") ||
+    haystack.includes("approve") ||
+    haystack.includes("bypass") ||
+    haystack.includes("edit automatically") ||
+    haystack.includes("auto edit") ||
+    haystack.includes("auto-edit")
+  );
+}
+
+function displayConfigCurrentValue(
+  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+): string {
+  if (option.type === "boolean") return option.currentValue ? "on" : "off";
+  const value = option.currentValue;
+  const selectOption = findSelectOptionName(option.options, value);
+  return selectOption ?? value;
+}
+
+function findSelectOptionName(
+  options: Extract<
+    NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+    { type: "select" }
+  >["options"],
+  value: string,
+): string | undefined {
+  for (const option of options) {
+    if ("value" in option) {
+      if (option.value === value) return option.name;
+      continue;
+    }
+    const nested = option.options.find((child) => child.value === value);
+    if (nested) return nested.name;
+  }
+  return undefined;
+}
+
+function bridgePermissionLabel(mode: SessionCapabilitiesSnapshot["bridgePermissionMode"]): string {
+  switch (mode) {
+    case "alwaysAsk":
+      return "Ask approvals";
+    case "alwaysAllow":
+      return "Auto approve";
+    case "alwaysDeny":
+      return "Auto deny";
+    default:
+      return mode;
   }
 }
 

@@ -238,6 +238,25 @@ function entryToCardElement(entry: TimelineEntry): object {
   return { tag: "markdown", content: nonThoughtEntryToMarkdown(entry) };
 }
 
+function buildSessionMetaElement(state: UnifiedCardState): object | null {
+  const meta = state.meta;
+  if (!meta) return null;
+  return {
+    tag: "note",
+    elements: [
+      {
+        tag: "plain_text",
+        content: [
+          `Agent: ${meta.agent}`,
+          `Mode: ${meta.mode}`,
+          `Model: ${meta.model}`,
+          `Permission: ${meta.permission}`,
+        ].join(" · "),
+      },
+    ],
+  };
+}
+
 function buildUnifiedCard(state: UnifiedCardState): object {
   const elements: object[] = [];
 
@@ -262,6 +281,12 @@ function buildUnifiedCard(state: UnifiedCardState): object {
         ...(state.threadId !== null ? { th: state.threadId } : {}),
       }),
     );
+  }
+
+  const metaElement = buildSessionMetaElement(state);
+  if (metaElement) {
+    elements.push({ tag: "hr" });
+    elements.push(metaElement);
   }
 
   const header = STATUS_HEADER[state.status];

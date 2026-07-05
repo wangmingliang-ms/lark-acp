@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import { ChatRuntime } from "./chat-runtime.js";
+import { LarkAcpClient } from "../acp/lark-acp-client.js";
 import type { ChatRuntimeOptions } from "./chat-runtime.js";
 import { createPinoLogger } from "../logger/logger.js";
 import type { LarkPresenter, UnifiedCardState } from "../presenter/presenter.js";
@@ -193,8 +194,8 @@ function makeFakeAgent(): FakeAgentHandle {
       models: {
         currentModelId: "model-old",
         availableModels: [
-          { id: "model-old", name: "Old" },
-          { id: "model-new", name: "New" },
+          { modelId: "model-old", name: "Old" },
+          { modelId: "model-new", name: "New" },
         ],
       },
       modes: {
@@ -223,6 +224,10 @@ function makeFakeAgent(): FakeAgentHandle {
       resolveClosed();
     },
   };
+}
+
+async function waitForCardFlush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 160));
 }
 
 describe("ChatRuntime finalizes when the agent connection closes mid-prompt", () => {
@@ -400,9 +405,10 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
         saved.push(record);
       },
     };
+    const states: UnifiedCardState[] = [];
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter([]),
+      presenter: recordingPresenter(states),
       sessionStore: store,
     });
 
@@ -439,6 +445,22 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       models: { currentModelId: "model-new" },
       modes: { currentModeId: "agent" },
       bridgePermissionMode: "alwaysAsk",
+    });
+
+    const spawnOpts = spawnAgentMock.mock.calls[0]?.[0] as { client: LarkAcpClient };
+    await spawnOpts.client.sessionUpdate({
+      sessionId: "sess_fake",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "metadata render" },
+      },
+    });
+    await waitForCardFlush();
+    expect(states.at(-1)?.meta).toMatchObject({
+      agent: "node",
+      mode: "Agent",
+      model: "New",
+      permission: "Auto Edit: on",
     });
     expect(saved.at(-1)).toMatchObject({
       controls: {

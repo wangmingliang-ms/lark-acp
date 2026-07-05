@@ -4,9 +4,17 @@ import { LarkCardPresenter } from "./lark-presenter.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 
+interface CardElement {
+  tag?: string;
+  content?: string;
+  elements?: CardElement[];
+  text?: { content?: string };
+}
+
 interface CardWithConfig {
   config?: { summary?: { content?: string } };
   header?: { title?: { content?: string }; template?: string };
+  body?: { elements?: CardElement[] };
 }
 
 interface ReplyCardCall {
@@ -110,6 +118,52 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[0]?.header?.title?.content).toBe("✅ 已结束");
     expect(cards[0]?.header?.template).toBe("blue");
     expect(cards[0]?.config?.summary?.content).toBe("✅ 已结束");
+  });
+
+  it("always renders session metadata at the bottom of conversation cards", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const meta = {
+      agent: "Claude",
+      mode: "Plan Mode",
+      model: "Claude Sonnet 5",
+      permission: "Edit Automatically: on",
+    };
+
+    await presenter.sendUnifiedCard("om_1", {
+      status: "responding",
+      entries: [{ kind: "text", text: "working" }],
+      cancellable: true,
+      chatId: "oc_1",
+      threadId: null,
+      meta,
+    });
+    await presenter.updateUnifiedCard("card_1", {
+      status: "complete",
+      entries: [{ kind: "text", text: "done" }],
+      cancellable: false,
+      chatId: "oc_1",
+      threadId: null,
+      meta,
+    });
+
+    for (const card of cards) {
+      const elements = card.body?.elements ?? [];
+      expect(elements.at(-1)).toMatchObject({
+        tag: "note",
+        elements: [
+          {
+            tag: "plain_text",
+            content:
+              "Agent: Claude · Mode: Plan Mode · Model: Claude Sonnet 5 · Permission: Edit Automatically: on",
+          },
+        ],
+      });
+    }
+
+    const runningElements = cards[0]?.body?.elements ?? [];
+    expect(runningElements.at(-3)).toMatchObject({ tag: "button" });
+    expect(runningElements.at(-1)).toMatchObject({ tag: "note" });
   });
 
   it("distinguishes approved and rejected permission cards", async () => {

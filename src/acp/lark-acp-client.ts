@@ -8,6 +8,7 @@ import type {
   LarkPresenter,
   TimelineEntry,
   ToolStatus,
+  SessionCardMeta,
 } from "../presenter/presenter.js";
 
 const CARD_FLUSH_DEBOUNCE_MS = 100;
@@ -196,6 +197,8 @@ export interface LarkAcpClientOptions {
   permissionTimeoutMs: number;
   /** Permission gate strategy — see {@link PermissionMode}. */
   permissionMode: PermissionMode;
+  /** Lazily returns current agent/model/mode/permission metadata for card footer. */
+  metaProvider?: () => SessionCardMeta;
 }
 
 /**
@@ -215,6 +218,7 @@ export class LarkAcpClient implements acp.Client {
   private readonly showTools: boolean;
   private readonly showCancelButton: boolean;
   private readonly permissionTimeoutMs: number;
+  private readonly metaProvider?: () => SessionCardMeta;
   private permissionMode: PermissionMode;
   private timeline: TimelineEntry[] = [];
   private status: AgentStatus = "thinking";
@@ -240,6 +244,7 @@ export class LarkAcpClient implements acp.Client {
     this.showTools = opts.showTools;
     this.showCancelButton = opts.showCancelButton;
     this.permissionTimeoutMs = opts.permissionTimeoutMs;
+    this.metaProvider = opts.metaProvider;
     this.permissionMode = opts.permissionMode;
   }
 
@@ -607,6 +612,7 @@ export class LarkAcpClient implements acp.Client {
         cancellable: opts.cancellable && this.showCancelButton,
         chatId: this.currentChatId,
         threadId: this.currentThreadId,
+        meta: this.metaProvider?.(),
       };
 
       if (this.cardId) {

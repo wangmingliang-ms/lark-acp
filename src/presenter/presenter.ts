@@ -36,10 +36,20 @@ export interface NoticeCardSpec {
   readonly template: NoticeTemplate;
 }
 
+/** Compact session-control metadata shown at the bottom of a conversation card. */
+export interface SessionCardMeta {
+  readonly agent: string;
+  readonly mode: string;
+  readonly model: string;
+  readonly permission: string;
+}
+
 /** Snapshot the presenter renders into a single Lark interactive card. */
 export interface UnifiedCardState {
   status: AgentStatus;
   entries: readonly TimelineEntry[];
+  /** Current ACP / bridge control state. Rendered as compact footer text. */
+  meta?: SessionCardMeta;
   /** Show the bottom "cancel" button. Typically true while the agent is
    *  still working. */
   cancellable: boolean;
