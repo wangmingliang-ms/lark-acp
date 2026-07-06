@@ -265,6 +265,37 @@ describe("hot-reload of bindings", () => {
 });
 
 describe("session bind conflicts", () => {
+  it("uses consistent Title/Agent/Repo order in session bind notices", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+
+    await expect(
+      b.controlBindSession(
+        {
+          chatId: "oc_x",
+          threadId: "th_new",
+          sessionId: "s_desktop",
+          title: "Desktop task",
+          agentCommand: CLAUDE.command,
+          agentArgs: [...CLAUDE.args],
+          agentLabel: CLAUDE.label,
+          cwd: repoA,
+          createdAt: 2,
+          updatedAt: 2,
+        },
+        "om_notice",
+      ),
+    ).resolves.toMatchObject({ bound: true });
+
+    const body = presenter.notices.at(-1)?.body ?? "";
+    expect(body).toContain(
+      "**修改明细**\n• Title：未绑定 → Desktop task\n• Agent：未绑定 → claude\n• Repo：未绑定 → ",
+    );
+    expect(body).toContain("**绑定后**\n• Title：Desktop task\n• Agent：claude\n• Repo：");
+    expect(body).not.toContain("Session title");
+    expect(body).not.toContain("Title:");
+  });
+
   it("rejects binding a session that is already bound to another thread and notifies", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
@@ -301,11 +332,12 @@ describe("session bind conflicts", () => {
 
     const notice = presenter.notices.at(-1);
     expect(notice).toMatchObject({ title: "⚠️ Session 已被绑定" });
-    expect(notice?.body).toContain("Session title：Desktop task");
+    expect(notice?.body).toContain("Title：Desktop task");
     expect(notice?.body).not.toContain("已隐藏");
     expect(notice?.body).not.toContain("已绑定 Chat");
     expect(notice?.body).not.toContain("已绑定 Thread");
     expect(notice?.body).not.toContain("Session ID");
+    expect(notice?.body).not.toContain("Session title");
     expect(await sessionStore.getLatest("oc_x", "th_new")).toBeNull();
     expect(await sessionStore.getLatest("oc_x", "th_old")).toMatchObject({
       sessionId: "s_desktop",
