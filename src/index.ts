@@ -21,8 +21,12 @@ export type {
 } from "./bridge/bridge.js";
 
 export type { PermissionMode } from "./acp/humming-client.js";
-export { PERMISSION_MODES, listAgentSessions } from "./acp/index.js";
-export type { ListedAgentSession, ListAgentSessionsResult } from "./acp/index.js";
+export { PERMISSION_MODES, listAgentSessions, probeAgentSessionCapabilities } from "./acp/index.js";
+export type {
+  ListedAgentSession,
+  ListAgentSessionsResult,
+  ProbeAgentSessionCapabilitiesResult,
+} from "./acp/index.js";
 
 export type { LarkLogger } from "./logger/logger.js";
 export { createPinoLogger } from "./logger/logger.js";

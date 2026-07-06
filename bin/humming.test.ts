@@ -92,6 +92,71 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(args.controlAction).toBe("capabilities");
     expect(args.targetChatId).toBe("oc_A");
     expect(args.targetThreadId).toBe("th_1");
+    expect(args.controlJson).toBe(true);
+  });
+
+  it("parses agent capabilities probe flags", () => {
+    const args = parseArgs([
+      "control",
+      "agent-capabilities",
+      "--chat-id",
+      "oc_A",
+      "--agent",
+      "copilot",
+      "--cwd",
+      "/repo",
+      "--json",
+    ]);
+    expect(args.command).toBe("control");
+    expect(args.controlAction).toBe("agent-capabilities");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetAgent).toBe("copilot");
+    expect(args.targetCwd).toBe("/repo");
+    expect(args.controlJson).toBe(true);
+  });
+
+  it("parses set-agent as a topic-level profile change", () => {
+    const args = parseArgs([
+      "sessions",
+      "set-agent",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--agent",
+      "copilot",
+    ]);
+    expect(args.command).toBe("sessions");
+    expect(args.sessionsAction).toBe("set-agent");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBe("th_1");
+    expect(args.targetAgent).toBe("copilot");
+
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "set-agent",
+        "--chat-id",
+        "oc_A",
+        "--agent",
+        "copilot",
+        "--cwd",
+        "/repo",
+      ]),
+    ).toThrowError(/does not accept --cwd/);
+
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "set-agent",
+        "--chat-id",
+        "oc_A",
+        "--agent",
+        "copilot",
+        "--json",
+        '{"modelId":"opus"}',
+      ]),
+    ).toThrowError(/does not accept --json/);
   });
 
   it("parses set-control JSON payloads", () => {

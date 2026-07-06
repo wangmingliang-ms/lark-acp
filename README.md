@@ -84,8 +84,10 @@ humming [global-options] start [--agent <preset>]   # 后台运行 proxy
 humming [global-options] stop | restart | status
 humming logs [-f] [-n <lines>]
 humming [global-options] control capabilities --chat-id <id> [--thread-id <id>] [--json]
+humming [global-options] control agent-capabilities [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]
 humming [global-options] sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]
 humming [global-options] sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>
+humming [global-options] sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>
 humming [global-options] sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'
 humming agents
 humming help
@@ -176,6 +178,7 @@ humming stop                    # 停止后台 bridge
   `-- <agent-cmd>` 透传部分**原样**转发给后台进程。
 - **Lifecycle / binding 通知**：在 settings.json 写 `"runtime": { "lifecycleNotifyChatIds": ["oc_..."] }` 后，
   bridge 启动完成会给这些会话发「已启动」，`stop` 时发「正在停止」，`restart` 时发「正在重启」和「已重启」。通知是 best-effort，发送失败只记日志，不阻塞进程管理。每次 repo 绑定成功也会发「已绑定 repo」通知并列出修改明细；通过 CLI 绑定 topic session 成功时会发「已绑定 session」通知，包含 session title 和 Agent / Mode / Model / Permission / Controls 修改明细；`sessions set-control` 成功时会发「Session profile 已更新」通知，展示当前 Agent、Mode、Model、Permission 和 Config controls。
+- **Agent 切换通知**：`sessions set-agent` 会停止当前 topic runtime、清掉旧 session 绑定，并写入新 Agent 的 profile-only boundary。成功后发送「Agent 已切换」通知，说明旧 Agent 历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。
 - **初始化模板**：执行 `humming init` 会创建/刷新 `~/.humming/AGENTS.md`、`~/.humming/CLAUDE.md`，并创建 `~/.humming/settings.back.json`、`~/.humming/sessions.back.json` 作为可复制参考模板。官方 install 脚本会在全局命令安装完成后自动执行一次 `humming init`；手动安装或换 home 时也可以单独运行。`settings.json` / `sessions.json` 仍只在真实配置或会话产生时创建；`.back.json` 不含真实凭据。
 - **Linux / WSL 上是真后台托管**：如果 `systemctl --user` 可用，`start` 会用
   `systemd-run --user` 启动一个 transient service（unit 名会显示在 `status` 里），bridge
@@ -224,6 +227,37 @@ humming sessions bind \
 
 `sessions.json` 里的记录会保留 `title`、`sessionUpdatedAt`、`createdAt`、`updatedAt` 等 metadata，方便人工检查。
 
+#### 切换当前 topic 的 Agent
+
+Agent 属于 topic/session profile，不属于 chat binding。已经有 session record 的 topic 不会因为你修改 `settings.json` 的 `runtime.agent` 而切换 Agent；它会继续 resume 原来的 session。要真正从 Claude 切到 Copilot / Codex / 其他 agent，用：
+
+```bash
+humming sessions set-agent \
+  --chat-id "$HUMMING_CHAT_ID" \
+  --thread-id "$HUMMING_THREAD_ID" \
+  --agent copilot
+```
+
+语义：
+
+- 停止当前 topic 的 live runtime（如果正在运行）。
+- 清掉当前 topic 的旧 session binding。
+- 写入新 Agent 的 profile-only record；下一条消息会启动全新的 ACP session。
+- 不自动迁移旧 Agent 的内部对话历史。
+- 不复制旧 Agent 的 model/mode/config controls。Claude 的 `opus` / `default` / `acceptEdits` 等 id 对 Copilot 不一定有效；切换后应按新 Agent 的 live capabilities 再设置 controls。
+
+如果只是想查看某个 Agent 支持哪些 model/mode/config，而不改变当前 topic，可以启动一次短暂 probe session：
+
+```bash
+humming control agent-capabilities \
+  --chat-id "$HUMMING_CHAT_ID" \
+  --thread-id "$HUMMING_THREAD_ID" \
+  --agent copilot \
+  --json
+```
+
+这个命令会启动所选 Agent、创建 throwaway ACP session 读取 capabilities，然后立即停止；不会修改 `sessions.json` 或当前 topic runtime。
+
 #### Live capabilities / controls
 
 查询当前会话可用的 ACP 原生能力：
@@ -231,6 +265,8 @@ humming sessions bind \
 ```bash
 humming control capabilities --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --json
 ```
+
+如果当前 topic 还在 Claude session 上，这个命令返回的就是 Claude 的 live capabilities。要查 Copilot 等另一个 Agent 的能力，使用 `control agent-capabilities --agent <agent>` probe，不要凭记忆猜 id。
 
 返回会尽量保持 ACP 原生结构：
 
@@ -246,7 +282,7 @@ humming sessions set-control \
   --chat-id "$HUMMING_CHAT_ID" \
   --thread-id "$HUMMING_THREAD_ID" \
   --json '{
-    "modelId": "<models.availableModels[].id>",
+    "modelId": "<models.availableModels[].modelId>",
     "modeId": "<modes.availableModes[].id>",
     "config": {
       "<boolean-config-id>": { "type": "boolean", "value": true },

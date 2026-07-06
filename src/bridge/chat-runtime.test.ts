@@ -132,6 +132,7 @@ function stubSessionStore(): SessionStore {
     setControls: async () => {
       throw new Error("setControls not implemented in stub");
     },
+    clearThread: async () => {},
     delete: async () => {},
   };
 }

@@ -308,7 +308,7 @@ export class ChatRuntime {
     };
 
     let agent: AgentProcess;
-    if (latest) {
+    if (latest && !latest.profileOnly) {
       this.logger.info({ previousSessionId: latest.sessionId }, "attempting resume");
       const result = await spawnAndResumeAgent(spawnOpts, latest.sessionId);
       agent = result.agent;
@@ -776,7 +776,7 @@ export class ChatRuntime {
     const now = Date.now();
     try {
       const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
-      const previous = latest?.sessionId === sessionId ? latest : null;
+      const previous = latest?.sessionId === sessionId || latest?.profileOnly ? latest : null;
       const liveState = this.state?.agent.sessionId === sessionId ? this.state : null;
       const title = liveState?.sessionTitle ?? previous?.title;
       const sessionUpdatedAt = liveState?.sessionUpdatedAt ?? previous?.sessionUpdatedAt;

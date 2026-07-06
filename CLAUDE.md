@@ -46,8 +46,11 @@ humming proxy --agent claude    # 前台运行（占终端，Ctrl-C 停）
 - 当用户要求列出某个 agent 的 settings / session settings / capabilities / existing sessions 时，必须使用 humming 提供的 CLI/control 命令，不要去 Claude/Codex/Gemini/OpenCode 的缓存目录或项目目录里猜状态。
   - Agent preset 列表：`humming agents`
   - 当前 live session settings/capabilities：`humming control capabilities --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --json`
+  - 指定 Agent 的 capabilities（不改变当前 topic）：`humming control agent-capabilities --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent <agent> --json`
   - 某 agent 的已有 ACP sessions：`humming sessions list --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent <agent> --json`
 - 修改当前 topic 的 Model / Mode / Permission / Config controls 前必须先查询 live capabilities，确认 id/value 存在后再用 `humming sessions set-control ... --json '<controls>'`。成功后 Humming 会发「Session profile 已更新」通知，展示当前 Agent、Mode、Model、Permission 和 Controls；失败时 runtime 与 `sessions.json` 都不能被污染。
+- 切换当前 topic 的 Agent 必须用 `humming sessions set-agent --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent <agent>`，不要改 `settings.json` 的 `runtime.agent`，也不要在 `bindings` 里写 agent。切换 Agent 会停止当前 topic runtime、清掉旧 session binding，并在下一条消息用新 Agent 创建全新 ACP session；旧 Agent 的内部历史不会自动迁移。
+- Model / Mode / Config IDs 是 agent-specific。Claude 的 `opus` / `default` / `acceptEdits` 等控制不要带到 Copilot/Codex；切换后先查新 Agent capabilities，再用新返回里的 id 设置 controls。
 - `sessions bind` 只能绑定当前 chat repo 内的 session；如果该 session 已经绑定到另一个 chat/thread，必须拒绝并提示用户先重置原 thread，不要通过手改 `sessions.json` 绕过。绑定成功通知应包含 Title / Agent / Repo / Mode / Model / Permission / Controls，且不要在群里打印完整 session/chat/thread id。
 
 # TypeScript 工程准则（TypeScript 5.x / Strict Mode）

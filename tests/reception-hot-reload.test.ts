@@ -68,6 +68,7 @@ interface BridgeInternals {
     from: NonNullable<ReceptionBinding["fallbackFrom"]>,
   ): Promise<void>;
   controlBindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+  controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   readonly activeChatCount: number;
 }
 function asInternals(bridge: LarkBridge): BridgeInternals {
@@ -343,6 +344,74 @@ describe("hot-reload of bindings", () => {
 });
 
 describe("session bind conflicts", () => {
+  it("switches the current topic Agent by replacing the old session with a profile-only boundary", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s_claude_old",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      controls: {
+        modelId: "opus",
+        modeId: "default",
+        config: { acceptEdits: { type: "boolean", value: true } },
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await expect(
+      b.controlSetAgent(
+        {
+          chatId: "oc_x",
+          threadId: "th_topic",
+          sessionId: "profile:copilot",
+          profileOnly: true,
+          agentCommand: CODEX.command,
+          agentArgs: [...CODEX.args],
+          agentLabel: CODEX.label,
+          cwd: repoA,
+          createdAt: 2,
+          updatedAt: 2,
+        },
+        "om_notice",
+      ),
+    ).resolves.toMatchObject({ switched: true, agent: "codex" });
+
+    const stored = await sessionStore.getLatest("oc_x", "th_topic");
+    expect(stored).toMatchObject({
+      sessionId: "profile:copilot",
+      profileOnly: true,
+      agentLabel: "codex",
+    });
+    expect(stored?.controls).toBeUndefined();
+
+    const eff = await b.resolveBinding("oc_x");
+    const runtime = await b.acquireRuntime("oc_x", "th_topic", eff!);
+    const opts = (
+      runtime as {
+        opts: { agentLabel?: string; agentCommand: string; inheritedControls?: unknown };
+      }
+    ).opts;
+    expect(opts).toMatchObject({ agentLabel: "codex", agentCommand: "npx" });
+    expect(opts.inheritedControls).toBeUndefined();
+
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "✅ Agent 已切换", template: "green" });
+    expect(notice?.body).toContain("旧 Agent 的内部对话历史不会自动迁移");
+    expect(notice?.body).toContain("Agent：claude → codex");
+    expect(notice?.body).toContain("Model：opus → —");
+    expect(notice?.body).toContain("Mode：default → —");
+    expect(notice?.body).toContain("Controls：acceptEdits: on → —");
+    expect(notice?.body).not.toContain("s_claude_old");
+    expect(notice?.body).not.toContain("profile:copilot");
+  });
+
   it("uses consistent Title/Agent/Repo order in session bind notices", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);

@@ -27,6 +27,11 @@ export type ControlRequest =
       readonly id?: string | number;
       readonly method: "bindSession";
       readonly params: { readonly record: SessionRecord; readonly noticeMessageId?: string | null };
+    }
+  | {
+      readonly id?: string | number;
+      readonly method: "setAgent";
+      readonly params: { readonly record: SessionRecord; readonly noticeMessageId?: string | null };
     };
 
 export type ControlResponse =
@@ -37,6 +42,7 @@ export interface BridgeControlHandlers {
   capabilities(chatId: string, threadId: string | null): Promise<SessionCapabilitiesSnapshot>;
   setControls(chatId: string, threadId: string | null, controls: SessionControls): Promise<unknown>;
   bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+  setAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
 }
 
 export interface BridgeControlServerOptions {
@@ -133,6 +139,15 @@ export class BridgeControlServer {
               parsed.params.noticeMessageId ?? null,
             ),
           };
+        case "setAgent":
+          return {
+            ok: true,
+            id: parsed.id,
+            result: await this.handlers.setAgent(
+              parsed.params.record,
+              parsed.params.noticeMessageId ?? null,
+            ),
+          };
         default:
           return assertNever(parsed);
       }
@@ -179,6 +194,10 @@ function isControlRequest(value: unknown): value is ControlRequest {
     return isRecord(params) && typeof params["chatId"] === "string" && isRecord(params["controls"]);
   }
   if (value["method"] === "bindSession") {
+    const params = value["params"];
+    return isRecord(params) && isSessionRecord(params["record"]);
+  }
+  if (value["method"] === "setAgent") {
     const params = value["params"];
     return isRecord(params) && isSessionRecord(params["record"]);
   }

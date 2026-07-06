@@ -22,6 +22,11 @@ export interface SessionRecord {
    */
   threadId: string | null;
   sessionId: string;
+  /**
+   * Session-level profile selected before a real ACP session exists. Runtime
+   * must start a fresh ACP session instead of trying to resume this id.
+   */
+  profileOnly?: boolean;
   /** Human-readable title reported by the ACP agent for this session, if known. */
   label?: string;
   title?: string;
@@ -128,6 +133,9 @@ export interface SessionStore {
 
   /** Merge control fields into one existing/current session record. */
   setControls(target: SessionControlTarget, controls: SessionControls): Promise<SessionRecord>;
+
+  /** Drop all persisted ACP sessions for one chat/thread. */
+  clearThread(chatId: string, threadId: string | null): Promise<void>;
 
   delete(chatId: string, sessionId: string): Promise<void>;
 }

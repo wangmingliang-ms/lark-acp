@@ -109,6 +109,10 @@ export class FileSessionStore implements SessionStore {
       records = [];
       this.data.set(record.chatId, records);
     }
+    if (!record.profileOnly) {
+      records = records.filter((r) => !(r.threadId === record.threadId && r.profileOnly));
+      this.data.set(record.chatId, records);
+    }
     const idx = records.findIndex((r) => r.sessionId === record.sessionId);
     if (idx >= 0) records[idx] = record;
     else records.push(record);
@@ -160,6 +164,16 @@ export class FileSessionStore implements SessionStore {
     };
     await this.save(updated);
     return updated;
+  }
+
+  async clearThread(chatId: string, threadId: string | null): Promise<void> {
+    const records = this.data.get(chatId);
+    if (!records) return;
+    const kept = records.filter((r) => r.threadId !== threadId);
+    if (kept.length === records.length) return;
+    if (kept.length > 0) this.data.set(chatId, kept);
+    else this.data.delete(chatId);
+    this.scheduleFlush();
   }
 
   async delete(chatId: string, sessionId: string): Promise<void> {

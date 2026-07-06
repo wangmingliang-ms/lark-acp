@@ -1,7 +1,7 @@
 # Repo-scoped 最近 Session Profile 继承 — 设计文档
 
 - 日期：2026-07-06
-- 状态：已重定向设计，待实现
+- 状态：已实现；2026-07-06 补充 topic-level Agent switch 与 capabilities probe
 - 取代：Per-Agent `defaultControls` 设计
 - 涉及范围：`src/binding-store/*`、`src/session-store/*`、`src/bridge/bridge.ts`、`src/bridge/chat-runtime.ts`、`bin/humming.ts`、`src/interpreter/lark-interpreter.ts`、`templates/home/AGENTS.md` / `CLAUDE.md`
 
@@ -231,8 +231,49 @@ Agent switch is a session boundary.
 
 - 切换 Agent 会创建新的 ACP session。
 - 旧 Agent 的内部对话历史不会自动迁移到新 Agent。
-- Humming 保留旧 session record，但新 Agent 不会天然知道旧 Agent 的上下文。
+- Humming 会替换当前 topic 的旧 session binding；旧 Agent 自己的 session 数据仍留在该 Agent 的私有存储中，但当前 topic 不再 resume 它。
 - 自动继承/克隆只复制工作 profile，不复制 conversation history。
+
+实现命令：
+
+```bash
+humming sessions set-agent --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent copilot
+```
+
+实现细节：
+
+1. 当前 topic runtime 若正在运行，先 supersede/shutdown，并从 runtime map 删除。
+2. 清掉当前 `(chatId, threadId)` 的旧 session records。
+3. 写入一个 `profileOnly: true` 的 `SessionRecord`，只保存新 Agent invocation + repo，不保存旧 controls。
+4. 下条消息 acquire runtime 时看到 `profileOnly` record，会使用该 record 的 Agent，但不会 resume 这个 pseudo `sessionId`，而是创建全新的 ACP session。
+5. 新 session 创建成功后，真实 session record 会替换 profile-only record。
+
+通知要求：
+
+- 成功发送 `Agent 已切换` notice。
+- 展示 Agent / Repo / Mode / Model / Permission / Controls before/after。
+- 明确提示旧 Agent 内部历史不会自动迁移。
+- 不显示完整 session/chat/thread/app id。
+
+旧 controls 不跨 Agent 自动复制：Model / Mode / Config id 是 agent-specific，Claude 的 `opus` / `default` / `acceptEdits` 等不能直接套到 Copilot/Codex。切换后需要按新 Agent 的 capabilities 再设置 controls。
+
+## 6.1 指定 Agent capabilities probe
+
+新增命令用于在不改变当前 topic 的情况下查询某个 Agent 的真实 model/mode/config capabilities：
+
+```bash
+humming control agent-capabilities --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent copilot --json
+```
+
+语义：
+
+- 按 `--agent`、当前 chat binding / `--cwd` / runtime cwd 解析目标 Agent 与 cwd。
+- 启动一个短暂 Agent 进程。
+- 创建 throwaway ACP session，读取 `session/new` 返回的 capabilities。
+- 立即停止 Agent 进程。
+- 不修改 `sessions.json`，不替换当前 topic runtime。
+
+这个命令解决“当前 topic 仍在 Claude session 上，但用户想看 Copilot 可用 model/mode/config”的问题；`humming control capabilities` 仍然只查询当前 live runtime。
 
 这是因为：
 
@@ -368,10 +409,17 @@ inheritedControls?: SessionControls
 - recent controls 部分非法 → 合法项 apply，非法项 warning，不阻塞启动。
 - repo 下没有 session → 使用 global defaultAgent。
 
-### Agent switch tests（后续）
+### Agent switch tests
 
 - topic-level switch agent 创建新 session boundary。
 - 不带 handoff 时不迁移历史，发明确提示。
+- `profileOnly` record 不会被 resume；下一条消息创建真实 ACP session 后替换它。
+- 旧 Agent controls 不污染新 Agent profile。
+- notice 不显示完整 session/chat/thread id。
+- 指定 Agent capabilities probe 不修改当前 topic runtime / sessions。
+
+### Agent switch tests（后续）
+
 - 带 handoff 时生成 summary 文件并把 summary prompt 发送给新 Agent。
 
 ## 10. 用户可见语义总结
@@ -382,4 +430,5 @@ Agent/Model/Mode/Permission/Controls 属于 session profile。
 新 topic 默认继承当前 repo 最近 session 的 profile。
 如果 repo 里还没有 session，则使用全局默认 Agent。
 切换 Agent 不会自动迁移历史；可选 handoff summary 后续支持。
+查指定 Agent 能力用 agent-capabilities probe；查当前 session 能力用 capabilities。
 ```

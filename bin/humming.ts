@@ -35,6 +35,7 @@ import {
   createPinoLogger,
   PERMISSION_MODES,
   listAgentSessions,
+  probeAgentSessionCapabilities,
 } from "../src/index.js";
 import { installHomeTemplates } from "../src/home-templates.js";
 import type {
@@ -601,8 +602,8 @@ type ParsedArgs = {
   readonly logsFollow?: boolean;
   /** `logs -n <N>` — number of trailing lines. */
   readonly logsLines?: number;
-  readonly controlAction?: "capabilities";
-  readonly sessionsAction?: "set-control" | "list" | "bind";
+  readonly controlAction?: "capabilities" | "agent-capabilities";
+  readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -797,8 +798,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly subcommandIndex?: number;
       readonly logsFollow?: boolean;
       readonly logsLines?: number;
-      readonly controlAction?: "capabilities";
-      readonly sessionsAction?: "set-control" | "list" | "bind";
+      readonly controlAction?: "capabilities" | "agent-capabilities";
+      readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent";
       readonly targetChatId?: string;
       readonly targetThreadId?: string | null;
       readonly targetCwd?: string;
@@ -879,19 +880,35 @@ function parseControlFlags(
   argv: readonly string[],
   start: number,
 ): {
-  readonly controlAction: "capabilities";
-  readonly targetChatId: string;
+  readonly controlAction: "capabilities" | "agent-capabilities";
+  readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
+  readonly targetCwd?: string;
+  readonly targetAgent?: string;
+  readonly controlJson?: string | boolean;
 } {
   const action = argv[start];
-  if (action !== "capabilities") throw new CliError("control requires subcommand: capabilities");
+  if (action !== "capabilities" && action !== "agent-capabilities") {
+    throw new CliError("control requires subcommand: capabilities | agent-capabilities");
+  }
   const parsed = parseTargetFlags(argv, start + 1);
-  const chatId = parsed.chatId;
-  if (!chatId) throw new CliError("control capabilities requires --chat-id <id>");
+  if (action === "capabilities") {
+    const chatId = parsed.chatId;
+    if (!chatId) throw new CliError("control capabilities requires --chat-id <id>");
+    return {
+      controlAction: "capabilities",
+      targetChatId: chatId,
+      ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+      ...(parsed.json !== undefined ? { controlJson: parsed.json } : {}),
+    };
+  }
   return {
-    controlAction: "capabilities",
-    targetChatId: chatId,
+    controlAction: "agent-capabilities",
+    ...(parsed.chatId !== undefined ? { targetChatId: parsed.chatId } : {}),
     ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+    ...(parsed.cwd !== undefined ? { targetCwd: parsed.cwd } : {}),
+    ...(parsed.agent !== undefined ? { targetAgent: parsed.agent } : {}),
+    ...(parsed.json !== undefined ? { controlJson: parsed.json } : {}),
   };
 }
 
@@ -899,7 +916,7 @@ function parseSessionsFlags(
   argv: readonly string[],
   start: number,
 ): {
-  readonly sessionsAction: "set-control" | "list" | "bind";
+  readonly sessionsAction: "set-control" | "list" | "bind" | "set-agent";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -908,10 +925,35 @@ function parseSessionsFlags(
   readonly controlJson?: string | boolean;
 } {
   const action = argv[start];
-  if (action !== "set-control" && action !== "list" && action !== "bind") {
-    throw new CliError("sessions requires subcommand: set-control | list | bind");
+  if (
+    action !== "set-control" &&
+    action !== "list" &&
+    action !== "bind" &&
+    action !== "set-agent"
+  ) {
+    throw new CliError("sessions requires subcommand: set-control | set-agent | list | bind");
   }
   const parsed = parseTargetFlags(argv, start + 1);
+  if (action === "set-agent") {
+    if (!parsed.chatId) throw new CliError("sessions set-agent requires --chat-id <id>");
+    if (!parsed.agent) throw new CliError("sessions set-agent requires --agent <preset>");
+    if (parsed.cwd !== undefined) {
+      throw new CliError(
+        "sessions set-agent does not accept --cwd; it only switches the current chat repo",
+      );
+    }
+    if (parsed.json !== undefined) {
+      throw new CliError(
+        "sessions set-agent does not accept --json; switch the Agent first, then use sessions set-control with ids from the new agent's capabilities",
+      );
+    }
+    return {
+      sessionsAction: "set-agent",
+      targetChatId: parsed.chatId,
+      ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+      targetAgent: parsed.agent,
+    };
+  }
   if (action === "set-control") {
     if (!parsed.chatId) throw new CliError("sessions set-control requires --chat-id <id>");
     if (typeof parsed.json !== "string")
@@ -1194,8 +1236,10 @@ function printHelp(): void {
     `  ${APP_NAME} [global-options] stop | restart | status`,
     `  ${APP_NAME} logs [-f] [-n <lines>]`,
     `  ${APP_NAME} control capabilities --chat-id <id> [--thread-id <id>] [--json]`,
+    `  ${APP_NAME} control agent-capabilities [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]`,
     `  ${APP_NAME} sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]`,
     `  ${APP_NAME} sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>`,
+    `  ${APP_NAME} sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
     `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
@@ -1256,11 +1300,19 @@ function printHelp(): void {
     `  control capabilities --chat-id <id> [--thread-id <id>] [--json]`,
     `                         Print live ACP session capabilities: models, modes,`,
     `                         configOptions, plus bridgePermissionModes.`,
+    `  control agent-capabilities [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]`,
+    `                         Start a short-lived probe session for the selected`,
+    `                         agent and print its model/mode/config capabilities`,
+    `                         without changing the current topic session.`,
     `  sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
     `                         Persist controls to sessions.json and apply them to`,
     `                         the live runtime when present. The controls JSON uses`,
     `                         ACP-shaped fields: modelId, modeId, config, plus`,
     `                         humming bridgePermissionMode.`,
+    `  sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
+    `                         Switch the current topic's Agent profile. This drops`,
+    `                         the old topic session binding; the next message starts`,
+    `                         a fresh ACP session with the selected agent.`,
     `  sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]`,
     `                         List existing ACP agent sessions. --cwd is allowed`,
     `                         for host/reception queries; otherwise cwd defaults`,
@@ -1313,15 +1365,16 @@ function printHelp(): void {
     `  ${APP_NAME} --cwd /work/project proxy --agent opencode`,
     `  ${APP_NAME} --hide-thoughts proxy --agent copilot`,
     `  ${APP_NAME} --permission-mode alwaysAllow proxy --agent claude`,
+    `  ${APP_NAME} control agent-capabilities --chat-id "$HUMMING_CHAT_ID" --agent copilot --json`,
+    `  ${APP_NAME} sessions set-agent --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent copilot`,
     `  ${APP_NAME} sessions list --chat-id "$HUMMING_CHAT_ID" --agent claude --json`,
     `  ${APP_NAME} sessions list --agent codex --cwd /work/project --json`,
     `  ${APP_NAME} sessions bind --chat-id "$HUMMING_CHAT_ID" --thread-id "$HUMMING_THREAD_ID" --agent claude --session-id <id>`,
     `  ${APP_NAME} proxy -- node ./my-acp-server.js`,
     ``,
     `In-chat commands (one Lark bot → many repos):`,
-    `  /bind <path> [agent]   Bind THIS chat to a repo dir + agent (agent`,
-    `                         defaults to the one passed via --agent).`,
-    `                         e.g. /bind ~/workspace/copilot-intellij claude`,
+    `  /bind <path>           Bind THIS chat to a repo dir. Agent belongs to`,
+    `                         the topic/session profile, not the chat binding.`,
     `  /where                 Show this chat's current binding.`,
     `  /unbind                Remove this chat's binding.`,
     `  /new                   Start a fresh agent session for this chat.`,
@@ -1452,8 +1505,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function runControl(args: ParsedArgs): Promise<void> {
-  if (args.controlAction !== "capabilities")
-    throw new CliError("control requires subcommand: capabilities");
+  if (args.controlAction === "agent-capabilities") {
+    await runAgentCapabilities(args);
+    return;
+  }
+  if (args.controlAction !== "capabilities") {
+    throw new CliError("control requires subcommand: capabilities | agent-capabilities");
+  }
   const chatId = args.targetChatId;
   if (!chatId) throw new CliError("control capabilities requires --chat-id <id>");
   const homeDir = resolveHomeDir(args.home);
@@ -1463,6 +1521,35 @@ async function runControl(args: ParsedArgs): Promise<void> {
   });
   if (!response.ok) throw new CliError(response.error);
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
+}
+
+async function runAgentCapabilities(args: ParsedArgs): Promise<void> {
+  const target = resolveSessionTargetContext(args);
+  const result = await probeAgentSessionCapabilities({
+    command: target.invocation.command,
+    args: [...target.invocation.args],
+    cwd: target.cwd,
+    env: target.invocation.env ? { ...target.invocation.env } : undefined,
+    logger: SILENT_LOGGER,
+  });
+  const payload = {
+    session: {
+      ...(target.chatId !== undefined ? { chatId: target.chatId } : {}),
+      threadId: target.threadId,
+      sessionId: result.sessionId,
+    },
+    agent: {
+      label: target.invocation.label,
+      command: target.invocation.command,
+      args: target.invocation.args,
+      cwd: target.cwd,
+    },
+    ...result.capabilities,
+    bridgePermissionModes: PERMISSION_MODES,
+    bridgePermissionMode:
+      args.permissionMode ?? target.file.runtime.permissionMode ?? DEFAULT_PERMISSION_MODE,
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function resolveStateDir(args: ParsedArgs, file: FileConfig, homeDir: string): string {
@@ -1602,6 +1689,47 @@ async function runSessionBind(args: ParsedArgs): Promise<void> {
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
 }
 
+async function runSessionSetAgent(args: ParsedArgs): Promise<void> {
+  if (!args.targetChatId) throw new CliError("sessions set-agent requires --chat-id <id>");
+  if (!args.targetAgent) throw new CliError("sessions set-agent requires --agent <preset>");
+  const target = resolveSessionTargetContext(args);
+  if (!target.chatId) throw new CliError("sessions set-agent requires --chat-id <id>");
+  const now = Date.now();
+  const record: SessionRecord = {
+    chatId: target.chatId,
+    threadId: target.threadId,
+    sessionId: `profile:${now}`,
+    profileOnly: true,
+    agentCommand: target.invocation.command,
+    agentArgs: [...target.invocation.args],
+    ...(target.invocation.env ? { agentEnv: { ...target.invocation.env } } : {}),
+    agentLabel: target.invocation.label,
+    cwd: target.cwd,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  let response;
+  try {
+    response = await sendControlRequest(bridgeControlSocketPath(target.homeDir), {
+      method: "setAgent",
+      params: { record },
+    });
+  } catch {
+    const store = new FileSessionStore(target.dataDir);
+    await store.init();
+    try {
+      await store.clearThread(record.chatId, record.threadId);
+      await store.save(record);
+    } finally {
+      await store.close();
+    }
+    response = { ok: true as const, result: { switched: true, agent: record.agentLabel } };
+  }
+  if (!response.ok) throw new CliError(response.error);
+  process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
+}
+
 async function runSessions(args: ParsedArgs): Promise<void> {
   if (args.sessionsAction === "list") {
     await runSessionList(args);
@@ -1611,8 +1739,12 @@ async function runSessions(args: ParsedArgs): Promise<void> {
     await runSessionBind(args);
     return;
   }
+  if (args.sessionsAction === "set-agent") {
+    await runSessionSetAgent(args);
+    return;
+  }
   if (args.sessionsAction !== "set-control") {
-    throw new CliError("sessions requires subcommand: set-control | list | bind");
+    throw new CliError("sessions requires subcommand: set-control | set-agent | list | bind");
   }
   const chatId = args.targetChatId;
   if (!chatId) throw new CliError("sessions set-control requires --chat-id <id>");

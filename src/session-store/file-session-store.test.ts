@@ -234,4 +234,21 @@ describe("FileSessionStore session controls", () => {
       store.setControls({ chatId: "oc_missing", threadId: null }, { modeId: "agent" }),
     ).rejects.toThrow(/no session found/);
   });
+
+  it("clears only one thread and removes profile-only records when the real session is saved", async () => {
+    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "profile:1" }));
+    await store.save(record({ chatId: "oc_A", threadId: "th_2", sessionId: "s_other" }));
+
+    await store.clearThread("oc_A", "th_1");
+    expect(await store.getLatest("oc_A", "th_1")).toBeNull();
+    expect(await store.getLatest("oc_A", "th_2")).toMatchObject({ sessionId: "s_other" });
+
+    await store.save({
+      ...record({ chatId: "oc_A", threadId: "th_1", sessionId: "profile:2" }),
+      profileOnly: true,
+    });
+    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_real" }));
+    expect(await store.listByThread("oc_A", "th_1")).toHaveLength(1);
+    expect(await store.getLatest("oc_A", "th_1")).toMatchObject({ sessionId: "s_real" });
+  });
 });

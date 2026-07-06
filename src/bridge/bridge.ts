@@ -510,6 +510,7 @@ export class LarkBridge {
         setControls: (chatId, threadId, controls) =>
           this.controlSetControls(chatId, threadId, controls),
         bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
+        setAgent: (record, noticeMessageId) => this.controlSetAgent(record, noticeMessageId),
       },
     });
     await this.controlServer.start();
@@ -541,6 +542,37 @@ export class LarkBridge {
       .sendNoticeCard(chatId, buildStoredControlUpdatedNotice(before, record, controls))
       .catch((err) => this.logger.warn({ err, chatId, threadId }, "stored control notice failed"));
     return { applied: false, recordSessionId: record.sessionId };
+  }
+
+  private async controlSetAgent(
+    record: SessionRecord,
+    noticeMessageId?: string | null,
+  ): Promise<{ readonly switched: true; readonly agent: string }> {
+    const key = runtimeKey(record.chatId, record.threadId);
+    const runtime = this.chats.get(key);
+    const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
+    const previous = await this.sessionStore.getLatest(record.chatId, record.threadId);
+
+    if (runtime) {
+      runtime.supersede();
+      this.chats.delete(key);
+    }
+
+    await this.sessionStore.clearThread(record.chatId, record.threadId);
+    await this.sessionStore.save(record);
+
+    const notice = buildSessionAgentSwitchedNotice(record, previous);
+    if (replyTo) {
+      await this.presenter
+        .replyNoticeCard(replyTo, notice)
+        .catch((err) => this.logger.warn({ err }, "session agent switch notice failed"));
+    } else {
+      await this.presenter
+        .sendNoticeCard(record.chatId, notice)
+        .catch((err) => this.logger.warn({ err }, "session agent switch notice failed"));
+    }
+
+    return { switched: true, agent: record.agentLabel ?? record.agentCommand };
   }
 
   private async controlBindSession(
@@ -1547,6 +1579,37 @@ function storedControlChangeLines(
 function displayStoredConfigValue(controls: SessionControls | undefined, configId: string): string {
   const value = controls?.config?.[configId];
   return value ? displayControlConfigValue(value) : "—";
+}
+
+function buildSessionAgentSwitchedNotice(
+  record: SessionRecord,
+  before?: SessionRecord | null,
+): NoticeCardSpec {
+  const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
+  const lines = [
+    "当前 topic 的 Agent 已切换。旧 Agent 的内部对话历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。",
+    "",
+    "**修改明细**",
+    `• Agent：${beforeAgent} → ${record.agentLabel ?? record.agentCommand}`,
+    `• Repo：${before?.cwd ?? "未绑定"} → ${record.cwd}`,
+    `• Mode：${displayControlMode(before?.controls)} → ${displayControlMode(record.controls)}`,
+    `• Model：${displayControlModel(before?.controls)} → ${displayControlModel(record.controls)}`,
+    `• Permission：${displayControlPermission(before?.controls)} → ${displayControlPermission(record.controls)}`,
+    `• Controls：${displayControlConfig(before?.controls)} → ${displayControlConfig(record.controls)}`,
+    "",
+    "**切换后**",
+    `• Agent：${record.agentLabel ?? record.agentCommand}`,
+    `• Repo：${record.cwd}`,
+    `• Mode：${displayControlMode(record.controls)}`,
+    `• Model：${displayControlModel(record.controls)}`,
+    `• Permission：${displayControlPermission(record.controls)}`,
+    `• Controls：${displayControlConfig(record.controls)}`,
+  ];
+  return {
+    title: "✅ Agent 已切换",
+    body: lines.join("\n"),
+    template: "green",
+  };
 }
 
 function buildSessionBindRejectedNotice(record: SessionRecord): NoticeCardSpec {

@@ -76,6 +76,11 @@ export interface ListAgentSessionsResult {
   readonly supportsLoad: boolean;
 }
 
+export interface ProbeAgentSessionCapabilitiesResult {
+  readonly sessionId: string;
+  readonly capabilities: SessionRuntimeCapabilities;
+}
+
 export interface SpawnAgentOptions {
   command: string;
   args: string[];
@@ -254,6 +259,28 @@ export async function listAgentSessions(
     };
   } finally {
     killAgent(proc);
+  }
+}
+
+export async function probeAgentSessionCapabilities(
+  opts: ListAgentSessionsOptions,
+): Promise<ProbeAgentSessionCapabilitiesResult> {
+  const client = new ListingClient(opts.logger.child({ name: "agent-capabilities-client" }));
+  const agent = await spawnAgent({
+    command: opts.command,
+    args: opts.args,
+    cwd: opts.cwd ?? process.cwd(),
+    env: opts.env,
+    client,
+    logger: opts.logger,
+  });
+  try {
+    return {
+      sessionId: agent.sessionId,
+      capabilities: agent.sessionCapabilities,
+    };
+  } finally {
+    killAgent(agent.process);
   }
 }
 

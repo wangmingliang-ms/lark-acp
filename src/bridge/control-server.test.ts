@@ -46,6 +46,11 @@ describe("BridgeControlServer", () => {
           record,
           noticeMessageId,
         }),
+        setAgent: async (record, noticeMessageId) => ({
+          switched: true,
+          record,
+          noticeMessageId,
+        }),
       },
     });
     await server.start();
@@ -104,6 +109,33 @@ describe("BridgeControlServer", () => {
         bound: true,
         noticeMessageId: "om_notice",
         record: { sessionId: "sess_desktop", title: "Desktop task" },
+      },
+    });
+
+    const setAgent = await sendControlRequest(socketPath, {
+      method: "setAgent",
+      params: {
+        record: {
+          chatId: "oc_A",
+          threadId: "th_1",
+          sessionId: "profile:1",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/copilot-acp"],
+          agentLabel: "copilot",
+          cwd: "/repo",
+          createdAt: 1,
+          updatedAt: 2,
+        },
+        noticeMessageId: "om_notice",
+      },
+    });
+    expect(setAgent).toMatchObject({
+      ok: true,
+      result: {
+        switched: true,
+        noticeMessageId: "om_notice",
+        record: { sessionId: "profile:1", profileOnly: true, agentLabel: "copilot" },
       },
     });
   });
