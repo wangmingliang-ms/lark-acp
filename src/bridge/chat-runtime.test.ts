@@ -484,6 +484,86 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(states.at(-1)).toMatchObject({ status: "cancelled", cancellable: false });
   });
 
+  it("rejects live control changes while a prompt is in flight", async () => {
+    const fake = makeFakeAgent();
+    const setMode = vi.fn(async () => ({}));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      setSessionMode: setMode,
+    } as AgentProcess["connection"];
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "long task" }],
+      messageId: "om_busy_controls",
+      chatId: "oc_test",
+    });
+
+    await expect(runtime.applyControls({ modeId: "agent" })).rejects.toThrow(
+      "cannot be changed while this topic has an in-flight prompt",
+    );
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it("cleans invalid persisted controls before applying stored session settings", async () => {
+    const fake = makeFakeAgent();
+    const setMode = vi.fn(async () => ({}));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      setSessionMode: setMode,
+    } as AgentProcess["connection"];
+    spawnAndResumeAgentMock.mockResolvedValue({ agent: fake.agent, resumed: true });
+
+    const saved: SessionRecord[] = [];
+    const record: SessionRecord = {
+      chatId: "oc_test",
+      threadId: null,
+      sessionId: "sess_fake",
+      agentCommand: "node",
+      agentArgs: [],
+      cwd: "/tmp",
+      controls: { modeId: "bypassPermissions", config: {} },
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const notices: Array<{ title: string; body: string; template: string }> = [];
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([], notices),
+      sessionStore: {
+        ...stubSessionStore(),
+        getLatest: async () => record,
+        save: async (updated) => {
+          saved.push(updated);
+        },
+      },
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "hello" }],
+      messageId: "om_stored_controls",
+      chatId: "oc_test",
+    });
+
+    expect(setMode).not.toHaveBeenCalledWith({
+      sessionId: "sess_fake",
+      modeId: "bypassPermissions",
+    });
+    expect(saved).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: "sess_fake", controls: undefined }),
+      ]),
+    );
+    expect(notices.at(-1)).toMatchObject({ title: "⚠️ 已忽略无效的 session 设置" });
+    expect(notices.at(-1)?.body).toContain("Mode bypassPermissions");
+  });
+
   it("applies and reports session controls with ACP-shaped requests", async () => {
     const fake = makeFakeAgent();
     const setModel = vi.fn(async () => ({}));
@@ -531,6 +611,11 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_controls",
       chatId: "oc_test",
     });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
 
     await runtime.applyControls({
       modelId: "model-new",
@@ -561,21 +646,6 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       bridgePermissionMode: "alwaysAsk",
     });
 
-    const spawnOpts = spawnAgentMock.mock.calls[0]?.[0] as { client: HummingClient };
-    await spawnOpts.client.sessionUpdate({
-      sessionId: "sess_fake",
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "metadata render" },
-      },
-    });
-    await waitForCardFlush();
-    expect(states.at(-1)?.meta).toMatchObject({
-      agent: "node",
-      mode: "Agent",
-      model: "New",
-      permission: "Auto Edit: on · Approval Mode: Auto",
-    });
     expect(saved.at(-1)).toMatchObject({
       controls: {
         modelId: "model-new",
@@ -627,6 +697,11 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_controls_failed",
       chatId: "oc_test",
     });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
 
     await expect(runtime.applyControls({ modelId: "missing-model" })).rejects.toThrow(
       "Model missing-model",
@@ -634,7 +709,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
     expect(setModel).not.toHaveBeenCalled();
     expect(runtime.capabilities()).toMatchObject({ models: { currentModelId: "model-old" } });
-    expect(saved).toHaveLength(1);
+    expect(saved).toHaveLength(2);
     expect(saved.at(-1)).not.toMatchObject({ controls: { modelId: "missing-model" } });
     expect(notices.at(-1)).toMatchObject({ title: "⚠️ Session 设置失败", template: "red" });
     expect(notices.at(-1)?.body).toContain("失败项: Model missing-model");
@@ -671,6 +746,11 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_controls_rollback",
       chatId: "oc_test",
     });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
 
     await expect(runtime.applyControls({ modelId: "model-new", modeId: "agent" })).rejects.toThrow(
       "Mode agent: mode rejected",
@@ -682,6 +762,6 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       models: { currentModelId: "model-old" },
       modes: { currentModeId: "ask" },
     });
-    expect(saved).toHaveLength(1);
+    expect(saved).toHaveLength(2);
   });
 });

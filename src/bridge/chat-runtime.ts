@@ -14,6 +14,7 @@ import type {
   SessionCapabilitiesSnapshot,
   SessionConfigControlValue,
   SessionControls,
+  SessionRecord,
   SessionStore,
 } from "../session-store/session-store.js";
 
@@ -228,6 +229,11 @@ export class ChatRuntime {
   async applyControls(controls: SessionControls): Promise<void> {
     const state = this.state;
     if (!state) throw new Error("session runtime is not started yet");
+    if (this.promptInFlight || state.processing || state.queue.length > 0) {
+      throw new Error(
+        "session controls cannot be changed while this topic has an in-flight prompt; wait for the current task to finish or send /cancel first",
+      );
+    }
     const beforeSnapshot = cloneCapabilitiesSnapshot({
       ...state.sessionCapabilities,
       bridgePermissionMode: state.client.getPermissionMode(),
@@ -351,12 +357,22 @@ export class ChatRuntime {
     });
 
     if (latest?.controls) {
-      state.sessionCapabilities = await this.applyControlsToState(state, latest.controls);
-      if (latest.controls.bridgePermissionMode !== undefined) {
-        state.client.setPermissionMode(latest.controls.bridgePermissionMode);
+      const { controls, ignored } = filterSessionControls(
+        state.sessionCapabilities,
+        latest.controls,
+      );
+      if (ignored.length > 0) {
+        await this.cleanPersistedControls(latest, controls);
+        await this.notifyStoredControlsIgnored(firstMessage.messageId, ignored);
+      }
+      if (hasControls(controls)) {
+        state.sessionCapabilities = await this.applyControlsToState(state, controls);
+        if (controls.bridgePermissionMode !== undefined) {
+          state.client.setPermissionMode(controls.bridgePermissionMode);
+        }
       }
     } else if (this.opts.inheritedControls) {
-      const { controls, ignored } = filterInheritedControls(
+      const { controls, ignored } = filterSessionControls(
         state.sessionCapabilities,
         this.opts.inheritedControls,
       );
@@ -523,6 +539,42 @@ export class ChatRuntime {
       .catch((sendErr) =>
         this.logger.warn({ err: sendErr }, "inherited controls warning notice failed"),
       );
+  }
+
+  private async notifyStoredControlsIgnored(
+    messageId: string,
+    ignored: readonly IgnoredInheritedControl[],
+  ): Promise<void> {
+    const body = [
+      "sessions.json 中保存的部分 session 设置在当前 agent 上无效，已自动清理并忽略。",
+      "",
+      ...ignored.map((item) => `• ${item.kind} ${item.target}：${item.reason}`),
+      "",
+      "当前消息会继续发送给 agent。请重新查询 capabilities 后再设置有效的 mode/model/config。",
+    ].join("\n");
+    await this.opts.presenter
+      .replyNoticeCard(messageId, {
+        title: "⚠️ 已忽略无效的 session 设置",
+        body,
+        template: "orange",
+      })
+      .catch((sendErr) =>
+        this.logger.warn({ err: sendErr }, "stored controls warning notice failed"),
+      );
+  }
+
+  private async cleanPersistedControls(
+    previous: SessionRecord,
+    controls: SessionControls,
+  ): Promise<void> {
+    const updated: SessionRecord = {
+      ...previous,
+      ...(hasControls(controls) ? { controls } : { controls: undefined }),
+      updatedAt: Date.now(),
+    };
+    await this.opts.sessionStore
+      .save(updated)
+      .catch((err) => this.logger.warn({ err }, "failed to clean persisted controls"));
   }
 
   private async applyControlsToState(
@@ -1035,7 +1087,7 @@ interface IgnoredInheritedControl {
   readonly reason: string;
 }
 
-function filterInheritedControls(
+function filterSessionControls(
   snapshot: SessionCapabilitiesSnapshot,
   controls: SessionControls,
 ): { controls: SessionControls; ignored: IgnoredInheritedControl[] } {
