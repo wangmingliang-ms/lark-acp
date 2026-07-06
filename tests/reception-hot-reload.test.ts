@@ -46,6 +46,14 @@ interface ReceptionBinding {
   label: string;
   explicit: boolean;
   reception: boolean;
+  fallbackFrom?: {
+    chatId: string;
+    cwd: string;
+    agentLabel: string;
+    reason: string;
+    reboundCwd: string;
+    reboundAgentLabel: string;
+  };
 }
 interface BridgeInternals {
   resolveBinding(chatId: string): Promise<ReceptionBinding | null>;
@@ -56,6 +64,10 @@ interface BridgeInternals {
     threadId: string | null,
     binding: ReceptionBinding,
   ): Promise<unknown>;
+  notifyUnavailableBindingFallback(
+    messageId: string,
+    from: NonNullable<ReceptionBinding["fallbackFrom"]>,
+  ): Promise<void>;
   controlBindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   readonly activeChatCount: number;
 }
@@ -150,6 +162,82 @@ describe("reception area", () => {
     });
     const eff = await b.resolveBinding("oc_bound");
     expect(eff).toMatchObject({ cwd: repoA, label: "codex", explicit: true, reception: false });
+  });
+
+  it("warns once and automatically rebinds to the reception area when the bound repo was deleted", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({
+      chatId: "oc_deleted",
+      cwd: repoA,
+      agentLabel: "codex",
+      agentCommand: "npx",
+      agentArgs: ["-y", "codex-acp"],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    fs.rmSync(repoA, { recursive: true, force: true });
+
+    const eff = await b.resolveBinding("oc_deleted");
+
+    expect(eff).toMatchObject({
+      cwd: home,
+      label: "claude",
+      explicit: false,
+      reception: true,
+      fallbackFrom: {
+        chatId: "oc_deleted",
+        cwd: repoA,
+        agentLabel: "codex",
+        reboundCwd: home,
+        reboundAgentLabel: "claude",
+      },
+    });
+    expect(await bindingStore.get("oc_deleted")).toMatchObject({
+      cwd: home,
+      agentLabel: "claude",
+    });
+
+    const next = await b.resolveBinding("oc_deleted");
+    expect(next).toMatchObject({ cwd: home, label: "claude", explicit: true, reception: false });
+    expect(next?.fallbackFrom).toBeUndefined();
+  });
+
+  it("sends an error notice and continues in the reception area for a deleted repo", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({
+      chatId: "oc_deleted",
+      cwd: repoA,
+      agentLabel: "codex",
+      agentCommand: "npx",
+      agentArgs: ["-y", "codex-acp"],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    fs.rmSync(repoA, { recursive: true, force: true });
+
+    const eff = await b.resolveBinding("oc_deleted");
+    await b.notifyUnavailableBindingFallback("om_deleted", eff!.fallbackFrom!);
+    await b.acquireRuntime("oc_deleted", null, eff!);
+
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({
+      title: "⚠️ Repo 不可用，已重新绑定到 Humming home",
+      template: "orange",
+    });
+    expect(notice?.body).toContain(repoA);
+    expect(notice?.body).toContain(home);
+    expect(notice?.body).toContain("路径不存在");
+    expect(notice?.body).toContain("不会重复发送本 warning");
+    expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf-8")).toContain("oc_deleted");
+
+    const count = presenter.notices.length;
+    const next = await b.resolveBinding("oc_deleted");
+    if (next?.fallbackFrom) {
+      await b.notifyUnavailableBindingFallback("om_deleted_2", next.fallbackFrom);
+    }
+    expect(presenter.notices.length).toBe(count);
   });
 
   it("drops AGENTS.md + CLAUDE.md bind instructions into the reception cwd", async () => {

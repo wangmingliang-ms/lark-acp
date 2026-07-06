@@ -42,6 +42,13 @@ export interface ChatRuntimeOptions {
   permissionTimeoutMs: number;
   permissionMode: PermissionMode;
   agentLabel?: string;
+  /**
+   * Start a new ACP session even if sessions.json has a saved session for this
+   * chat/thread. Used when a repo binding is unavailable and the bridge falls
+   * back to the Humming home reception area — the old session belongs to the
+   * missing repo and must not be resumed in the fallback cwd.
+   */
+  ignoreStoredSession?: boolean;
   presenter: LarkPresenter;
   sessionStore: SessionStore;
   logger: LarkLogger;
@@ -224,7 +231,9 @@ export class ChatRuntime {
   private async bootstrap(firstMessage: PendingMessage): Promise<ChatRuntimeState> {
     this.logger.info("creating chat runtime");
 
-    const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
+    const latest = this.opts.ignoreStoredSession
+      ? null
+      : await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
     let stateRef: ChatRuntimeState | null = null;
     let currentClient: HummingClient;
     const metaProvider = (): SessionCardMeta =>

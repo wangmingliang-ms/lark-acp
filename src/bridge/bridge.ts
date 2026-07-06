@@ -296,6 +296,21 @@ interface EffectiveBinding {
    * bind-instructions into such a runtime so the user can bind by talking.
    */
   readonly reception: boolean;
+  /**
+   * Present when an explicit/default binding points at a directory that no
+   * longer exists (or is no longer usable) and this binding is a temporary
+   * fallback to the reception area so the conversation can keep going.
+   */
+  readonly fallbackFrom?: UnavailableBinding;
+}
+
+interface UnavailableBinding {
+  readonly chatId: string;
+  readonly cwd: string;
+  readonly agentLabel: string;
+  readonly reason: string;
+  readonly reboundCwd: string;
+  readonly reboundAgentLabel: string;
 }
 
 interface BindingSnapshot {
@@ -770,6 +785,10 @@ export class LarkBridge {
       });
       return;
     }
+    if (binding.fallbackFrom) {
+      await this.notifyUnavailableBindingFallback(messageId, binding.fallbackFrom);
+      return;
+    }
     const source = binding.explicit ? "显式绑定" : "默认配置（未显式绑定）";
     await this.presenter.replyNoticeCard(messageId, {
       title: "📍 当前绑定",
@@ -826,6 +845,9 @@ export class LarkBridge {
       });
       return;
     }
+    if (binding.fallbackFrom) {
+      await this.notifyUnavailableBindingFallback(messageId, binding.fallbackFrom);
+    }
 
     const isGroup = event.message.chat_type === CHAT_TYPE_GROUP;
     const [userName, chatName] = await Promise.all([
@@ -867,6 +889,21 @@ export class LarkBridge {
   private async resolveBinding(chatId: string): Promise<EffectiveBinding | null> {
     const stored = await this.bindingStore.get(chatId);
     if (stored) {
+      const unavailable = describeUnavailableCwd(stored.cwd);
+      if (unavailable) {
+        const fallback = await this.rebindUnavailableBindingToReception(
+          chatId,
+          stored,
+          unavailable,
+        );
+        if (fallback) {
+          this.logger.warn(
+            { chatId, cwd: stored.cwd, reason: unavailable },
+            "explicit binding cwd unavailable — rebound to reception area",
+          );
+          return fallback;
+        }
+      }
       return {
         cwd: stored.cwd,
         command: stored.agentCommand,
@@ -878,6 +915,22 @@ export class LarkBridge {
       };
     }
     if (this.defaultCwd && this.defaultAgent) {
+      const unavailable = describeUnavailableCwd(this.defaultCwd);
+      if (unavailable) {
+        const fallback = this.buildReceptionFallback({
+          chatId,
+          cwd: this.defaultCwd,
+          agentLabel: this.defaultAgent.label,
+          reason: unavailable,
+        });
+        if (fallback) {
+          this.logger.warn(
+            { chatId, cwd: this.defaultCwd, reason: unavailable },
+            "default cwd unavailable — falling back to reception area",
+          );
+          return fallback;
+        }
+      }
       return {
         cwd: this.defaultCwd,
         command: this.defaultAgent.command,
@@ -888,6 +941,10 @@ export class LarkBridge {
         reception: false,
       };
     }
+    return this.buildReceptionBinding();
+  }
+
+  private buildReceptionBinding(): EffectiveBinding | null {
     // Reception area: no real binding, but if a reception cwd + default agent
     // are configured, spawn the agent there so the user can converse and ask
     // it to bind the chat by natural language.
@@ -905,6 +962,66 @@ export class LarkBridge {
     return null;
   }
 
+  private buildReceptionFallback(
+    from: Omit<UnavailableBinding, "reboundCwd" | "reboundAgentLabel">,
+  ): EffectiveBinding | null {
+    const fallback = this.buildReceptionBinding();
+    return fallback
+      ? {
+          ...fallback,
+          fallbackFrom: {
+            ...from,
+            reboundCwd: fallback.cwd,
+            reboundAgentLabel: fallback.label,
+          },
+        }
+      : null;
+  }
+
+  private async rebindUnavailableBindingToReception(
+    chatId: string,
+    stored: ChatBinding,
+    reason: string,
+  ): Promise<EffectiveBinding | null> {
+    const fallback = this.buildReceptionBinding();
+    if (!fallback) return null;
+
+    const now = Date.now();
+    const rebound: ChatBinding = {
+      chatId,
+      cwd: fallback.cwd,
+      agentLabel: fallback.label,
+      agentCommand: fallback.command,
+      agentArgs: [...fallback.args],
+      ...(fallback.env ? { agentEnv: { ...fallback.env } } : {}),
+      createdAt: stored.createdAt,
+      updatedAt: now,
+    };
+
+    await this.bindingStore.set(rebound);
+    this.bindingSnapshots.set(chatId, bindingSnapshotOf(rebound));
+    this.teardownChat(chatId);
+    await this.clearChatSessions(chatId).catch((err) =>
+      this.logger.warn({ err, chatId }, "failed to clear sessions on unavailable repo rebind"),
+    );
+
+    return this.buildReceptionFallback({
+      chatId,
+      cwd: stored.cwd,
+      agentLabel: stored.agentLabel,
+      reason,
+    });
+  }
+
+  private async notifyUnavailableBindingFallback(
+    messageId: string,
+    from: UnavailableBinding,
+  ): Promise<void> {
+    await this.presenter
+      .replyNoticeCard(messageId, buildRepoUnavailableRebindNotice(from))
+      .catch((err) => this.logger.warn({ err, messageId }, "repo fallback notice failed"));
+  }
+
   private async acquireRuntime(
     chatId: string,
     threadId: string | null,
@@ -916,7 +1033,9 @@ export class LarkBridge {
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
 
-    const pinned = await this.sessionStore.getLatest(chatId, threadId);
+    const pinned = binding.fallbackFrom
+      ? null
+      : await this.sessionStore.getLatest(chatId, threadId);
     const effective: EffectiveBinding = pinned
       ? {
           cwd: pinned.cwd,
@@ -948,6 +1067,7 @@ export class LarkBridge {
       permissionTimeoutMs: this.display.permissionTimeoutMs,
       permissionMode: this.display.permissionMode,
       agentLabel: effective.label,
+      ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),
       presenter: this.presenter,
       sessionStore: this.sessionStore,
       logger: this.logger,
@@ -1363,6 +1483,28 @@ function buildRepoBoundNotice(
   };
 }
 
+function buildRepoUnavailableRebindNotice(from: UnavailableBinding): NoticeCardSpec {
+  const lines = [
+    "当前绑定的 repo 目录不可用，已自动重新绑定到 Humming home，后续消息会直接在该目录继续，不会重复发送本 warning。",
+    "",
+    "**不可用绑定**",
+    `• Repo：${from.cwd}`,
+    `• Agent：${from.agentLabel}`,
+    `• 原因：${from.reason}`,
+    "",
+    "**已重新绑定到**",
+    `• Repo：${from.reboundCwd}`,
+    `• Agent：${from.reboundAgentLabel}`,
+    "",
+    "如果需要继续原项目，请重新 /bind 到一个仍然存在的 repo。",
+  ];
+  return {
+    title: "⚠️ Repo 不可用，已重新绑定到 Humming home",
+    body: lines.join("\n"),
+    template: "orange",
+  };
+}
+
 /**
  * Render the bind-instruction doc dropped into the reception cwd. It tells the
  * agent how to bind THIS chat to a repo by editing settings.json — including
@@ -1429,12 +1571,23 @@ function expandAndValidateDir(rawPath: string): string {
       ? path.join(os.homedir(), rawPath.slice(HOME_PREFIX.length))
       : rawPath;
   const resolved = path.resolve(expanded);
+  const unavailable = describeUnavailableCwd(resolved);
+  if (unavailable) throw new BindError(unavailable);
+  return resolved;
+}
+
+function describeUnavailableCwd(cwd: string): string | null {
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(resolved);
-  } catch {
-    throw new BindError(`路径不存在：${resolved}`);
+    stat = fs.statSync(cwd);
+  } catch (err) {
+    if (isNodeErrno(err) && err.code === "ENOENT") return `路径不存在：${cwd}`;
+    return `无法访问路径：${cwd}`;
   }
-  if (!stat.isDirectory()) throw new BindError(`不是目录：${resolved}`);
-  return resolved;
+  if (!stat.isDirectory()) return `不是目录：${cwd}`;
+  return null;
+}
+
+function isNodeErrno(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
 }
