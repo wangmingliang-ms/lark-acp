@@ -36,6 +36,7 @@ function recordingPresenter(ops: RenderOp[]): LarkPresenter {
     updatePermissionCard: async () => {},
     expirePermissionCard: async () => {},
     replyNoticeCard: async () => {},
+    sendNoticeCard: async () => null,
     sendUnifiedCard: async (_replyToMessageId, state) => {
       ops.push({ kind: "sendUnified", state: cloneState(state) });
       cardSeq += 1;

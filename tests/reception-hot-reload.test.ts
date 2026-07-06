@@ -30,6 +30,10 @@ class RecordingPresenter implements LarkPresenter {
   async replyNoticeCard(_id: string, notice: NoticeCardSpec): Promise<void> {
     this.notices.push(notice);
   }
+  async sendNoticeCard(_chatId: string, notice: NoticeCardSpec): Promise<string | null> {
+    this.notices.push(notice);
+    return "notice_msg";
+  }
   async sendUnifiedCard(): Promise<string | null> {
     return null;
   }
@@ -185,7 +189,7 @@ describe("reception area", () => {
 });
 
 describe("hot-reload of bindings", () => {
-  it("tears down a chat runtime when its binding appears via settings.json", async () => {
+  it("tears down a chat runtime when its binding appears via settings.json and notifies details", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
     await b.snapshotBindings();
@@ -205,6 +209,10 @@ describe("hot-reload of bindings", () => {
     expect(b.activeChatCount).toBe(0);
     const eff = await b.resolveBinding("oc_x");
     expect(eff).toMatchObject({ cwd: repoA, label: "codex", explicit: true });
+    const notice = presenter.notices.find((n) => n.title === "✅ 已绑定 repo");
+    expect(notice?.body).toContain("修改明细");
+    expect(notice?.body).toContain(repoA);
+    expect(notice?.body).toContain("codex");
   });
 
   it("no-ops when the settings file is unchanged", async () => {

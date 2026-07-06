@@ -297,6 +297,11 @@ interface EffectiveBinding {
   readonly reception: boolean;
 }
 
+interface BindingSnapshot {
+  readonly cwd: string;
+  readonly agentLabel: string;
+}
+
 /**
  * Top-level bridge that connects a Lark bot to ACP agents.
  *
@@ -342,7 +347,7 @@ export class LarkBridge {
   private settingsWatcher: fs.FSWatcher | null = null;
   private reloadTimer: ReturnType<typeof setTimeout> | null = null;
   /** Snapshot of the last-applied bindings, for diffing on hot-reload. */
-  private bindingSignatures = new Map<string, string>();
+  private bindingSnapshots = new Map<string, BindingSnapshot>();
 
   constructor(opts: LarkBridgeOptions) {
     this.lark = opts.lark;
@@ -524,6 +529,7 @@ export class LarkBridge {
     const key = runtimeKey(record.chatId, record.threadId);
     const runtime = this.chats.get(key);
     const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
+    const previous = await this.sessionStore.getLatest(record.chatId, record.threadId);
     const saved = await this.sessionStore.bindThreadSession(record);
     if (runtime) {
       runtime.supersede();
@@ -531,7 +537,11 @@ export class LarkBridge {
     }
     if (replyTo) {
       await this.presenter
-        .replyNoticeCard(replyTo, buildSessionBoundNotice(saved))
+        .replyNoticeCard(replyTo, buildSessionBoundNotice(saved, previous))
+        .catch((err) => this.logger.warn({ err }, "session bind notice failed"));
+    } else {
+      await this.presenter
+        .sendNoticeCard(record.chatId, buildSessionBoundNotice(saved, previous))
         .catch((err) => this.logger.warn({ err }, "session bind notice failed"));
     }
     return {
@@ -699,6 +709,7 @@ export class LarkBridge {
       updatedAt: now,
     };
     await this.bindingStore.set(binding);
+    this.bindingSnapshots.set(chatId, bindingSnapshotOf(binding));
 
     // A rebind changes repo/agent; tear down the live runtime and drop any
     // persisted ACP sessions so the next message starts fresh in the new cwd
@@ -707,11 +718,7 @@ export class LarkBridge {
     await this.clearChatSessions(chatId);
 
     this.logger.info({ chatId, cwd: target.cwd, agent: target.invocation.label }, "chat bound");
-    await this.presenter.replyNoticeCard(messageId, {
-      title: "✅ 已绑定",
-      body: `本会话已绑定：\n• 目录：${target.cwd}\n• Agent：${target.invocation.label}\n\n下条消息将在该目录启动 agent。`,
-      template: "green",
-    });
+    await this.presenter.replyNoticeCard(messageId, buildRepoBoundNotice(existing, binding));
   }
 
   private async handleUnbind(chatId: string, messageId: string): Promise<void> {
@@ -981,15 +988,12 @@ export class LarkBridge {
 
   // ----- Hot-reload of settings.json bindings -----------------------------
 
-  /**
-   * Snapshot the current bindings into `bindingSignatures` (chatId ->
-   * "cwd|label"). Used as the baseline the watcher diffs against.
-   */
+  /** Snapshot the current bindings. Used as the baseline the watcher diffs against. */
   private async snapshotBindings(): Promise<void> {
-    this.bindingSignatures.clear();
+    this.bindingSnapshots.clear();
     const all = await this.bindingStore.list();
     for (const b of all) {
-      this.bindingSignatures.set(b.chatId, `${b.cwd}|${b.agentLabel}`);
+      this.bindingSnapshots.set(b.chatId, bindingSnapshotOf(b));
     }
   }
 
@@ -1041,23 +1045,29 @@ export class LarkBridge {
     }
 
     const all = await this.bindingStore.list();
-    const next = new Map<string, string>();
-    for (const b of all) next.set(b.chatId, `${b.cwd}|${b.agentLabel}`);
+    const next = new Map<string, BindingSnapshot>();
+    for (const b of all) next.set(b.chatId, bindingSnapshotOf(b));
 
-    const affected: string[] = [];
+    const affected: Array<{
+      readonly chatId: string;
+      readonly before?: BindingSnapshot;
+      readonly after?: BindingSnapshot;
+    }> = [];
     // Added or changed.
-    for (const [chatId, sig] of next) {
-      if (this.bindingSignatures.get(chatId) !== sig) affected.push(chatId);
+    for (const [chatId, after] of next) {
+      const before = this.bindingSnapshots.get(chatId);
+      if (!sameBindingSnapshot(before, after)) affected.push({ chatId, before, after });
     }
     // Removed.
-    for (const chatId of this.bindingSignatures.keys()) {
-      if (!next.has(chatId)) affected.push(chatId);
+    for (const [chatId, before] of this.bindingSnapshots) {
+      if (!next.has(chatId)) affected.push({ chatId, before });
     }
 
     if (affected.length === 0) return;
 
-    this.bindingSignatures = next;
-    for (const chatId of affected) {
+    this.bindingSnapshots = next;
+    for (const change of affected) {
+      const { chatId } = change;
       const hadRuntime = this.chats.has(chatId);
       this.teardownChat(chatId);
       // The chat's persisted ACP sessions belonged to the *previous* binding
@@ -1072,6 +1082,11 @@ export class LarkBridge {
         { chatId, rebound: next.has(chatId), hadRuntime },
         "binding changed — chat runtime reset",
       );
+      if (change.after) {
+        await this.presenter
+          .sendNoticeCard(chatId, buildRepoBoundNotice(change.before ?? null, change.after))
+          .catch((err) => this.logger.warn({ err, chatId }, "repo bind notice failed"));
+      }
     }
   }
 
@@ -1234,11 +1249,24 @@ function renderInlineControlHint(chatId: string, threadId: string | null): strin
   return `[lark-acp: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.lark-acp/AGENTS.md（或 CLAUDE.md）中的 lark-acp 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
 }
 
-function buildSessionBoundNotice(record: SessionRecord): NoticeCardSpec {
+function buildSessionBoundNotice(
+  record: SessionRecord,
+  before?: SessionRecord | null,
+): NoticeCardSpec {
   const title = record.title ?? "Untitled session";
+  const beforeTitle = before?.title ?? (before ? "Untitled session" : "未绑定");
+  const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
+  const beforeRepo = before?.cwd ?? "未绑定";
   const lines = [
     `已将当前 topic 绑定到已有 session。`,
     "",
+    `**修改明细**`,
+    `• Repo：${beforeRepo} → ${record.cwd}`,
+    `• Agent：${beforeAgent} → ${record.agentLabel ?? record.agentCommand}`,
+    `• Session title：${beforeTitle} → ${title}`,
+    `• Session ID：${before ? "已存在" : "未绑定"} → 已更新（已隐藏）`,
+    "",
+    `**绑定后**`,
     `• Title: ${title}`,
     `• Agent: ${record.agentLabel ?? record.agentCommand}`,
     `• Repo: ${record.cwd}`,
@@ -1246,6 +1274,49 @@ function buildSessionBoundNotice(record: SessionRecord): NoticeCardSpec {
   if (record.sessionUpdatedAt) lines.push(`• Session updated: ${record.sessionUpdatedAt}`);
   return {
     title: "✅ 已绑定 session",
+    body: lines.join("\n"),
+    template: "green",
+  };
+}
+
+function bindingSnapshotOf(binding: ChatBinding): BindingSnapshot {
+  return { cwd: binding.cwd, agentLabel: binding.agentLabel };
+}
+
+function sameBindingSnapshot(
+  before: BindingSnapshot | undefined,
+  after: BindingSnapshot | undefined,
+): boolean {
+  return before?.cwd === after?.cwd && before?.agentLabel === after?.agentLabel;
+}
+
+function buildRepoBoundNotice(
+  before: BindingSnapshot | ChatBinding | null | undefined,
+  after: BindingSnapshot | ChatBinding,
+): NoticeCardSpec {
+  const beforeCwd = before?.cwd ?? "未绑定";
+  const beforeAgent = before?.agentLabel ?? "未绑定";
+  const changedRepo = before?.cwd !== after.cwd;
+  const changedAgent = before?.agentLabel !== after.agentLabel;
+  const changed = [changedRepo ? "repo" : null, changedAgent ? "agent" : null]
+    .filter((item): item is string => item !== null)
+    .join("、");
+  const lines = [
+    "本会话已绑定到 repo。",
+    "",
+    "**修改明细**",
+    `• Repo：${beforeCwd} → ${after.cwd}`,
+    `• Agent：${beforeAgent} → ${after.agentLabel}`,
+    `• 变更项：${changed || "无实际变化"}`,
+    "",
+    "**绑定后**",
+    `• Repo：${after.cwd}`,
+    `• Agent：${after.agentLabel}`,
+    "",
+    "下条消息将在该目录启动 agent。",
+  ];
+  return {
+    title: "✅ 已绑定 repo",
     body: lines.join("\n"),
     template: "green",
   };

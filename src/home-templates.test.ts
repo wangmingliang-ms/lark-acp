@@ -32,6 +32,7 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain(settingsPath);
     expect(agents).toContain(sessionsPath);
     expect(agents).toContain(path.join(dir, "control.sock"));
+    expect(agents).toContain("before/after details");
 
     expect(fs.existsSync(settingsPath)).toBe(false);
     expect(fs.existsSync(sessionsPath)).toBe(false);

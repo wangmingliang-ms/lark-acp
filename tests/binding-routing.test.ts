@@ -43,6 +43,10 @@ class RecordingPresenter implements LarkPresenter {
   async replyNoticeCard(_replyToMessageId: string, notice: NoticeCardSpec): Promise<void> {
     this.notices.push(notice);
   }
+  async sendNoticeCard(_chatId: string, notice: NoticeCardSpec): Promise<string | null> {
+    this.notices.push(notice);
+    return "notice_msg";
+  }
   async sendUnifiedCard(): Promise<string | null> {
     return null;
   }
@@ -143,8 +147,10 @@ describe("per-chat repo routing (integration)", () => {
     expect(await b.resolveBinding("oc_A")).toMatchObject({ cwd: repoA, explicit: true });
     expect(await b.resolveBinding("oc_B")).toMatchObject({ cwd: repoB, explicit: true });
 
-    // Both bind commands acked with a green "✅ 已绑定" card.
-    expect(presenter.notices.filter((n) => n.title === "✅ 已绑定").length).toBe(2);
+    // Both bind commands acked with a green "✅ 已绑定 repo" card and include details.
+    const bindNotices = presenter.notices.filter((n) => n.title === "✅ 已绑定 repo");
+    expect(bindNotices.length).toBe(2);
+    expect(bindNotices[0]?.body).toContain("修改明细");
   });
 
   it("persists bindings across a bridge/process restart", async () => {

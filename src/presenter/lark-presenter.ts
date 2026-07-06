@@ -358,6 +358,15 @@ export class LarkCardPresenter implements LarkPresenter {
     }
   }
 
+  async sendNoticeCard(chatId: string, notice: NoticeCardSpec): Promise<string | null> {
+    try {
+      return await this.http.sendCardToChat(chatId, buildNoticeCard(notice));
+    } catch (err) {
+      this.logger.warn({ err, chatId }, "sendNoticeCard failed");
+      return null;
+    }
+  }
+
   async sendUnifiedCard(replyToMessageId: string, state: UnifiedCardState): Promise<string | null> {
     try {
       return await this.http.replyCard(replyToMessageId, buildUnifiedCard(state), {

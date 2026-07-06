@@ -16,7 +16,7 @@ Do not print or copy secrets. Treat App IDs, chat IDs, session IDs, tokens, API 
 
 ## Settings / bindings
 
-Use `settings.json` for global config, credentials, runtime defaults, agent presets, and chat bindings. Preserve unrelated keys.
+Use `settings.json` for global config, credentials, runtime defaults, agent presets, and chat bindings. Preserve unrelated keys. After a repo bind/rebind succeeds, lark-acp sends a notice card into the chat with the before/after details.
 
 To bind or rebind a chat, update the top-level `bindings` object:
 
@@ -99,7 +99,7 @@ Bind the current topic to the selected session in the current chat repo:
 lark-acp sessions bind --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --agent claude --session-id "<selected-session-id>"
 ```
 
-On success lark-acp sends a notice card naming the bound session title. The next user message in this topic resumes that session.
+On success lark-acp sends a notice card naming the bound session title and showing the change details. The next user message in this topic resumes that session.
 
 ## Permission terminology
 

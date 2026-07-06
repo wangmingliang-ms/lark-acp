@@ -116,6 +116,13 @@ export interface LarkPresenter {
   replyNoticeCard(replyToMessageId: string, notice: NoticeCardSpec): Promise<void>;
 
   /**
+   * Send a fresh single-card notice directly into a chat, without replying to
+   * a specific message. Used for background state changes such as settings
+   * hot-reload detecting that a chat binding was changed by an agent.
+   */
+  sendNoticeCard(chatId: string, notice: NoticeCardSpec): Promise<string | null>;
+
+  /**
    * Send the per-prompt unified card. Returns the card's message id so
    * the caller can patch it as the timeline grows.
    */
