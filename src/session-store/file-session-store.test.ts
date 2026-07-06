@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FileSessionStore } from "./file-session-store.js";
+import { FileSessionStore, SessionAlreadyBoundError } from "./file-session-store.js";
 import type { SessionRecord } from "./session-store.js";
 
 /**
@@ -135,8 +135,7 @@ describe("FileSessionStore thread scoping", () => {
 });
 
 describe("FileSessionStore session bind", () => {
-  it("bindThreadSession replaces the current thread and removes duplicate session ids", async () => {
-    await store.save(record({ chatId: "oc_A", threadId: "th_old", sessionId: "s_desktop" }));
+  it("bindThreadSession replaces the current thread's previous session", async () => {
     await store.save(record({ chatId: "oc_A", threadId: "th_target", sessionId: "s_previous" }));
 
     const bound = await store.bindThreadSession(
@@ -158,9 +157,35 @@ describe("FileSessionStore session bind", () => {
       sessionUpdatedAt: "2026-07-05T12:00:00Z",
     });
     expect(await store.getLatest("oc_A", "th_target")).toMatchObject({ sessionId: "s_desktop" });
-    expect(await store.getLatest("oc_A", "th_old")).toBeNull();
     const all = await store.listByChat("oc_A");
     expect(all.map((r) => r.sessionId)).toEqual(["s_desktop"]);
+  });
+
+  it("rejects binding a session that is already bound to another thread", async () => {
+    await store.save(record({ chatId: "oc_A", threadId: "th_old", sessionId: "s_desktop" }));
+
+    await expect(
+      store.bindThreadSession(
+        record({ chatId: "oc_A", threadId: "th_target", sessionId: "s_desktop" }),
+      ),
+    ).rejects.toBeInstanceOf(SessionAlreadyBoundError);
+
+    expect(await store.getLatest("oc_A", "th_old")).toMatchObject({ sessionId: "s_desktop" });
+    expect(await store.getLatest("oc_A", "th_target")).toBeNull();
+  });
+
+  it("allows rebinding the same session to the same thread to refresh metadata", async () => {
+    await store.save(
+      record({ chatId: "oc_A", threadId: "th_target", sessionId: "s_desktop", title: "Old" }),
+    );
+
+    await expect(
+      store.bindThreadSession(
+        record({ chatId: "oc_A", threadId: "th_target", sessionId: "s_desktop", title: "New" }),
+      ),
+    ).resolves.toMatchObject({ title: "New" });
+
+    expect(await store.getLatest("oc_A", "th_target")).toMatchObject({ title: "New" });
   });
 });
 

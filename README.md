@@ -212,6 +212,8 @@ lark-acp sessions list --agent codex --cwd /absolute/path/to/repo --json
 
 `lark-acp sessions bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title 与修改明细的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
 
+如果目标 session 已经绑定到另一个 chat/thread，本次 bind 会被拒绝，并发送「Session 已被绑定」冲突通知；不要通过手改 `sessions.json` 绕过，应先在原 thread `/new` 重置或确认原绑定不再需要。
+
 ```bash
 lark-acp sessions bind \
   --chat-id "$LARK_ACP_CHAT_ID" \

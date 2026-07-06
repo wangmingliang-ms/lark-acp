@@ -18,6 +18,7 @@ import {
 import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
 import type { PermissionMode } from "../acp/lark-acp-client.js";
 import { AgentAuthError } from "../acp/agent-process.js";
+import { SessionAlreadyBoundError } from "../session-store/file-session-store.js";
 import type { NoticeCardSpec } from "../presenter/presenter.js";
 import type {
   SessionCapabilitiesSnapshot,
@@ -530,7 +531,28 @@ export class LarkBridge {
     const runtime = this.chats.get(key);
     const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
     const previous = await this.sessionStore.getLatest(record.chatId, record.threadId);
-    const saved = await this.sessionStore.bindThreadSession(record);
+    let saved: SessionRecord;
+    try {
+      saved = await this.sessionStore.bindThreadSession(record);
+    } catch (err) {
+      if (err instanceof SessionAlreadyBoundError) {
+        const notice = buildSessionBindRejectedNotice(record, err);
+        if (replyTo) {
+          await this.presenter
+            .replyNoticeCard(replyTo, notice)
+            .catch((sendErr) =>
+              this.logger.warn({ err: sendErr }, "session bind rejection notice failed"),
+            );
+        } else {
+          await this.presenter
+            .sendNoticeCard(record.chatId, notice)
+            .catch((sendErr) =>
+              this.logger.warn({ err: sendErr }, "session bind rejection notice failed"),
+            );
+        }
+      }
+      throw err;
+    }
     if (runtime) {
       runtime.supersede();
       this.chats.delete(key);
@@ -1276,6 +1298,30 @@ function buildSessionBoundNotice(
     title: "✅ 已绑定 session",
     body: lines.join("\n"),
     template: "green",
+  };
+}
+
+function buildSessionBindRejectedNotice(
+  record: SessionRecord,
+  err: SessionAlreadyBoundError,
+): NoticeCardSpec {
+  const title = record.title ?? "Untitled session";
+  const lines = [
+    "这个 session 已经绑定到另一个 thread，已拒绝本次绑定。",
+    "",
+    "**冲突明细**",
+    `• Session title：${title}`,
+    `• 目标 Repo：${record.cwd}`,
+    `• 目标 Agent：${record.agentLabel ?? record.agentCommand}`,
+    `• 已绑定 Chat：已隐藏`,
+    `• 已绑定 Thread：${err.existingThreadId === null ? "<main>" : "已隐藏"}`,
+    "",
+    "请先在原 thread 执行 /new 重置，或确认不再需要原 thread 后再重新绑定。",
+  ];
+  return {
+    title: "⚠️ Session 已被绑定",
+    body: lines.join("\n"),
+    template: "orange",
   };
 }
 

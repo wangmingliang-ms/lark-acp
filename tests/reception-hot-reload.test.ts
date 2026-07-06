@@ -15,6 +15,7 @@ import {
   SettingsBindingStore,
   type LarkPresenter,
   type NoticeCardSpec,
+  type SessionRecord,
   type AgentResolver,
   type ResolvedAgentInvocation,
 } from "../src/index.js";
@@ -55,6 +56,7 @@ interface BridgeInternals {
     threadId: string | null,
     binding: ReceptionBinding,
   ): Promise<unknown>;
+  controlBindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   readonly activeChatCount: number;
 }
 function asInternals(bridge: LarkBridge): BridgeInternals {
@@ -259,5 +261,48 @@ describe("hot-reload of bindings", () => {
     // the live runtime survives and the binding is still resolvable once the
     // file is (conceptually) rewritten. The reload simply deferred.
     expect(b.activeChatCount).toBe(1);
+  });
+});
+
+describe("session bind conflicts", () => {
+  it("rejects binding a session that is already bound to another thread and notifies", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_old",
+      sessionId: "s_desktop",
+      title: "Desktop task",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await expect(
+      b.controlBindSession(
+        {
+          chatId: "oc_x",
+          threadId: "th_new",
+          sessionId: "s_desktop",
+          title: "Desktop task",
+          agentCommand: CLAUDE.command,
+          agentArgs: [...CLAUDE.args],
+          agentLabel: CLAUDE.label,
+          cwd: repoA,
+          createdAt: 2,
+          updatedAt: 2,
+        },
+        "om_notice",
+      ),
+    ).rejects.toThrow(/已经绑定|already bound/);
+
+    expect(presenter.notices.at(-1)).toMatchObject({ title: "⚠️ Session 已被绑定" });
+    expect(await sessionStore.getLatest("oc_x", "th_new")).toBeNull();
+    expect(await sessionStore.getLatest("oc_x", "th_old")).toMatchObject({
+      sessionId: "s_desktop",
+    });
   });
 });

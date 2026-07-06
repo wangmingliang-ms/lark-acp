@@ -37,6 +37,12 @@ Valid built-in agent names normally include `claude`, `codex`, `copilot`, `gemin
 
 Session-specific controls live in `sessions.json` and should normally be changed through the lark-acp CLI, not by hand-editing JSON.
 
+When the user asks to list/show an agent's "settings", "session settings", available models/modes/config, or existing sessions, use lark-acp commands. Do **not** inspect Claude/Codex/Gemini/OpenCode cache directories or search random project folders for agent state.
+
+- Built-in/user agent presets: `lark-acp agents`
+- Current live session settings/capabilities: `lark-acp control capabilities --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json`
+- Existing ACP sessions for an agent: `lark-acp sessions list --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --agent <agent> --json`
+
 Before changing model/mode/config/permission controls, always query live capabilities for the current chat/thread. Do not guess ids or values from memory.
 
 ```bash
@@ -78,6 +84,7 @@ Rules:
 
 - `sessions list` may use `--cwd` when the user explicitly asks to inspect another repo from a host/reception chat.
 - `sessions bind` intentionally does **not** accept `--cwd`. It can only bind the current topic to a session in the current chat's bound repo. It never changes chat binding and never binds a topic across repos.
+- If the chosen session is already bound to another chat/thread, lark-acp rejects the bind and sends a conflict notice. Do not work around this by hand-editing `sessions.json`; ask the user to reset the original thread first.
 - Do not print full session IDs in a group chat. It is OK to use the full ID in local CLI commands.
 - If multiple sessions match the user's description, show a short candidate list with title / updated time / repo and ask the user to choose.
 

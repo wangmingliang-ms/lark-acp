@@ -7,4 +7,8 @@ export type {
   SessionRecord,
   SessionStore,
 } from "./session-store.js";
-export { FileSessionStore, SessionStoreControlError } from "./file-session-store.js";
+export {
+  FileSessionStore,
+  SessionAlreadyBoundError,
+  SessionStoreControlError,
+} from "./file-session-store.js";

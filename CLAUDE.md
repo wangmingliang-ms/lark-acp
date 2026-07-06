@@ -40,6 +40,14 @@ lark-acp proxy --agent claude    # 前台运行（占终端，Ctrl-C 停）
 - **改动 CLI 行为后**务必手动 E2E（`start`→`status`→`restart`→`stop`），并确认
   `logs` 里出现 `WebSocket connected`；单元测试只覆盖纯函数（`bin/process-control.test.ts`）。
 
+## lark-acp 自身操作指南
+
+- 当用户要求列出某个 agent 的 settings / session settings / capabilities / existing sessions 时，必须使用 lark-acp 提供的 CLI/control 命令，不要去 Claude/Codex/Gemini/OpenCode 的缓存目录或项目目录里猜状态。
+  - Agent preset 列表：`lark-acp agents`
+  - 当前 live session settings/capabilities：`lark-acp control capabilities --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --json`
+  - 某 agent 的已有 ACP sessions：`lark-acp sessions list --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --agent <agent> --json`
+- `sessions bind` 只能绑定当前 chat repo 内的 session；如果该 session 已经绑定到另一个 chat/thread，必须拒绝并提示用户先重置原 thread，不要通过手改 `sessions.json` 绕过。
+
 # TypeScript 工程准则（TypeScript 5.x / Strict Mode）
 
 适用于本仓库所有 TypeScript 代码。AI 助手与人类贡献者都应遵守。

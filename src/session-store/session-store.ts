@@ -120,7 +120,9 @@ export interface SessionStore {
 
   /**
    * Replace the current session for one chat/thread with an existing ACP
-   * session selected from the agent's own session list.
+   * session selected from the agent's own session list. Implementations should
+   * reject if that ACP session is already bound to another chat/thread so one
+   * live agent session is not driven concurrently from multiple topics.
    */
   bindThreadSession(record: SessionRecord): Promise<SessionRecord>;
 

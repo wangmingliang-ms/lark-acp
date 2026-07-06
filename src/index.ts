@@ -48,7 +48,11 @@ export type {
   SessionRecord,
   SessionStore,
 } from "./session-store/session-store.js";
-export { FileSessionStore, SessionStoreControlError } from "./session-store/file-session-store.js";
+export {
+  FileSessionStore,
+  SessionAlreadyBoundError,
+  SessionStoreControlError,
+} from "./session-store/file-session-store.js";
 
 export type { BindingStore, ChatBinding } from "./binding-store/binding-store.js";
 export { FileBindingStore, BindingStoreIoError } from "./binding-store/file-binding-store.js";

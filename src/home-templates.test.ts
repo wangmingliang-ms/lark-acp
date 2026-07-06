@@ -33,6 +33,7 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain(sessionsPath);
     expect(agents).toContain(path.join(dir, "control.sock"));
     expect(agents).toContain("before/after details");
+    expect(agents).toContain("lark-acp commands");
 
     expect(fs.existsSync(settingsPath)).toBe(false);
     expect(fs.existsSync(sessionsPath)).toBe(false);

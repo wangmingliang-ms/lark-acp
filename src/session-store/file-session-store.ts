@@ -121,6 +121,9 @@ export class FileSessionStore implements SessionStore {
       records = [];
       this.data.set(record.chatId, records);
     }
+    const conflict = this.findSessionBindingConflict(record);
+    if (conflict) throw new SessionAlreadyBoundError(conflict.chatId, conflict.threadId);
+
     const replacement = { ...record };
     const withoutThreadOrSession = records.filter(
       (r) => r.threadId !== record.threadId && r.sessionId !== record.sessionId,
@@ -129,6 +132,20 @@ export class FileSessionStore implements SessionStore {
     this.data.set(record.chatId, withoutThreadOrSession);
     this.scheduleFlush();
     return replacement;
+  }
+
+  private findSessionBindingConflict(record: SessionRecord): SessionRecord | null {
+    for (const records of this.data.values()) {
+      const conflict = records.find(
+        (r) =>
+          r.sessionId === record.sessionId &&
+          r.cwd === record.cwd &&
+          sameAgentInvocation(r, record) &&
+          (r.chatId !== record.chatId || r.threadId !== record.threadId),
+      );
+      if (conflict) return conflict;
+    }
+    return null;
   }
 
   async setControls(
@@ -223,6 +240,25 @@ export class FileSessionStore implements SessionStore {
 
 export class SessionStoreControlError extends Error {
   override readonly name = "SessionStoreControlError";
+}
+
+export class SessionAlreadyBoundError extends Error {
+  override readonly name = "SessionAlreadyBoundError";
+
+  constructor(
+    readonly existingChatId: string,
+    readonly existingThreadId: string | null,
+  ) {
+    super("该 session 已经绑定到另一个 thread，请先重置原 thread 后再重新绑定。");
+  }
+}
+
+function sameAgentInvocation(a: SessionRecord, b: SessionRecord): boolean {
+  return (
+    a.agentCommand === b.agentCommand &&
+    JSON.stringify(a.agentArgs) === JSON.stringify(b.agentArgs) &&
+    (a.agentLabel ?? "") === (b.agentLabel ?? "")
+  );
 }
 
 function mergeControls(
