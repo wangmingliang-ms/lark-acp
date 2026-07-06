@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   bridgeControlSocketPath,
+  bridgeControlSocketPathForPlatform,
   bridgeLaunchPath,
   bridgeLogPath,
   bridgePidPath,
@@ -42,6 +43,13 @@ describe("path helpers", () => {
     expect(managedCheckoutDir(dir)).toBe(path.join(dir, "humming-project"));
     expect(bridgeLaunchPath(dir)).toBe(path.join(dir, "bridge.launch.json"));
     expect(bridgeControlSocketPath(dir)).toBe(path.join(dir, "control.sock"));
+  });
+
+  it("uses a Windows named pipe for the control socket on Windows", () => {
+    const pipe = bridgeControlSocketPathForPlatform("C:\\Users\\miller\\.humming", "win32");
+
+    expect(pipe).toMatch(/^\\\\\.\\pipe\\humming-bridge-[a-f0-9]{10}-control$/);
+    expect(pipe).toBe(bridgeControlSocketPathForPlatform("C:\\Users\\miller\\.humming", "win32"));
   });
 
   it("derives a stable per-home systemd unit name", () => {

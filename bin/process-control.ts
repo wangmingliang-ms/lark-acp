@@ -79,6 +79,30 @@ export function bridgeRestartMarkerPath(homeDir: string): string {
 
 /** Unix-domain socket used by `humming control …` to query the live bridge. */
 export function bridgeControlSocketPath(homeDir: string): string {
+  return bridgeControlSocketPathForPlatform(homeDir, process.platform);
+}
+
+/**
+ * Local IPC endpoint used by `humming control …`.
+ *
+ * POSIX platforms use a Unix-domain socket file under the home dir. Windows
+ * does not support Unix sockets by pathname in Node's `net.Server.listen`; it
+ * requires a named pipe path under `\\.\pipe\...`. Returning a `.sock` path on
+ * Windows makes the bridge crash at startup with `listen EACCES`, after `start`
+ * has already printed a misleading success.
+ */
+export function bridgeControlSocketPathForPlatform(
+  homeDir: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    const digest = crypto
+      .createHash("sha1")
+      .update(path.resolve(homeDir))
+      .digest("hex")
+      .slice(0, 10);
+    return `\\\\.\\pipe\\humming-bridge-${digest}-control`;
+  }
   return path.join(homeDir, CONTROL_SOCKET_FILE);
 }
 

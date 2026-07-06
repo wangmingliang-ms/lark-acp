@@ -90,7 +90,9 @@ export class BridgeControlServer {
 
   async start(): Promise<void> {
     if (this.server) return;
-    fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
+    if (!isWindowsNamedPipe(this.socketPath)) {
+      fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
+    }
     removeStaleSocket(this.socketPath);
 
     this.server = net.createServer({ allowHalfOpen: true }, (socket) => {
@@ -261,6 +263,10 @@ function isControlRequest(value: unknown): value is ControlRequest {
   return false;
 }
 
+function isWindowsNamedPipe(socketPath: string): boolean {
+  return socketPath.startsWith("\\\\.\\pipe\\");
+}
+
 function isAgentProbeFailureTarget(value: unknown): value is AgentProbeFailureTarget {
   return (
     isRecord(value) &&
@@ -292,6 +298,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function removeStaleSocket(socketPath: string): void {
+  if (isWindowsNamedPipe(socketPath)) return;
   try {
     fs.unlinkSync(socketPath);
   } catch (err) {
@@ -300,6 +307,7 @@ function removeStaleSocket(socketPath: string): void {
 }
 
 function removeQuietly(socketPath: string): void {
+  if (isWindowsNamedPipe(socketPath)) return;
   try {
     fs.unlinkSync(socketPath);
   } catch {
