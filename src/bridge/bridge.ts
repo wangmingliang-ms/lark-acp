@@ -536,7 +536,7 @@ export class LarkBridge {
       saved = await this.sessionStore.bindThreadSession(record);
     } catch (err) {
       if (err instanceof SessionAlreadyBoundError) {
-        const notice = buildSessionBindRejectedNotice(record, err);
+        const notice = buildSessionBindRejectedNotice(record);
         if (replyTo) {
           await this.presenter
             .replyNoticeCard(replyTo, notice)
@@ -1286,7 +1286,6 @@ function buildSessionBoundNotice(
     `• Repo：${beforeRepo} → ${record.cwd}`,
     `• Agent：${beforeAgent} → ${record.agentLabel ?? record.agentCommand}`,
     `• Session title：${beforeTitle} → ${title}`,
-    `• Session ID：${before ? "已存在" : "未绑定"} → 已更新（已隐藏）`,
     "",
     `**绑定后**`,
     `• Title: ${title}`,
@@ -1301,10 +1300,7 @@ function buildSessionBoundNotice(
   };
 }
 
-function buildSessionBindRejectedNotice(
-  record: SessionRecord,
-  err: SessionAlreadyBoundError,
-): NoticeCardSpec {
+function buildSessionBindRejectedNotice(record: SessionRecord): NoticeCardSpec {
   const title = record.title ?? "Untitled session";
   const lines = [
     "这个 session 已经绑定到另一个 thread，已拒绝本次绑定。",
@@ -1313,8 +1309,7 @@ function buildSessionBindRejectedNotice(
     `• Session title：${title}`,
     `• 目标 Repo：${record.cwd}`,
     `• 目标 Agent：${record.agentLabel ?? record.agentCommand}`,
-    `• 已绑定 Chat：已隐藏`,
-    `• 已绑定 Thread：${err.existingThreadId === null ? "<main>" : "已隐藏"}`,
+    `• 状态：已绑定到其他 thread`,
     "",
     "请先在原 thread 执行 /new 重置，或确认不再需要原 thread 后再重新绑定。",
   ];

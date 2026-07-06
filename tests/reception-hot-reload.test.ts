@@ -299,7 +299,13 @@ describe("session bind conflicts", () => {
       ),
     ).rejects.toThrow(/已经绑定|already bound/);
 
-    expect(presenter.notices.at(-1)).toMatchObject({ title: "⚠️ Session 已被绑定" });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "⚠️ Session 已被绑定" });
+    expect(notice?.body).toContain("Session title：Desktop task");
+    expect(notice?.body).not.toContain("已隐藏");
+    expect(notice?.body).not.toContain("已绑定 Chat");
+    expect(notice?.body).not.toContain("已绑定 Thread");
+    expect(notice?.body).not.toContain("Session ID");
     expect(await sessionStore.getLatest("oc_x", "th_new")).toBeNull();
     expect(await sessionStore.getLatest("oc_x", "th_old")).toMatchObject({
       sessionId: "s_desktop",
