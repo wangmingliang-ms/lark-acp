@@ -116,6 +116,11 @@ async function waitForFlush(): Promise<void> {
 }
 
 describe("HummingClient card-v2 conversation rendering", () => {
+  it("uses a compact 4096-character soft card fold threshold", () => {
+    expect(CARD_MARKDOWN_SOFT_CHAR_LIMIT).toBe(4_096);
+    expect(CARD_MARKDOWN_SOFT_CHAR_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_CHAR_LIMIT);
+  });
+
   it("keeps assistant messages and tool calls in the same conversation card", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);

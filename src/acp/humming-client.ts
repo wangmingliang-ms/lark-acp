@@ -16,10 +16,10 @@ const CARD_FLUSH_DEBOUNCE_MS = 100;
 // characters for streaming card content; above that card updates fail with
 // code 230099 / ErrCode 11310 "element exceeds the limit".
 export const CARD_MARKDOWN_ELEMENT_CHAR_LIMIT = 30_000;
-// Prefer readability over maximum density. Once the card reaches 50% of the
-// element limit, wait for a safe structural boundary (the next tool call) and
-// fold earlier prose instead of cutting markdown in the middle.
-export const CARD_MARKDOWN_SOFT_CHAR_LIMIT = Math.floor(CARD_MARKDOWN_ELEMENT_CHAR_LIMIT * 0.5);
+// Prefer readability over maximum density. Once a card reaches this soft
+// threshold, wait for a safe structural boundary (the next tool call) and fold
+// earlier prose instead of cutting markdown in the middle.
+export const CARD_MARKDOWN_SOFT_CHAR_LIMIT = 4_096;
 
 const CARD_COMPACTION_NOTICE_PREFIX = "_前面内容较长，已在安全边界折叠_";
 
