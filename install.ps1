@@ -34,7 +34,7 @@ function Fail($msg) {
 
 $tools = [ordered]@{
   git  = 'Install git first: https://git-scm.com/downloads'
-  node = "Install Node.js >= $minNodeMajor: https://nodejs.org/"
+  node = "Install Node.js >= ${minNodeMajor}: https://nodejs.org/"
   npm  = 'npm ships with Node.js: https://nodejs.org/'
 }
 foreach ($cmd in $tools.Keys) {
