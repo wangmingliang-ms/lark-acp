@@ -19,7 +19,7 @@ import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
 import type { PermissionMode } from "../acp/humming-client.js";
 import { AgentAuthError } from "../acp/agent-process.js";
 import { SessionAlreadyBoundError } from "../session-store/file-session-store.js";
-import type { NoticeCardSpec } from "../presenter/presenter.js";
+import type { AgentStatus, NoticeCardSpec } from "../presenter/presenter.js";
 import type {
   SessionCapabilitiesSnapshot,
   SessionControls,
@@ -423,7 +423,9 @@ export class LarkBridge {
     this.writeHomeInstructions();
     await this.startControlServer();
 
-    this.cleanupTimer = setInterval(() => this.evictIdle(), IDLE_CLEANUP_INTERVAL_MS);
+    this.cleanupTimer = setInterval(() => {
+      this.evictIdle().catch((err) => this.logger.warn({ err }, "idle eviction failed"));
+    }, IDLE_CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
 
     this.ws = new LarkWsConnection({
@@ -452,7 +454,7 @@ export class LarkBridge {
     }
     await this.controlServer?.stop();
     this.controlServer = null;
-    for (const runtime of this.chats.values()) runtime.shutdown();
+    await this.shutdownAllRuntimes("cancelled");
     this.chats.clear();
     await this.sessionStore.close();
     await this.bindingStore.close();
@@ -583,7 +585,7 @@ export class LarkBridge {
       : record;
 
     if (runtime) {
-      runtime.supersede();
+      await runtime.supersede();
       this.chats.delete(key);
     }
 
@@ -635,7 +637,7 @@ export class LarkBridge {
       throw err;
     }
     if (runtime) {
-      runtime.supersede();
+      await runtime.supersede();
       this.chats.delete(key);
     }
     if (replyTo) {
@@ -758,7 +760,7 @@ export class LarkBridge {
         // Thread-scoped ("Reset Thread"): only this topic's runtime + sessions
         // are dropped; the chat's other topics keep running.
         this.logger.info({ chatId, threadId }, "new session command");
-        this.teardownThread(chatId, threadId);
+        await this.teardownThread(chatId, threadId);
         await this.clearThreadSessions(chatId, threadId);
         await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.new);
         return;
@@ -816,7 +818,7 @@ export class LarkBridge {
     // A rebind changes repo; tear down the live runtime and drop any persisted
     // ACP sessions so the next message starts fresh in the new cwd instead of
     // resuming a session that belongs to the old repo.
-    this.teardownChat(chatId);
+    await this.teardownChat(chatId);
     await this.clearChatSessions(chatId);
 
     this.logger.info({ chatId, cwd }, "chat bound");
@@ -834,7 +836,7 @@ export class LarkBridge {
       return;
     }
     await this.bindingStore.delete(chatId);
-    this.teardownChat(chatId);
+    await this.teardownChat(chatId);
     await this.clearChatSessions(chatId);
     this.logger.info({ chatId }, "chat unbound");
     await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.unbind);
@@ -1049,7 +1051,7 @@ export class LarkBridge {
 
     await this.bindingStore.set(rebound);
     this.bindingSnapshots.set(chatId, bindingSnapshotOf(rebound));
-    this.teardownChat(chatId);
+    await this.teardownChat(chatId);
     await this.clearChatSessions(chatId).catch((err) =>
       this.logger.warn({ err, chatId }, "failed to clear sessions on unavailable repo rebind"),
     );
@@ -1323,7 +1325,7 @@ export class LarkBridge {
     for (const change of affected) {
       const { chatId } = change;
       const hadRuntime = this.chats.has(chatId);
-      this.teardownChat(chatId);
+      await this.teardownChat(chatId);
       // The chat's persisted ACP sessions belonged to the *previous* binding
       // (often the reception-area agent). A new binding means a different cwd
       // and possibly a different agent binary, so resuming those sessions
@@ -1424,11 +1426,11 @@ export class LarkBridge {
    * Used by the thread-scoped `/new` ("Reset Thread") command; the chat's
    * other topics keep running.
    */
-  private teardownThread(chatId: string, threadId: string | null): void {
+  private async teardownThread(chatId: string, threadId: string | null): Promise<void> {
     const key = runtimeKey(chatId, threadId);
     const runtime = this.chats.get(key);
     if (!runtime) return;
-    runtime.shutdown();
+    await runtime.shutdown("cancelled");
     this.chats.delete(key);
   }
 
@@ -1437,12 +1439,12 @@ export class LarkBridge {
    * conversation and all topic threads. Used by chat-scoped operations
    * (bind / unbind / rebind) that swap the repo out from under every topic.
    */
-  private teardownChat(chatId: string): void {
+  private async teardownChat(chatId: string): Promise<void> {
     // Safe to delete during Map iteration: the iterator tolerates removing the
     // current/visited key (only concurrent insertion is problematic).
     for (const [key, runtime] of this.chats) {
       if (runtime.chatId !== chatId) continue;
-      runtime.shutdown();
+      await runtime.shutdown("cancelled");
       this.chats.delete(key);
     }
   }
@@ -1465,7 +1467,7 @@ export class LarkBridge {
     await Promise.all(sessions.map((s) => this.sessionStore.delete(chatId, s.sessionId)));
   }
 
-  private evictIdle(): void {
+  private async evictIdle(): Promise<void> {
     if (this.idleTimeoutMs <= 0) return;
     const now = Date.now();
     for (const [key, runtime] of this.chats) {
@@ -1475,7 +1477,7 @@ export class LarkBridge {
         { chatId: runtime.chatId, threadId: runtime.threadId },
         "evicting idle chat",
       );
-      runtime.shutdown();
+      await runtime.shutdown(null);
       this.chats.delete(key);
     }
   }
@@ -1494,8 +1496,23 @@ export class LarkBridge {
       { chatId: runtime?.chatId, threadId: runtime?.threadId },
       "max concurrent chats reached — evicting oldest",
     );
-    runtime?.shutdown();
+    runtime?.shutdown(null).catch((err) => this.logger.warn({ err }, "oldest eviction failed"));
     this.chats.delete(oldest.key);
+  }
+
+  private async shutdownAllRuntimes(finalStatus: AgentStatus | null): Promise<void> {
+    await Promise.all(
+      [...this.chats.values()].map((runtime) =>
+        runtime
+          .shutdown(finalStatus)
+          .catch((err) =>
+            this.logger.warn(
+              { err, chatId: runtime.chatId, threadId: runtime.threadId },
+              "runtime shutdown failed",
+            ),
+          ),
+      ),
+    );
   }
 }
 

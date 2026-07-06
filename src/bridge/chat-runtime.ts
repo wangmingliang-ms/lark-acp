@@ -17,6 +17,8 @@ import type {
   SessionStore,
 } from "../session-store/session-store.js";
 
+const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
+
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
   /** Message used as reply/card anchor for this prompt. */
@@ -182,12 +184,17 @@ export class ChatRuntime {
   }
 
   /** Tear down the agent process so the next message starts fresh. */
-  shutdown(): void {
+  async shutdown(finalStatus: AgentStatus | null = "cancelled"): Promise<void> {
     this.aborted = true;
     const state = this.state;
     if (!state) return;
     this.logger.info("shutting down chat runtime");
     state.client.cancelPendingPermission();
+    if (finalStatus !== null) {
+      await withTimeout(state.client.finalize(finalStatus), SHUTDOWN_FINALIZE_TIMEOUT_MS).catch(
+        (err) => this.logger.warn({ err }, "shutdown card finalize failed"),
+      );
+    }
     this.state = null;
     killAgent(state.agent.process);
   }
@@ -197,11 +204,11 @@ export class ChatRuntime {
    * prompt is killed and finalised, but no crash notice is emitted — the user
    * gets the explicit "session bound" notice from the bridge instead.
    */
-  supersede(): void {
+  async supersede(): Promise<void> {
     if (!this.state) return;
     this.suppressPromptErrorNotice = true;
     this.cancelRequested = true;
-    this.shutdown();
+    await this.shutdown("cancelled");
   }
 
   /** Forward a card-action event to the underlying ACP client. */
@@ -676,9 +683,6 @@ export class ChatRuntime {
 
     if (this.suppressPromptErrorNotice || this.aborted || this.state !== state) {
       this.logger.info("prompt completed after runtime was superseded; skipping session persist");
-      await state.client
-        .finalize("cancelled")
-        .catch((err) => this.logger.debug({ err }, "finalize after superseded prompt rejected"));
       return;
     }
 
@@ -748,7 +752,7 @@ export class ChatRuntime {
     // A closed connection means the agent is gone even if the OS hasn't
     // surfaced an exit code yet — tear it down so the next message respawns.
     if (isAuthError || procDead || disconnected) {
-      this.shutdown();
+      await this.shutdown(null);
       const title = isAuthError
         ? "⚠️ Agent 认证失败"
         : cancelRequested
@@ -814,6 +818,16 @@ export class ChatRuntime {
       this.logger.warn({ err }, "session store save failed");
     }
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function sessionMetaFromSnapshot(snapshot: SessionCapabilitiesSnapshot): SessionCardMeta {

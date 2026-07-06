@@ -457,9 +457,10 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
         saved.push(record);
       },
     };
+    const states: UnifiedCardState[] = [];
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter([]),
+      presenter: recordingPresenter(states),
       sessionStore: store,
       agentLabel: "claude",
     });
@@ -469,7 +470,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_supersede",
       chatId: "oc_test",
     });
-    runtime.supersede();
+    await runtime.supersede();
     fake.resolvePrompt("end_turn");
 
     await vi.waitFor(() => expect(runtime.processing).toBe(false), {
@@ -479,6 +480,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
     expect(saved).toHaveLength(1);
     expect(saved.at(-1)).toMatchObject({ sessionId: "sess_fake", agentLabel: "claude" });
+    expect(states.at(-1)).toMatchObject({ status: "cancelled", cancellable: false });
   });
 
   it("applies and reports session controls with ACP-shaped requests", async () => {
