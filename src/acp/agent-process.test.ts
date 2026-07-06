@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentAuthError, sanitizeChildEnv } from "./agent-process.js";
+import { AgentAuthError, buildAgentSpawnOptions, sanitizeChildEnv } from "./agent-process.js";
 
 describe("AgentAuthError", () => {
   it("builds an actionable message carrying label + hint", () => {
@@ -62,5 +62,22 @@ describe("sanitizeChildEnv", () => {
     sanitizeChildEnv(base, overrides);
     expect(base).toEqual({ CLAUDECODE: "1", PATH: "/usr/bin" });
     expect(overrides).toEqual({ EXTRA: "x" });
+  });
+});
+
+describe("buildAgentSpawnOptions", () => {
+  it("uses a hidden shell on Windows so agent startup does not open a cmd window", () => {
+    const opts = buildAgentSpawnOptions({
+      cwd: "C:\\repo",
+      env: { EXTRA: "1" },
+      baseEnv: { PATH: "C:\\Windows", CLAUDECODE: "1" },
+      platform: "win32",
+    });
+
+    expect(opts.shell).toBe(true);
+    expect(opts.windowsHide).toBe(true);
+    expect(opts.env.PATH).toBe("C:\\Windows");
+    expect(opts.env.EXTRA).toBe("1");
+    expect(opts.env).not.toHaveProperty("CLAUDECODE");
   });
 });

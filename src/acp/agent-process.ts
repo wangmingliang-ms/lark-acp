@@ -90,6 +90,35 @@ export interface SpawnAgentOptions {
   logger: LarkLogger;
 }
 
+export interface BuildAgentSpawnOptionsInput {
+  readonly cwd: string;
+  readonly env?: Record<string, string>;
+  readonly baseEnv?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+}
+
+export interface AgentChildProcessOptions {
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+  readonly stdio: ["pipe", "pipe", "pipe"];
+  readonly shell: boolean;
+  readonly windowsHide: boolean;
+}
+
+export function buildAgentSpawnOptions(
+  opts: BuildAgentSpawnOptionsInput,
+): AgentChildProcessOptions {
+  const platform = opts.platform ?? process.platform;
+  const isWindows = platform === WIN32_PLATFORM;
+  return {
+    cwd: opts.cwd,
+    env: sanitizeChildEnv(opts.baseEnv ?? process.env, opts.env ?? {}),
+    stdio: STDIO_PIPED,
+    shell: isWindows,
+    windowsHide: isWindows,
+  };
+}
+
 class ListingClient implements acp.Client {
   constructor(private readonly logger: LarkLogger) {}
 
@@ -373,10 +402,7 @@ async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {
   logger.info({ command, args }, "spawning agent");
 
   const proc = spawn(command, args, {
-    cwd,
-    env: sanitizeChildEnv(process.env, env ?? {}),
-    stdio: STDIO_PIPED,
-    shell: process.platform === WIN32_PLATFORM,
+    ...buildAgentSpawnOptions({ cwd, env }),
   });
 
   const stderrBuffer: string[] = [];
