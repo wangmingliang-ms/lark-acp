@@ -288,7 +288,11 @@ export class ChatRuntime {
         if (stateRef === null) return;
         if (update.title !== undefined) {
           if (update.title === null) delete stateRef.sessionTitle;
-          else stateRef.sessionTitle = update.title;
+          else {
+            const title = sanitizeSessionTitle(update.title);
+            if (title === undefined) delete stateRef.sessionTitle;
+            else stateRef.sessionTitle = title;
+          }
         }
         if (update.updatedAt !== undefined) {
           if (update.updatedAt === null) delete stateRef.sessionUpdatedAt;
@@ -318,11 +322,12 @@ export class ChatRuntime {
 
     await this.persistSession(agent.sessionId);
 
+    const persistedTitle = sanitizeSessionTitle(latest?.title);
     const state: ChatRuntimeState = {
       client,
       agent,
       sessionCapabilities: this.buildCapabilitiesSnapshot(agent, client),
-      ...(latest?.title !== undefined ? { sessionTitle: latest.title } : {}),
+      ...(persistedTitle !== undefined ? { sessionTitle: persistedTitle } : {}),
       ...(latest?.sessionUpdatedAt !== undefined
         ? { sessionUpdatedAt: latest.sessionUpdatedAt }
         : {}),
@@ -778,7 +783,7 @@ export class ChatRuntime {
       const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
       const previous = latest?.sessionId === sessionId || latest?.profileOnly ? latest : null;
       const liveState = this.state?.agent.sessionId === sessionId ? this.state : null;
-      const title = liveState?.sessionTitle ?? previous?.title;
+      const title = sanitizeSessionTitle(liveState?.sessionTitle ?? previous?.title);
       const sessionUpdatedAt = liveState?.sessionUpdatedAt ?? previous?.sessionUpdatedAt;
       await this.opts.sessionStore.save({
         chatId: this.opts.chatId,
@@ -809,6 +814,14 @@ function sessionMetaFromSnapshot(snapshot: SessionCapabilitiesSnapshot): Session
     model: displayModel(snapshot),
     permission: displayPermission(snapshot),
   };
+}
+
+function sanitizeSessionTitle(title: string | undefined): string | undefined {
+  const trimmed = title?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith("[上下文:")) return undefined;
+  if (trimmed.startsWith("[humming:")) return undefined;
+  return trimmed;
 }
 
 function displayAgent(agent: SessionCapabilitiesSnapshot["agent"]): string {

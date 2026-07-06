@@ -901,11 +901,14 @@ export class LarkBridge {
       ? `[上下文: 群聊 "${chatName}" (${chatId}) 中用户 ${userName} (${userId}) 的消息]`
       : `[上下文: 用户 ${userName} (${userId}) 的私聊消息]`;
 
-    // Keep the prompt small: durable humming operating instructions live in
-    // ~/.humming/AGENTS.md and ~/.humming/CLAUDE.md, not inline every turn.
-    prompt.unshift({ type: "text", text: renderInlineControlHint(chatId, threadId) });
-
-    prompt.unshift({ type: "text", text: context });
+    // Keep the user's message as the first prompt block. Several ACP agents
+    // derive their session title from the first user text; if humming prepends
+    // routing metadata, the title becomes "[上下文: 群聊 ...]" instead of the
+    // user's actual request. Durable operating instructions live in
+    // ~/.humming/AGENTS.md and ~/.humming/CLAUDE.md, so append the lightweight
+    // metadata after the user content.
+    prompt.push({ type: "text", text: context });
+    prompt.push({ type: "text", text: renderInlineControlHint(chatId, threadId) });
 
     const runtime = await this.acquireRuntime(chatId, threadId, binding);
     const pending: PendingMessage = { prompt, messageId, chatId };

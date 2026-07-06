@@ -403,6 +403,49 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(replies, "a clean turn must not produce an error/crash reply").toEqual([]);
   });
 
+  it("does not persist humming context metadata as the ACP session title", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const saved: unknown[] = [];
+    const store: SessionStore = {
+      ...stubSessionStore(),
+      save: async (record) => {
+        saved.push(record);
+      },
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: store,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "please fix the bug" }],
+      messageId: "om_title",
+      chatId: "oc_test",
+    });
+
+    const spawnOpts = spawnAgentMock.mock.calls[0]?.[0] as { client: HummingClient };
+    await spawnOpts.client.sessionUpdate({
+      sessionId: "sess_fake",
+      update: {
+        sessionUpdate: "session_info_update",
+        title: '[上下文: 群聊 "Lark ACP" (oc_x) 中用户 ou_x 的消息]',
+        updatedAt: "2026-07-06T06:00:00.000Z",
+      },
+    });
+    fake.resolvePrompt("end_turn");
+
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+
+    expect(saved.at(-1)).toMatchObject({ sessionUpdatedAt: "2026-07-06T06:00:00.000Z" });
+    expect(saved.at(-1)).not.toMatchObject({ title: expect.stringContaining("[上下文:") });
+  });
+
   it("applies and reports session controls with ACP-shaped requests", async () => {
     const fake = makeFakeAgent();
     const setModel = vi.fn(async () => ({}));
