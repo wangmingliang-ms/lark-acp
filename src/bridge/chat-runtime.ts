@@ -183,12 +183,13 @@ export class ChatRuntime {
 
   /** Tear down the agent process so the next message starts fresh. */
   shutdown(): void {
-    if (!this.state) return;
-    this.logger.info("shutting down chat runtime");
-    this.state.client.cancelPendingPermission();
-    killAgent(this.state.agent.process);
-    this.state = null;
     this.aborted = true;
+    const state = this.state;
+    if (!state) return;
+    this.logger.info("shutting down chat runtime");
+    state.client.cancelPendingPermission();
+    this.state = null;
+    killAgent(state.agent.process);
   }
 
   /**
