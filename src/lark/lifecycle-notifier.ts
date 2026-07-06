@@ -19,22 +19,22 @@ type LifecycleNoticeSpec = {
 
 const LIFECYCLE_NOTICE_SPECS: Readonly<Record<LifecycleNoticeKind, LifecycleNoticeSpec>> = {
   started: {
-    title: "✅ humming 已启动",
+    title: "✅ Humming 已启动",
     body: "Bridge 进程已启动，可以继续使用。",
     template: "green",
   },
   stopping: {
-    title: "⛔ humming 正在停止",
+    title: "⛔ Humming 正在停止",
     body: "Bridge 进程正在停止，期间 bot 暂时不会响应消息。",
     template: "grey",
   },
   restarting: {
-    title: "🔄 humming 正在重启",
+    title: "🔄 Humming 正在重启",
     body: "Bridge 进程正在重启，稍后会恢复响应。",
     template: "orange",
   },
   restarted: {
-    title: "✅ humming 已重启",
+    title: "✅ Humming 已重启",
     body: "Bridge 进程已重启完成，可以继续使用。",
     template: "green",
   },

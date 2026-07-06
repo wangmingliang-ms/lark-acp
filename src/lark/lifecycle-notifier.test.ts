@@ -28,10 +28,10 @@ function summary(card: object): string | undefined {
 
 describe("buildLifecycleNoticeCard", () => {
   it.each([
-    ["started", "✅ humming 已启动"],
-    ["stopping", "⛔ humming 正在停止"],
-    ["restarting", "🔄 humming 正在重启"],
-    ["restarted", "✅ humming 已重启"],
+    ["started", "✅ Humming 已启动"],
+    ["stopping", "⛔ Humming 正在停止"],
+    ["restarting", "🔄 Humming 正在重启"],
+    ["restarted", "✅ Humming 已重启"],
   ] satisfies readonly [LifecycleNoticeKind, string][])("renders %s", (kind, title) => {
     const card = buildLifecycleNoticeCard(kind, {
       pid: 123,
