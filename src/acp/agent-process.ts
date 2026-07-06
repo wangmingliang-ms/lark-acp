@@ -55,6 +55,27 @@ export interface AgentProcess {
   getRecentStderr: () => readonly string[];
 }
 
+export interface ListedAgentSession {
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly title?: string;
+  readonly updatedAt?: string;
+}
+
+export interface ListAgentSessionsOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  logger: LarkLogger;
+}
+
+export interface ListAgentSessionsResult {
+  readonly sessions: readonly ListedAgentSession[];
+  readonly supportsResume: boolean;
+  readonly supportsLoad: boolean;
+}
+
 export interface SpawnAgentOptions {
   command: string;
   args: string[];
@@ -62,6 +83,25 @@ export interface SpawnAgentOptions {
   env?: Record<string, string>;
   client: acp.Client;
   logger: LarkLogger;
+}
+
+class ListingClient implements acp.Client {
+  constructor(private readonly logger: LarkLogger) {}
+
+  async requestPermission(
+    params: acp.RequestPermissionRequest,
+  ): Promise<acp.RequestPermissionResponse> {
+    this.logger.warn(
+      { sessionId: params.sessionId, tool: params.toolCall?.title ?? "unknown" },
+      "permission requested while listing sessions — cancelling",
+    );
+    return { outcome: { outcome: "cancelled" } };
+  }
+
+  async sessionUpdate(_params: acp.SessionNotification): Promise<void> {
+    // Listing sessions should not produce user-renderable updates. Ignore any
+    // stray notifications from over-eager agents.
+  }
 }
 
 /**
@@ -170,6 +210,51 @@ export async function spawnAgent(opts: SpawnAgentOptions): Promise<AgentProcess>
     sessionCapabilities: capabilitiesFromSessionResponse(sessionResult),
     getRecentStderr,
   };
+}
+
+export async function listAgentSessions(
+  opts: ListAgentSessionsOptions,
+): Promise<ListAgentSessionsResult> {
+  const client = new ListingClient(opts.logger.child({ name: "session-list-client" }));
+  const { proc, connection, initResult } = await spawnAndInit({
+    command: opts.command,
+    args: opts.args,
+    cwd: opts.cwd ?? process.cwd(),
+    env: opts.env,
+    client,
+    logger: opts.logger,
+  });
+  try {
+    const caps = initResult.agentCapabilities;
+    if (!caps?.sessionCapabilities?.list) {
+      throw new Error("agent does not support ACP session/list");
+    }
+    const sessions: ListedAgentSession[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const response = await connection.listSessions({
+        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(cursor !== undefined && cursor !== null ? { cursor } : {}),
+      });
+      for (const s of response.sessions) {
+        sessions.push({
+          sessionId: s.sessionId,
+          cwd: s.cwd,
+          ...(s.title !== undefined && s.title !== null ? { title: s.title } : {}),
+          ...(s.updatedAt !== undefined && s.updatedAt !== null ? { updatedAt: s.updatedAt } : {}),
+        });
+      }
+      cursor = response.nextCursor;
+    } while (cursor !== undefined && cursor !== null && cursor.length > 0);
+
+    return {
+      sessions,
+      supportsResume: !!caps.sessionCapabilities?.resume,
+      supportsLoad: !!caps.loadSession,
+    };
+  } finally {
+    killAgent(proc);
+  }
 }
 
 /**

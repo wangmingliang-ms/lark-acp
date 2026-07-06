@@ -22,10 +22,14 @@ export interface SessionRecord {
    */
   threadId: string | null;
   sessionId: string;
+  /** Human-readable title reported by the ACP agent for this session, if known. */
   label?: string;
   title?: string;
+  /** Agent-reported ISO timestamp for the session's last activity, if known. */
+  sessionUpdatedAt?: string;
   agentCommand: string;
   agentArgs: string[];
+  agentEnv?: Readonly<Record<string, string>>;
   /** Human label for the resolved agent preset/raw command, if known. */
   agentLabel?: string;
   cwd: string;
@@ -113,6 +117,12 @@ export interface SessionStore {
 
   /** Upsert a record (key: `chatId` + `sessionId`). */
   save(record: SessionRecord): Promise<void>;
+
+  /**
+   * Replace the current session for one chat/thread with an existing ACP
+   * session selected from the agent's own session list.
+   */
+  bindThreadSession(record: SessionRecord): Promise<SessionRecord>;
 
   /** Merge control fields into one existing/current session record. */
   setControls(target: SessionControlTarget, controls: SessionControls): Promise<SessionRecord>;

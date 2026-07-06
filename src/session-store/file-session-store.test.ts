@@ -134,6 +134,36 @@ describe("FileSessionStore thread scoping", () => {
   });
 });
 
+describe("FileSessionStore session bind", () => {
+  it("bindThreadSession replaces the current thread and removes duplicate session ids", async () => {
+    await store.save(record({ chatId: "oc_A", threadId: "th_old", sessionId: "s_desktop" }));
+    await store.save(record({ chatId: "oc_A", threadId: "th_target", sessionId: "s_previous" }));
+
+    const bound = await store.bindThreadSession(
+      record({
+        chatId: "oc_A",
+        threadId: "th_target",
+        sessionId: "s_desktop",
+        title: "Desktop task",
+        sessionUpdatedAt: "2026-07-05T12:00:00Z",
+        agentLabel: "claude",
+        updatedAt: 300,
+      }),
+    );
+
+    expect(bound).toMatchObject({
+      threadId: "th_target",
+      sessionId: "s_desktop",
+      title: "Desktop task",
+      sessionUpdatedAt: "2026-07-05T12:00:00Z",
+    });
+    expect(await store.getLatest("oc_A", "th_target")).toMatchObject({ sessionId: "s_desktop" });
+    expect(await store.getLatest("oc_A", "th_old")).toBeNull();
+    const all = await store.listByChat("oc_A");
+    expect(all.map((r) => r.sessionId)).toEqual(["s_desktop"]);
+  });
+});
+
 describe("FileSessionStore session controls", () => {
   it("merges ACP-shaped controls into the latest thread session", async () => {
     await store.save(

@@ -41,6 +41,11 @@ describe("BridgeControlServer", () => {
           threadId,
           controls,
         }),
+        bindSession: async (record, noticeMessageId) => ({
+          bound: true,
+          record,
+          noticeMessageId,
+        }),
       },
     });
     await server.start();
@@ -72,6 +77,33 @@ describe("BridgeControlServer", () => {
         chatId: "oc_A",
         threadId: null,
         controls: { modeId: "agent" },
+      },
+    });
+
+    const bind = await sendControlRequest(socketPath, {
+      method: "bindSession",
+      params: {
+        record: {
+          chatId: "oc_A",
+          threadId: "th_1",
+          sessionId: "sess_desktop",
+          title: "Desktop task",
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/claude-code-acp"],
+          agentLabel: "claude",
+          cwd: "/repo",
+          createdAt: 1,
+          updatedAt: 2,
+        },
+        noticeMessageId: "om_notice",
+      },
+    });
+    expect(bind).toMatchObject({
+      ok: true,
+      result: {
+        bound: true,
+        noticeMessageId: "om_notice",
+        record: { sessionId: "sess_desktop", title: "Desktop task" },
       },
     });
   });

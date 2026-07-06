@@ -5,6 +5,7 @@
       "threadId": null,
       "sessionId": "sess_example",
       "title": "Example conversation",
+      "sessionUpdatedAt": "2026-07-05T12:00:00.000Z",
       "agentLabel": "claude",
       "agentCommand": "npx",
       "agentArgs": ["-y", "@zed-industries/claude-code-acp"],

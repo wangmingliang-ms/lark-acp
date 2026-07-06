@@ -5,6 +5,7 @@ import type { LarkLogger } from "../logger/logger.js";
 import type {
   SessionCapabilitiesSnapshot,
   SessionControls,
+  SessionRecord,
 } from "../session-store/session-store.js";
 
 export type ControlRequest =
@@ -21,6 +22,11 @@ export type ControlRequest =
         readonly threadId?: string | null;
         readonly controls: SessionControls;
       };
+    }
+  | {
+      readonly id?: string | number;
+      readonly method: "bindSession";
+      readonly params: { readonly record: SessionRecord; readonly noticeMessageId?: string | null };
     };
 
 export type ControlResponse =
@@ -30,6 +36,7 @@ export type ControlResponse =
 export interface BridgeControlHandlers {
   capabilities(chatId: string, threadId: string | null): Promise<SessionCapabilitiesSnapshot>;
   setControls(chatId: string, threadId: string | null, controls: SessionControls): Promise<unknown>;
+  bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
 }
 
 export interface BridgeControlServerOptions {
@@ -117,6 +124,15 @@ export class BridgeControlServer {
               parsed.params.controls,
             ),
           };
+        case "bindSession":
+          return {
+            ok: true,
+            id: parsed.id,
+            result: await this.handlers.bindSession(
+              parsed.params.record,
+              parsed.params.noticeMessageId ?? null,
+            ),
+          };
         default:
           return assertNever(parsed);
       }
@@ -162,7 +178,26 @@ function isControlRequest(value: unknown): value is ControlRequest {
     const params = value["params"];
     return isRecord(params) && typeof params["chatId"] === "string" && isRecord(params["controls"]);
   }
+  if (value["method"] === "bindSession") {
+    const params = value["params"];
+    return isRecord(params) && isSessionRecord(params["record"]);
+  }
   return false;
+}
+
+function isSessionRecord(value: unknown): value is SessionRecord {
+  return (
+    isRecord(value) &&
+    typeof value["chatId"] === "string" &&
+    (typeof value["threadId"] === "string" || value["threadId"] === null) &&
+    typeof value["sessionId"] === "string" &&
+    typeof value["agentCommand"] === "string" &&
+    Array.isArray(value["agentArgs"]) &&
+    value["agentArgs"].every((item) => typeof item === "string") &&
+    typeof value["cwd"] === "string" &&
+    typeof value["createdAt"] === "number" &&
+    typeof value["updatedAt"] === "number"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

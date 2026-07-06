@@ -2,7 +2,7 @@
 
 This file is installed by lark-acp so agents have durable operating instructions even before the bridge has handled its first message.
 
-When a user asks to change lark-acp settings, bind a chat to a repository, or change the current session's model/mode/config/permission controls, read this guide first and follow it exactly.
+When a user asks to change lark-acp settings, bind a chat to a repository, bind the current topic to an existing agent session, or change the current session's model/mode/config/permission controls, read this guide first and follow it exactly.
 
 ## Files
 
@@ -69,6 +69,37 @@ lark-acp sessions set-control --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_A
 All fields are optional; include only the controls the user asked to change. ACP select config requests use `{ "value": "<valueId>" }` with no `type` field.
 
 If set-control fails, lark-acp should surface a clear error notice to the user and keep the live runtime plus `sessions.json` unchanged. Ask the agent to query capabilities again and retry with valid ids/values.
+
+## Binding the current topic to an existing agent session
+
+When the user asks to continue a desktop Claude Code / Codex / other ACP session from the current Feishu topic, do **not** hand-edit `sessions.json`. Use the lark-acp CLI.
+
+Rules:
+
+- `sessions list` may use `--cwd` when the user explicitly asks to inspect another repo from a host/reception chat.
+- `sessions bind` intentionally does **not** accept `--cwd`. It can only bind the current topic to a session in the current chat's bound repo. It never changes chat binding and never binds a topic across repos.
+- Do not print full session IDs in a group chat. It is OK to use the full ID in local CLI commands.
+- If multiple sessions match the user's description, show a short candidate list with title / updated time / repo and ask the user to choose.
+
+List sessions for the current chat repo:
+
+```bash
+lark-acp sessions list --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --agent claude --json
+```
+
+List sessions for an explicitly requested repo (query only, not bind):
+
+```bash
+lark-acp sessions list --agent codex --cwd /absolute/path/to/repo --json
+```
+
+Bind the current topic to the selected session in the current chat repo:
+
+```bash
+lark-acp sessions bind --chat-id "$LARK_ACP_CHAT_ID" --thread-id "$LARK_ACP_THREAD_ID" --agent claude --session-id "<selected-session-id>"
+```
+
+On success lark-acp sends a notice card naming the bound session title. The next user message in this topic resumes that session.
 
 ## Permission terminology
 

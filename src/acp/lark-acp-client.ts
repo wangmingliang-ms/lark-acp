@@ -199,6 +199,10 @@ export interface LarkAcpClientOptions {
   permissionMode: PermissionMode;
   /** Lazily returns current agent/model/mode/permission metadata for card footer. */
   metaProvider?: () => SessionCardMeta;
+  /** Receives ACP session metadata updates so the runtime can persist them. */
+  onSessionInfoUpdate?: (
+    update: Extract<acp.SessionUpdate, { sessionUpdate: "session_info_update" }>,
+  ) => void;
 }
 
 /**
@@ -219,6 +223,9 @@ export class LarkAcpClient implements acp.Client {
   private readonly showCancelButton: boolean;
   private readonly permissionTimeoutMs: number;
   private readonly metaProvider?: () => SessionCardMeta;
+  private readonly onSessionInfoUpdate?: (
+    update: Extract<acp.SessionUpdate, { sessionUpdate: "session_info_update" }>,
+  ) => void;
   private permissionMode: PermissionMode;
   private timeline: TimelineEntry[] = [];
   private status: AgentStatus = "thinking";
@@ -245,6 +252,7 @@ export class LarkAcpClient implements acp.Client {
     this.showCancelButton = opts.showCancelButton;
     this.permissionTimeoutMs = opts.permissionTimeoutMs;
     this.metaProvider = opts.metaProvider;
+    this.onSessionInfoUpdate = opts.onSessionInfoUpdate;
     this.permissionMode = opts.permissionMode;
   }
 
@@ -492,11 +500,16 @@ export class LarkAcpClient implements acp.Client {
         return;
       }
 
+      // Session metadata updates are persisted by ChatRuntime. They are not
+      // user-renderable timeline content.
+      case "session_info_update":
+        this.onSessionInfoUpdate?.(u);
+        return;
+
       // Session-control updates are consumed by ChatRuntime's capability
       // tracker. They are not user-renderable timeline content.
       case "current_mode_update":
       case "config_option_update":
-      case "session_info_update":
       case "usage_update":
       case "available_commands_update":
       case "plan":

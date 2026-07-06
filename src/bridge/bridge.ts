@@ -22,6 +22,7 @@ import type { NoticeCardSpec } from "../presenter/presenter.js";
 import type {
   SessionCapabilitiesSnapshot,
   SessionControls,
+  SessionRecord,
   SessionStore,
 } from "../session-store/session-store.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
@@ -486,6 +487,7 @@ export class LarkBridge {
         capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
         setControls: (chatId, threadId, controls) =>
           this.controlSetControls(chatId, threadId, controls),
+        bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
       },
     });
     await this.controlServer.start();
@@ -513,6 +515,30 @@ export class LarkBridge {
 
     const record = await this.sessionStore.setControls({ chatId, threadId }, controls);
     return { applied: false, recordSessionId: record.sessionId };
+  }
+
+  private async controlBindSession(
+    record: SessionRecord,
+    noticeMessageId?: string | null,
+  ): Promise<{ readonly bound: true; readonly sessionId: string; readonly title?: string }> {
+    const key = runtimeKey(record.chatId, record.threadId);
+    const runtime = this.chats.get(key);
+    const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
+    const saved = await this.sessionStore.bindThreadSession(record);
+    if (runtime) {
+      runtime.supersede();
+      this.chats.delete(key);
+    }
+    if (replyTo) {
+      await this.presenter
+        .replyNoticeCard(replyTo, buildSessionBoundNotice(saved))
+        .catch((err) => this.logger.warn({ err }, "session bind notice failed"));
+    }
+    return {
+      bound: true,
+      sessionId: saved.sessionId,
+      ...(saved.title !== undefined ? { title: saved.title } : {}),
+    };
   }
 
   // ----- WS event handlers ------------------------------------------------
@@ -788,7 +814,7 @@ export class LarkBridge {
 
     prompt.unshift({ type: "text", text: context });
 
-    const runtime = this.acquireRuntime(chatId, threadId, binding);
+    const runtime = await this.acquireRuntime(chatId, threadId, binding);
     const pending: PendingMessage = { prompt, messageId, chatId };
     try {
       await runtime.enqueue(pending);
@@ -850,36 +876,49 @@ export class LarkBridge {
     return null;
   }
 
-  private acquireRuntime(
+  private async acquireRuntime(
     chatId: string,
     threadId: string | null,
     binding: EffectiveBinding,
-  ): ChatRuntime {
+  ): Promise<ChatRuntime> {
     const key = runtimeKey(chatId, threadId);
     const existing = this.chats.get(key);
     if (existing) return existing;
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
 
+    const pinned = await this.sessionStore.getLatest(chatId, threadId);
+    const effective: EffectiveBinding = pinned
+      ? {
+          cwd: pinned.cwd,
+          command: pinned.agentCommand,
+          args: pinned.agentArgs,
+          ...(pinned.agentEnv ? { env: pinned.agentEnv } : {}),
+          label: pinned.agentLabel ?? pinned.agentCommand,
+          explicit: binding.explicit,
+          reception: false,
+        }
+      : binding;
+
     // Inject the chat id + settings path so the agent can bind this chat by
     // editing settings.json. In the reception area also drop instruction files
     // that explain how (the agent reads AGENTS.md / CLAUDE.md on start).
-    const injectedEnv = this.buildAgentEnv(chatId, threadId, binding);
-    if (binding.reception) this.writeBindInstructions(binding.cwd, chatId);
+    const injectedEnv = this.buildAgentEnv(chatId, threadId, effective);
+    if (effective.reception) this.writeBindInstructions(effective.cwd, chatId);
 
     const runtime = new ChatRuntime({
       chatId,
       threadId,
-      agentCommand: binding.command,
-      agentArgs: [...binding.args],
-      agentCwd: binding.cwd,
+      agentCommand: effective.command,
+      agentArgs: [...effective.args],
+      agentCwd: effective.cwd,
       ...(injectedEnv ? { agentEnv: injectedEnv } : {}),
       showThoughts: this.display.showThoughts,
       showTools: this.display.showTools,
       showCancelButton: this.display.showCancelButton,
       permissionTimeoutMs: this.display.permissionTimeoutMs,
       permissionMode: this.display.permissionMode,
-      agentLabel: binding.label,
+      agentLabel: effective.label,
       presenter: this.presenter,
       sessionStore: this.sessionStore,
       logger: this.logger,
@@ -1192,7 +1231,24 @@ export class LarkBridge {
 }
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[lark-acp: 若用户要求绑定/改绑仓库或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.lark-acp/AGENTS.md（或 CLAUDE.md）中的 lark-acp 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
+  return `[lark-acp: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.lark-acp/AGENTS.md（或 CLAUDE.md）中的 lark-acp 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
+}
+
+function buildSessionBoundNotice(record: SessionRecord): NoticeCardSpec {
+  const title = record.title ?? "Untitled session";
+  const lines = [
+    `已将当前 topic 绑定到已有 session。`,
+    "",
+    `• Title: ${title}`,
+    `• Agent: ${record.agentLabel ?? record.agentCommand}`,
+    `• Repo: ${record.cwd}`,
+  ];
+  if (record.sessionUpdatedAt) lines.push(`• Session updated: ${record.sessionUpdatedAt}`);
+  return {
+    title: "✅ 已绑定 session",
+    body: lines.join("\n"),
+    template: "green",
+  };
 }
 
 /**

@@ -51,6 +51,8 @@ interface ChatRuntimeState {
   client: LarkAcpClient;
   agent: AgentProcess;
   sessionCapabilities: SessionCapabilitiesSnapshot;
+  sessionTitle?: string;
+  sessionUpdatedAt?: string;
   queue: PendingMessage[];
   processing: boolean;
   lastActivity: number;
@@ -73,6 +75,8 @@ export class ChatRuntime {
   private aborted = false;
   /** True after the user pressed Stop or sent /cancel for the in-flight prompt. */
   private cancelRequested = false;
+  /** Suppress the prompt-error notice when this runtime is intentionally replaced. */
+  private suppressPromptErrorNotice = false;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
   private promptInFlight = false;
   /**
@@ -109,6 +113,10 @@ export class ChatRuntime {
     // Fall back to construction time (not 0) so a freshly-created or still-
     // booting runtime looks recently active, never "idle since the epoch".
     return this.state?.lastActivity ?? this.createdAt;
+  }
+
+  get lastMessageId(): string | null {
+    return this.state?.lastMessageId ?? null;
   }
 
   /**
@@ -168,6 +176,18 @@ export class ChatRuntime {
     killAgent(this.state.agent.process);
     this.state = null;
     this.aborted = true;
+  }
+
+  /**
+   * Replace this runtime with an externally-bound session. The old in-flight
+   * prompt is killed and finalised, but no crash notice is emitted — the user
+   * gets the explicit "session bound" notice from the bridge instead.
+   */
+  supersede(): void {
+    if (!this.state) return;
+    this.suppressPromptErrorNotice = true;
+    this.cancelRequested = true;
+    this.shutdown();
   }
 
   /** Forward a card-action event to the underlying ACP client. */
@@ -233,6 +253,17 @@ export class ChatRuntime {
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
       permissionMode: latest?.controls?.bridgePermissionMode ?? this.opts.permissionMode,
       metaProvider,
+      onSessionInfoUpdate: (update) => {
+        if (stateRef === null) return;
+        if (update.title !== undefined) {
+          if (update.title === null) delete stateRef.sessionTitle;
+          else stateRef.sessionTitle = update.title;
+        }
+        if (update.updatedAt !== undefined) {
+          if (update.updatedAt === null) delete stateRef.sessionUpdatedAt;
+          else stateRef.sessionUpdatedAt = update.updatedAt;
+        }
+      },
     });
     currentClient = client;
 
@@ -260,6 +291,10 @@ export class ChatRuntime {
       client,
       agent,
       sessionCapabilities: this.buildCapabilitiesSnapshot(agent, client),
+      ...(latest?.title !== undefined ? { sessionTitle: latest.title } : {}),
+      ...(latest?.sessionUpdatedAt !== undefined
+        ? { sessionUpdatedAt: latest.sessionUpdatedAt }
+        : {}),
       queue: [],
       processing: false,
       lastActivity: Date.now(),
@@ -584,10 +619,12 @@ export class ChatRuntime {
     const disconnected = err instanceof AgentDisconnectedError;
     const procDead = state.agent.process.killed || state.agent.process.exitCode !== null;
     const cancelRequested = this.cancelRequested;
+    const suppressNotice = this.suppressPromptErrorNotice;
     const exitCode = state.agent.process.exitCode;
     const signal = state.agent.process.signalCode;
     const stderrTail = procDead ? state.agent.getRecentStderr() : [];
-    const terminalStatus: AgentStatus = cancelRequested && !isAuthError ? "cancelled" : "failed";
+    const terminalStatus: AgentStatus =
+      (cancelRequested || suppressNotice) && !isAuthError ? "cancelled" : "failed";
 
     // Always finalize the unified card so the in-progress state doesn't get
     // stuck. Best-effort — if presenter rejects we still surface the error via
@@ -595,6 +632,11 @@ export class ChatRuntime {
     await state.client
       .finalize(terminalStatus)
       .catch((finalErr) => this.logger.debug({ err: finalErr }, "finalize after error rejected"));
+
+    if (suppressNotice) {
+      this.suppressPromptErrorNotice = false;
+      return;
+    }
 
     // A closed connection means the agent is gone even if the OS hasn't
     // surfaced an exit code yet — tear it down so the next message respawns.
@@ -642,10 +684,15 @@ export class ChatRuntime {
     try {
       const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
       const previous = latest?.sessionId === sessionId ? latest : null;
+      const liveState = this.state?.agent.sessionId === sessionId ? this.state : null;
+      const title = liveState?.sessionTitle ?? previous?.title;
+      const sessionUpdatedAt = liveState?.sessionUpdatedAt ?? previous?.sessionUpdatedAt;
       await this.opts.sessionStore.save({
         chatId: this.opts.chatId,
         threadId: this.opts.threadId,
         sessionId,
+        ...(title !== undefined ? { title } : {}),
+        ...(sessionUpdatedAt !== undefined ? { sessionUpdatedAt } : {}),
         ...(this.opts.agentLabel !== undefined ? { agentLabel: this.opts.agentLabel } : {}),
         agentCommand: this.opts.agentCommand,
         agentArgs: this.opts.agentArgs,

@@ -112,6 +112,62 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(args.targetThreadId).toBeNull();
     expect(args.controlJson).toBe(json);
   });
+
+  it("parses session list with optional cwd and agent", () => {
+    const args = parseArgs([
+      "sessions",
+      "list",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--agent",
+      "claude",
+      "--cwd",
+      "/repo",
+      "--json",
+    ]);
+    expect(args.command).toBe("sessions");
+    expect(args.sessionsAction).toBe("list");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBe("th_1");
+    expect(args.targetAgent).toBe("claude");
+    expect(args.targetCwd).toBe("/repo");
+    expect(args.controlJson).toBe(true);
+  });
+
+  it("parses session bind and rejects cwd", () => {
+    const args = parseArgs([
+      "sessions",
+      "bind",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--agent",
+      "codex",
+      "--session-id",
+      "sess_1",
+    ]);
+    expect(args.sessionsAction).toBe("bind");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBe("th_1");
+    expect(args.targetAgent).toBe("codex");
+    expect(args.targetSessionId).toBe("sess_1");
+
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "bind",
+        "--chat-id",
+        "oc_A",
+        "--session-id",
+        "sess_1",
+        "--cwd",
+        "/repo",
+      ]),
+    ).toThrowError(/does not accept --cwd/);
+  });
 });
 
 describe("parseControlJson", () => {

@@ -43,6 +43,8 @@ const MOCK_THOUGHT = [
 
 const MOCK_FILE_PATH = "/mock/project/README.md";
 const MOCK_CONFIG_PATH = "/mock/project/config.json";
+const MOCK_LIST_SESSION_ID = "mock_existing_session";
+const MOCK_LIST_SESSION_TITLE = "Mock existing desktop task";
 
 const MOCK_MARKDOWN_INTRO = "好的，下面是一段固定的 mock 答复：\n\n";
 
@@ -102,6 +104,10 @@ class MockAgent implements acp.Agent {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: false,
+        sessionCapabilities: {
+          list: {},
+          resume: {},
+        },
         promptCapabilities: {
           image: false,
           audio: false,
@@ -115,6 +121,27 @@ class MockAgent implements acp.Agent {
     const sessionId = randomSessionId();
     this.sessions.set(sessionId, { pendingPrompt: null });
     return { sessionId };
+  }
+
+  async listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
+    const cwd = params.cwd ?? process.cwd();
+    return {
+      sessions: [
+        {
+          sessionId: MOCK_LIST_SESSION_ID,
+          title: MOCK_LIST_SESSION_TITLE,
+          cwd,
+          updatedAt: "2026-07-05T12:00:00.000Z",
+        },
+      ],
+    };
+  }
+
+  async unstable_resumeSession(
+    params: acp.ResumeSessionRequest,
+  ): Promise<acp.ResumeSessionResponse> {
+    this.sessions.set(params.sessionId, { pendingPrompt: null });
+    return {};
   }
 
   async authenticate(_params: acp.AuthenticateRequest): Promise<acp.AuthenticateResponse> {

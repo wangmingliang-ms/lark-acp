@@ -83,8 +83,10 @@ lark-acp [global-options] init                       # 初始化 ~/.lark-acp 模
 lark-acp [global-options] start [--agent <preset>]   # 后台运行 proxy
 lark-acp [global-options] stop | restart | status
 lark-acp logs [-f] [-n <lines>]
-lark-acp control capabilities --chat-id <id> [--thread-id <id>] [--json]
-lark-acp sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'
+lark-acp [global-options] control capabilities --chat-id <id> [--thread-id <id>] [--json]
+lark-acp [global-options] sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]
+lark-acp [global-options] sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>
+lark-acp [global-options] sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'
 lark-acp agents
 lark-acp help
 lark-acp version
@@ -191,6 +193,36 @@ lark-acp stop                    # 停止后台 bridge
 ### Session controls / live capabilities
 
 运行中的 bridge 会在 home 目录下打开本地 control socket（默认 `~/.lark-acp/control.sock`），供本机 CLI 查询当前 ACP session 的 live capabilities，并受控写入 `sessions.json`。
+
+#### 绑定 topic 到已有 agent session
+
+`lark-acp sessions list` 用于列出 agent 已有 sessions。默认 cwd 解析顺序是 `--cwd` → 当前 chat binding → `runtime.cwd`；因此在普通项目 chat 里不用指定 cwd，在 host/reception chat 里也可以显式查询某个 repo：
+
+```bash
+# 当前 chat 绑定 repo 内的 Claude sessions
+lark-acp sessions list \
+  --chat-id "$LARK_ACP_CHAT_ID" \
+  --thread-id "$LARK_ACP_THREAD_ID" \
+  --agent claude \
+  --json
+
+# 只查询某个 repo，不绑定
+lark-acp sessions list --agent codex --cwd /absolute/path/to/repo --json
+```
+
+`lark-acp sessions bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title 的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
+
+```bash
+lark-acp sessions bind \
+  --chat-id "$LARK_ACP_CHAT_ID" \
+  --thread-id "$LARK_ACP_THREAD_ID" \
+  --agent claude \
+  --session-id "<sessions.list[].sessionId>"
+```
+
+`sessions.json` 里的记录会保留 `title`、`sessionUpdatedAt`、`createdAt`、`updatedAt` 等 metadata，方便人工检查。
+
+#### Live capabilities / controls
 
 查询当前会话可用的 ACP 原生能力：
 

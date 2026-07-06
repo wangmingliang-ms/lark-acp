@@ -5,7 +5,7 @@ import { LarkAcpClient } from "../acp/lark-acp-client.js";
 import type { ChatRuntimeOptions } from "./chat-runtime.js";
 import { createPinoLogger } from "../logger/logger.js";
 import type { LarkPresenter, UnifiedCardState } from "../presenter/presenter.js";
-import type { SessionStore } from "../session-store/session-store.js";
+import type { SessionRecord, SessionStore } from "../session-store/session-store.js";
 import type { AgentProcess } from "../acp/agent-process.js";
 
 // The agent subprocess is the correct mock boundary: we replace `spawnAgent`
@@ -122,6 +122,9 @@ function stubSessionStore(): SessionStore {
     listByThread: async () => [],
     getLatest: async () => null,
     save: async () => {},
+    async bindThreadSession(record: SessionRecord): Promise<SessionRecord> {
+      return record;
+    },
     setControls: async () => {
       throw new Error("setControls not implemented in stub");
     },

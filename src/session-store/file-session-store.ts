@@ -115,6 +115,22 @@ export class FileSessionStore implements SessionStore {
     this.scheduleFlush();
   }
 
+  async bindThreadSession(record: SessionRecord): Promise<SessionRecord> {
+    let records = this.data.get(record.chatId);
+    if (!records) {
+      records = [];
+      this.data.set(record.chatId, records);
+    }
+    const replacement = { ...record };
+    const withoutThreadOrSession = records.filter(
+      (r) => r.threadId !== record.threadId && r.sessionId !== record.sessionId,
+    );
+    withoutThreadOrSession.push(replacement);
+    this.data.set(record.chatId, withoutThreadOrSession);
+    this.scheduleFlush();
+    return replacement;
+  }
+
   async setControls(
     target: SessionControlTarget,
     controls: SessionControls,
