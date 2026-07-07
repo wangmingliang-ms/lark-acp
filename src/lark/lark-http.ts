@@ -170,6 +170,22 @@ export class LarkHttpClient {
     return res.data?.message_id ?? null;
   }
 
+  /** Send a fresh interactive card to a user by open_id, returning the P2P chat id when Lark surfaces it. */
+  async sendCardToOpenId(
+    openId: string,
+    card: object,
+  ): Promise<{ readonly messageId: string | null; readonly chatId: string | null }> {
+    const res = await this.client.im.message.create({
+      params: { receive_id_type: "open_id" },
+      data: {
+        receive_id: openId,
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+      },
+    });
+    return { messageId: res.data?.message_id ?? null, chatId: res.data?.chat_id ?? null };
+  }
+
   /** PATCH an existing interactive message with a new card payload. */
   async patchCard(messageId: string, card: object): Promise<void> {
     await this.client.im.v1.message.patch({

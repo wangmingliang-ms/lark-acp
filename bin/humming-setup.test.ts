@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  enrollSetupLifecycleNotification,
   formatSetupProgress,
   formatSetupSummary,
   maskCredentialId,
@@ -72,6 +73,39 @@ describe("setup credential persistence", () => {
     expect(summary).toContain("Humming Bot");
     expect(summary).not.toContain("super-secret-value");
     expect(summary).not.toContain("cli_abcdef123456");
+  });
+
+  it("enrolls the setup owner's P2P chat for lifecycle notifications", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-lifecycle-"));
+    const settings = path.join(dir, "settings.json");
+    fs.writeFileSync(
+      settings,
+      JSON.stringify({ runtime: { agent: "claude", lifecycleNotifyChatIds: ["oc_existing"] } }),
+      "utf-8",
+    );
+
+    const result = await enrollSetupLifecycleNotification(
+      settings,
+      {
+        appId: "cli_created",
+        appSecret: "created-secret",
+        domain: "feishu",
+        ownerOpenId: "ou_owner",
+      },
+      async (setup) => {
+        expect(setup.ownerOpenId).toBe("ou_owner");
+        return "oc_owner_p2p";
+      },
+    );
+
+    const parsed = JSON.parse(fs.readFileSync(settings, "utf-8")) as {
+      runtime?: { lifecycleNotifyChatIds?: readonly string[]; agent?: string };
+    };
+    expect(result).toEqual({ enrolled: true, chatId: "oc_owner_p2p" });
+    expect(parsed.runtime?.agent).toBe("claude");
+    expect(parsed.runtime?.lifecycleNotifyChatIds).toEqual(["oc_existing", "oc_owner_p2p"]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("highlights the Feishu setup link and describes the guided flow", () => {

@@ -1299,6 +1299,29 @@ type SetupSummary = SetupCredentials & {
   readonly botName?: string;
 };
 
+type SetupLifecycleRegistration = SetupCredentials & {
+  readonly domain: FeishuRegistrationDomain;
+  readonly ownerOpenId?: string;
+  readonly botName?: string;
+};
+
+type SetupLifecycleNotificationRequest = SetupCredentials & {
+  readonly domain: FeishuRegistrationDomain;
+  readonly ownerOpenId: string;
+  readonly botName?: string;
+};
+
+type SetupLifecycleNotificationSender = (
+  setup: SetupLifecycleNotificationRequest,
+) => Promise<string | null>;
+
+type SetupLifecycleEnrollmentResult =
+  | { readonly enrolled: true; readonly chatId: string }
+  | {
+      readonly enrolled: false;
+      readonly reason: "missing-owner-open-id" | "no-chat-id" | "failed";
+    };
+
 const SETTINGS_FILE_MODE = 0o600;
 
 function maskCredentialId(value: string): string {
@@ -1336,6 +1359,98 @@ function writeSetupCredentials(settingsPath: string, credentials: SetupCredentia
     },
   };
   atomicWritePrivateJson(settingsPath, next);
+}
+
+function appendLifecycleNotifyChatId(settingsPath: string, chatId: string): void {
+  const existing = readSettingsObjectForWrite(settingsPath);
+  const runtime = readRuntimeObjectForWrite(existing);
+  const current = readStringArrayForWrite(runtime["lifecycleNotifyChatIds"]);
+  const nextRuntime = {
+    ...runtime,
+    lifecycleNotifyChatIds: current.includes(chatId) ? current : [...current, chatId],
+  };
+  atomicWritePrivateJson(settingsPath, { ...existing, runtime: nextRuntime });
+}
+
+async function enrollSetupLifecycleNotification(
+  settingsPath: string,
+  setup: SetupLifecycleRegistration,
+  sendNotification: SetupLifecycleNotificationSender = sendSetupLifecycleNotification,
+): Promise<SetupLifecycleEnrollmentResult> {
+  const ownerOpenId = setup.ownerOpenId;
+  if (ownerOpenId === undefined) return { enrolled: false, reason: "missing-owner-open-id" };
+  try {
+    const chatId = await sendNotification({
+      appId: setup.appId,
+      appSecret: setup.appSecret,
+      domain: setup.domain,
+      ownerOpenId,
+      ...(setup.botName !== undefined ? { botName: setup.botName } : {}),
+    });
+    if (chatId === null || chatId.length === 0) return { enrolled: false, reason: "no-chat-id" };
+    appendLifecycleNotifyChatId(settingsPath, chatId);
+    return { enrolled: true, chatId };
+  } catch {
+    return { enrolled: false, reason: "failed" };
+  }
+}
+
+async function sendSetupLifecycleNotification(
+  setup: SetupLifecycleNotificationRequest,
+): Promise<string | null> {
+  const http = new LarkHttpClient({
+    appId: setup.appId,
+    appSecret: setup.appSecret,
+    logger: SILENT_LOGGER,
+  });
+  const result = await http.sendCardToOpenId(
+    setup.ownerOpenId,
+    buildSetupLifecycleEnrollmentCard(setup),
+  );
+  return result.chatId;
+}
+
+function buildSetupLifecycleEnrollmentCard(setup: SetupLifecycleNotificationRequest): object {
+  const title = "✅ Humming 已配置";
+  const botLine = setup.botName !== undefined ? `\n• Bot：${setup.botName}` : "";
+  return {
+    schema: "2.0",
+    config: { width_mode: "fill", update_multi: true, summary: { content: title } },
+    header: {
+      title: { tag: "plain_text" as const, content: title },
+      template: "green" as const,
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown" as const,
+          content: `这台机器已完成 Humming 配置。后续 start / stop / restart / crash 生命周期通知会发送到这个单聊。${botLine}`,
+        },
+      ],
+    },
+  };
+}
+
+function readRuntimeObjectForWrite(settings: Record<string, unknown>): Record<string, unknown> {
+  const runtime = settings["runtime"];
+  if (runtime === undefined) return {};
+  if (!isRecord(runtime)) throw new CliError("settings file runtime must be a JSON object");
+  return runtime;
+}
+
+function readStringArrayForWrite(value: unknown): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new CliError("settings file runtime.lifecycleNotifyChatIds must be an array");
+  }
+  const out: string[] = [];
+  value.forEach((item, index) => {
+    if (typeof item !== "string") {
+      throw new CliError(`settings file runtime.lifecycleNotifyChatIds[${index}] must be a string`);
+    }
+    if (item.length > 0 && !out.includes(item)) out.push(item);
+  });
+  return out;
 }
 
 function readSettingsObjectForWrite(settingsPath: string): Record<string, unknown> {
@@ -2352,6 +2467,14 @@ async function runSetup(args: ParsedArgs): Promise<void> {
   }
 
   writeSetupCredentials(configPath, { appId: result.appId, appSecret: result.appSecret });
+  const lifecycleEnrollment = await enrollSetupLifecycleNotification(configPath, {
+    appId: result.appId,
+    appSecret: result.appSecret,
+    domain: result.domain,
+    ...(result.ownerOpenId !== undefined ? { ownerOpenId: result.ownerOpenId } : {}),
+    ...(result.botName !== undefined ? { botName: result.botName } : {}),
+  });
+  process.stdout.write(formatSetupLifecycleEnrollment(lifecycleEnrollment));
   process.stdout.write(
     formatSetupSummary({
       settingsPath: configPath,
@@ -2365,6 +2488,13 @@ async function runSetup(args: ParsedArgs): Promise<void> {
 
 function printSetupProgress(event: FeishuLinkRegistrationProgress): void {
   process.stdout.write(formatSetupProgress(event));
+}
+
+function formatSetupLifecycleEnrollment(result: SetupLifecycleEnrollmentResult): string {
+  if (result.enrolled) {
+    return `Lifecycle notifications enrolled for setup P2P chat.\n\n`;
+  }
+  return `Lifecycle notification auto-enrollment skipped (${result.reason}). You can set runtime.lifecycleNotifyChatIds manually later.\n\n`;
 }
 
 function formatSetupProgress(event: FeishuLinkRegistrationProgress): string {
@@ -2620,7 +2750,9 @@ export {
   runInit,
   runSetup,
   writeSetupCredentials,
+  enrollSetupLifecycleNotification,
   formatSetupProgress,
+  formatSetupLifecycleEnrollment,
   formatSetupSummary,
   maskCredentialId,
   resolveUpdateRef,
