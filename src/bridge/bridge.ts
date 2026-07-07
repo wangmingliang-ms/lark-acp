@@ -821,6 +821,9 @@ export class LarkBridge {
       case "help":
         await this.presenter.replyNoticeCard(messageId, buildHelpNotice());
         return;
+      case "capabilities":
+        await this.handleCapabilitiesCommand(command.agent, chatId, threadId, messageId);
+        return;
       case "bind":
         await this.handleBind(command.cwd, command.agent, chatId, messageId);
         return;
@@ -993,6 +996,84 @@ export class LarkBridge {
     const snapshot = await this.resolveSessionCapabilitiesForListing(chatId, threadId, messageId);
     if (!snapshot) return;
     await this.presenter.replyNoticeCard(messageId, buildModeListNotice(snapshot));
+  }
+
+  private async handleCapabilitiesCommand(
+    agent: string | null,
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    const snapshot = agent
+      ? await this.probeCapabilitiesForAgent(agent, chatId, threadId, messageId)
+      : await this.resolveSessionCapabilitiesForListing(chatId, threadId, messageId);
+    if (!snapshot) return;
+    await this.presenter.replyNoticeCard(messageId, buildCapabilitiesNotice(snapshot, agent));
+  }
+
+  private async probeCapabilitiesForAgent(
+    selection: string,
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<SessionCapabilitiesSnapshot | null> {
+    const binding = await this.resolveBinding(chatId);
+    if (!binding) {
+      await this.presenter.replyNoticeCard(
+        messageId,
+        buildProfileCommandFailureNotice(
+          "⚠️ 无法查询 capabilities",
+          "当前 chat 没有可用 repo。请先 /bind <路径>，或配置默认 / reception cwd。",
+        ),
+      );
+      return null;
+    }
+
+    let target: ResolvedAgentInvocation;
+    try {
+      target = this.resolver(selection);
+    } catch (err) {
+      await this.presenter.replyNoticeCard(
+        messageId,
+        buildProfileCommandFailureNotice(
+          "⚠️ 无法查询 capabilities",
+          `无法解析目标 Agent：${formatBootstrapError(err)}`,
+        ),
+      );
+      return null;
+    }
+
+    const targetBinding: EffectiveBinding = {
+      ...binding,
+      command: target.command,
+      args: target.args,
+      ...(target.env ? { env: target.env } : {}),
+      label: target.label,
+    };
+    try {
+      const result = await probeAgentSessionCapabilities({
+        command: target.command,
+        args: [...target.args],
+        cwd: binding.cwd,
+        ...(target.env ? { env: { ...target.env } } : {}),
+        logger: this.logger,
+      });
+      return buildProbeCapabilitiesSnapshot(chatId, threadId, targetBinding, result);
+    } catch (err) {
+      await this.controlAgentProbeFailed(
+        chatId,
+        threadId,
+        {
+          label: target.label,
+          command: target.command,
+          args: [...target.args],
+          cwd: binding.cwd,
+        },
+        formatBootstrapError(err),
+        messageId,
+      );
+      return null;
+    }
   }
 
   private async resolveSessionCapabilitiesForListing(
@@ -2094,7 +2175,10 @@ function buildHelpNotice(): NoticeCardSpec {
   return {
     title: "ℹ️ Humming commands",
     body: [
-      "**Session profile**",
+      "**Discovery**",
+      "• /help 或 /commands — 列出所有 Humming slash commands",
+      "• /capabilities — 列出当前有效 Agent 支持的 model / mode / config / permission controls",
+      "• /capabilities <agent> — probe 指定 Agent 的 capabilities，只查询不切换",
       "• /agent — 列出可用 Agent",
       "• /agent <agent> — 切换当前 topic 的 Agent；会先 probe，失败不改状态",
       "• /model — 列出当前 Agent 可用 Models",
@@ -2204,6 +2288,94 @@ function buildPermissionListNotice(current: PermissionMode): NoticeCardSpec {
     ].join("\n"),
     template: "blue",
   };
+}
+
+function buildCapabilitiesNotice(
+  snapshot: SessionCapabilitiesSnapshot,
+  requestedAgent: string | null,
+): NoticeCardSpec {
+  const modelLines = formatModelCapabilityLines(snapshot);
+  const modeLines = formatModeCapabilityLines(snapshot);
+  const configLines = formatConfigCapabilityLines(snapshot);
+  const permissionLines = snapshot.bridgePermissionModes.map(
+    (mode) =>
+      `• ${mode}${mode === snapshot.bridgePermissionMode ? "（当前）" : ""} — ${displayControlPermission({ bridgePermissionMode: mode })}`,
+  );
+  const source = requestedAgent ? `probe: /capabilities ${requestedAgent}` : "当前有效 Agent";
+  return {
+    title: "🧩 Agent capabilities",
+    body: [
+      `查询范围：${source}`,
+      `Agent：${displaySnapshotAgent(snapshot)}`,
+      `Repo：${snapshot.agent.cwd}`,
+      "",
+      "**Models**",
+      ...modelLines,
+      "",
+      "**Modes**",
+      ...modeLines,
+      "",
+      "**Config options**",
+      ...configLines,
+      "",
+      "**Permission modes**",
+      ...permissionLines,
+      "",
+      "设置方式：/model <model-id|auto>、/mode <mode-id>、/permission <mode>。Config controls 暂时通过 `humming sessions set-control` 设置。",
+    ].join("\n"),
+    template: "blue",
+  };
+}
+
+function formatModelCapabilityLines(snapshot: SessionCapabilitiesSnapshot): string[] {
+  const models = snapshot.models?.availableModels ?? [];
+  if (models.length === 0) return ["• 当前 Agent 没有暴露 ACP model controls。"];
+  return models.map(
+    (model) =>
+      `• ${model.modelId} — ${model.name}${model.description ? `：${model.description}` : ""}${model.modelId === snapshot.models?.currentModelId ? "（当前）" : ""}`,
+  );
+}
+
+function formatModeCapabilityLines(snapshot: SessionCapabilitiesSnapshot): string[] {
+  const modes = snapshot.modes?.availableModes ?? [];
+  if (modes.length === 0) return ["• 当前 Agent 没有暴露 ACP mode controls。"];
+  return modes.map(
+    (mode) =>
+      `• ${mode.id} — ${mode.name}${mode.description ? `：${mode.description}` : ""}${mode.id === snapshot.modes?.currentModeId ? "（当前）" : ""}`,
+  );
+}
+
+function formatConfigCapabilityLines(snapshot: SessionCapabilitiesSnapshot): string[] {
+  const options = snapshot.configOptions ?? [];
+  if (options.length === 0) return ["• 当前 Agent 没有暴露 ACP config controls。"];
+  return options.map((option) => {
+    const category = option.category ? ` [${option.category}]` : "";
+    const description = option.description ? `：${option.description}` : "";
+    return `• ${option.id}${category} — ${option.name} (${formatConfigOptionState(option)})${description}`;
+  });
+}
+
+function formatConfigOptionState(
+  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+): string {
+  if (option.type === "boolean") return `boolean, 当前 ${option.currentValue ? "on" : "off"}`;
+  return `select, 当前 ${option.currentValue}; 可选 ${formatSelectConfigValues(option.options)}`;
+}
+
+function formatSelectConfigValues(
+  options: Extract<
+    NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+    { readonly type: "select" }
+  >["options"],
+): string {
+  return options
+    .flatMap((option) => {
+      if ("options" in option) {
+        return option.options.map((child) => `${child.value}=${child.name}`);
+      }
+      return `${option.value}=${option.name}`;
+    })
+    .join(", ");
 }
 
 function buildProbeCapabilitiesSnapshot(

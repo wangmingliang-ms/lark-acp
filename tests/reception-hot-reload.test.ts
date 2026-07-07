@@ -205,6 +205,19 @@ beforeEach(async () => {
           { id: "agent", name: "Agent", description: "Autonomous mode" },
         ],
       },
+      configOptions: [
+        { id: "autoSave", name: "Auto Save", type: "boolean", currentValue: true },
+        {
+          id: "effort",
+          name: "Effort",
+          type: "select",
+          currentValue: "high",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "high", name: "High" },
+          ],
+        },
+      ],
     },
   });
   bindingStore = new SettingsBindingStore(settingsPath);
@@ -442,6 +455,8 @@ describe("compact slash session profile commands", () => {
 
     const notice = presenter.notices.at(-1);
     expect(notice).toMatchObject({ title: "ℹ️ Humming commands", template: "blue" });
+    expect(notice?.body).toContain("/capabilities");
+    expect(notice?.body).toContain("/capabilities <agent>");
     expect(notice?.body).toContain("/agent <agent>");
     expect(notice?.body).toContain("/model auto");
     expect(notice?.body).toContain("/mode <mode-id>");
@@ -530,6 +545,73 @@ describe("compact slash session profile commands", () => {
     expect(notice?.body).toContain("alwaysAllow");
     expect(notice?.body).toContain("alwaysDeny");
     expect(notice?.body).toContain("/permission <mode>");
+  });
+
+  it("lists full capabilities for the current effective Agent via /capabilities", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
+
+    await b.routeMessage(
+      textEvent("/capabilities", "oc_x", "th_topic", "om_caps"),
+      "ou_user",
+      "om_caps",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ command: CLAUDE.command, args: CLAUDE.args, cwd: repoA }),
+    );
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
+    expect(notice?.body).toContain("查询范围：当前有效 Agent");
+    expect(notice?.body).toContain("**Models**");
+    expect(notice?.body).toContain("model-old — Old（当前）");
+    expect(notice?.body).toContain("**Modes**");
+    expect(notice?.body).toContain("agent — Agent：Autonomous mode");
+    expect(notice?.body).toContain("**Config options**");
+    expect(notice?.body).toContain("autoSave — Auto Save (boolean, 当前 on)");
+    expect(notice?.body).toContain("effort — Effort (select, 当前 high; 可选 low=Low, high=High)");
+    expect(notice?.body).toContain("**Permission modes**");
+    expect(notice?.body).toContain("alwaysAsk");
+  });
+
+  it("probes another Agent capabilities via /capabilities <agent> without switching", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s_claude",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/capabilities codex", "oc_x", "th_topic", "om_caps_codex"),
+      "ou_user",
+      "om_caps_codex",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ command: CODEX.command, args: CODEX.args, cwd: repoA }),
+    );
+    expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
+      sessionId: "s_claude",
+      agentLabel: "claude",
+    });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
+    expect(notice?.body).toContain("查询范围：probe: /capabilities codex");
+    expect(notice?.body).toContain("Agent：codex");
   });
 
   it("handles /model auto through the shared stored setControls path without spawning a runtime", async () => {

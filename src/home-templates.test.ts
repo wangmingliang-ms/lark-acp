@@ -37,7 +37,9 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain("Chat bindings are repo-only");
     expect(agents).toContain("/agent <agent>");
     expect(agents).toContain("/model auto");
+    expect(agents).toContain("/capabilities <agent>");
     expect(agents).toContain("`/help` lists all Humming slash commands");
+    expect(agents).toContain("`/capabilities` lists the current effective Agent");
     expect(agents).toContain(
       "Bare `/agent`, `/model`, `/mode`, and `/permission` list available options",
     );

@@ -162,6 +162,7 @@ export type LarkCommand =
   | { readonly kind: "cancel" }
   | { readonly kind: "new" }
   | { readonly kind: "help" }
+  | { readonly kind: "capabilities"; readonly agent: string | null }
   | { readonly kind: "bind"; readonly cwd: string; readonly agent: string | null }
   | { readonly kind: "bind-usage" }
   | { readonly kind: "unbind" }
@@ -215,6 +216,7 @@ const MODE_COMMAND_TOKEN = "/mode";
 const PERMISSION_COMMAND_TOKEN = "/permission";
 const PROFILE_COMMAND_TOKEN = "/profile";
 const HELP_COMMAND_TOKENS: ReadonlySet<string> = new Set(["/help", "/commands"]);
+const CAPABILITIES_COMMAND_TOKEN = "/capabilities";
 
 /**
  * Interpret a Lark inbound message event.
@@ -303,11 +305,21 @@ function detectCommand(text: string): LarkCommand | null {
   if (CANCEL_COMMAND_TOKENS.has(text)) return { kind: "cancel" };
   if (NEW_SESSION_COMMAND_TOKENS.has(text)) return { kind: "new" };
   if (HELP_COMMAND_TOKENS.has(text)) return { kind: "help" };
+  const capabilitiesCommand = detectCapabilitiesCommand(text);
+  if (capabilitiesCommand) return capabilitiesCommand;
   if (UNBIND_COMMAND_TOKENS.has(text)) return { kind: "unbind" };
   if (WHERE_COMMAND_TOKENS.has(text)) return { kind: "where" };
   const profileCommand = detectProfileCommand(text);
   if (profileCommand) return profileCommand;
   return detectBindCommand(text);
+}
+
+function detectCapabilitiesCommand(text: string): LarkCommand | null {
+  const rest = stripLeadingToken(text, CAPABILITIES_COMMAND_TOKEN);
+  if (rest === null) return null;
+  if (rest.length === 0) return { kind: "capabilities", agent: null };
+  if (/\s/.test(rest)) return null;
+  return { kind: "capabilities", agent: rest };
 }
 
 function detectProfileCommand(text: string): LarkCommand | null {

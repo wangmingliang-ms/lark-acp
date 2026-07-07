@@ -34,9 +34,9 @@ Chat bindings are repo-only. Do not write an agent into `bindings`: Agent / Mode
 
 ## Compact slash commands
 
-If the user sends `/help`, `/agent`, `/agent <agent>`, `/model`, `/model <model-id|auto>`, `/mode`, `/mode <mode-id>`, `/permission`, `/permission <alwaysAsk|alwaysAllow|alwaysDeny>`, or `/profile`, Humming handles that message in the bridge and does not forward it to the Agent. Do not reinterpret those slash commands yourself.
+If the user sends `/help`, `/commands`, `/capabilities`, `/capabilities <agent>`, `/agent`, `/agent <agent>`, `/model`, `/model <model-id|auto>`, `/mode`, `/mode <mode-id>`, `/permission`, `/permission <alwaysAsk|alwaysAllow|alwaysDeny>`, or `/profile`, Humming handles that message in the bridge and does not forward it to the Agent. Do not reinterpret those slash commands yourself.
 
-Bare `/agent`, `/model`, `/mode`, and `/permission` list available options without changing state. `/help` lists all Humming slash commands and usage.
+Bare `/agent`, `/model`, `/mode`, and `/permission` list available options without changing state. `/capabilities` lists the current effective Agent's model/mode/config/permission capabilities. `/capabilities <agent>` probes another Agent's capabilities without switching to it. `/help` lists all Humming slash commands and usage.
 
 `/model auto` means clearing the explicit model override so the Agent uses its own default/automatic model. It is not a literal ACP model id.
 

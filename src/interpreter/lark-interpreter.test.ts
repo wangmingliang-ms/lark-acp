@@ -144,12 +144,16 @@ describe("interpretLarkMessage — compact session profile commands", () => {
     expect(expectCommand("/profile")).toEqual({ kind: "profile" });
     expect(expectCommand("/help")).toEqual({ kind: "help" });
     expect(expectCommand("/commands")).toEqual({ kind: "help" });
+    expect(expectCommand("/capabilities")).toEqual({ kind: "capabilities", agent: null });
+    expect(expectCommand("/capabilities codex")).toEqual({ kind: "capabilities", agent: "codex" });
   });
 
   it("rejects non-slash aliases and lookalikes as ordinary prompts", () => {
     expect(interpretLarkMessage(textEvent("/agentx copilot")).kind).toBe("prompt");
     expect(interpretLarkMessage(textEvent("agent copilot")).kind).toBe("prompt");
     expect(interpretLarkMessage(textEvent("/modelx auto")).kind).toBe("prompt");
+    expect(interpretLarkMessage(textEvent("/capabilitiesx codex")).kind).toBe("prompt");
+    expect(interpretLarkMessage(textEvent("/capabilities codex extra")).kind).toBe("prompt");
     expect(interpretLarkMessage(textEvent("/profile extra")).kind).toBe("prompt");
   });
 });
