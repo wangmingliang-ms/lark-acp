@@ -517,6 +517,9 @@ export class HummingClient implements acp.Client {
     const pp = this.pendingPermissions.get(requestId);
     if (!pp) return false;
     this.disposePending(requestId);
+    this.createPostInteractionStatusCard().catch((err) =>
+      this.logger.warn({ err, requestId }, "post-approval status card creation failed"),
+    );
     pp.resolve({ outcome: { outcome: "selected", optionId } });
     return true;
   }
@@ -876,6 +879,24 @@ export class HummingClient implements acp.Client {
 
     this.status = "sealed";
     await this.renderCard({ cancellable: false });
+
+    this.timeline = [];
+    this.cardId = null;
+    this.cardCreating = null;
+    this.status = "thinking";
+    this.idleStatusCardPending = true;
+    await this.renderCard({ cancellable: true });
+    if (this.cardId === null) this.idleStatusCardPending = false;
+  }
+
+  private async createPostInteractionStatusCard(): Promise<void> {
+    if (!this.acceptingRenderableUpdates || this.idleStatusCardPending) return;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
+    if (!this.acceptingRenderableUpdates || this.idleStatusCardPending) return;
 
     this.timeline = [];
     this.cardId = null;

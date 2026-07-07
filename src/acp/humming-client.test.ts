@@ -490,7 +490,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
     });
   });
 
-  it("seals the current conversation card before an approval card and starts a new card after approval", async () => {
+  it("seals the current conversation card before approval and immediately creates a post-approval status slot", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
 
@@ -511,6 +511,16 @@ describe("HummingClient card-v2 conversation rendering", () => {
     if (!permission) throw new Error("expected permission request");
     client.handleCardAction(permission.requestId, "allow");
     await responsePromise;
+
+    const sendsAfterApproval = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    expect(sendsAfterApproval).toHaveLength(2);
+    expect(sendsAfterApproval[1]?.state).toMatchObject({
+      status: "thinking",
+      entries: [],
+      cancellable: true,
+    });
 
     await client.sessionUpdate(completedToolUpdate());
     await client.sessionUpdate({
@@ -541,7 +551,12 @@ describe("HummingClient card-v2 conversation rendering", () => {
         },
       ],
     });
-    expect(sends[1]?.state.entries).toEqual([
+
+    const finalPatch = ops.findLast(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+    expect(finalPatch?.cardId).toBe("card_2");
+    expect(finalPatch?.state.entries).toEqual([
       {
         kind: "tool",
         toolCallId: "tool_edit",
@@ -560,7 +575,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
     expect(permissionIndex).toBeLessThan(secondConversationIndex);
   });
 
-  it("does not send an empty placeholder card when finalize follows an approval boundary", async () => {
+  it("updates the post-approval status slot when finalize follows an approval boundary", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
 
@@ -573,9 +588,22 @@ describe("HummingClient card-v2 conversation rendering", () => {
     client.handleCardAction(permission.requestId, "allow");
     await responsePromise;
 
+    const statusSlot = ops.findLast(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+    );
+    expect(statusSlot?.state).toMatchObject({ status: "thinking", entries: [] });
+
     await client.finalize("complete");
 
-    expect(ops.filter((op) => op.kind === "sendUnified")).toHaveLength(1);
+    const finalPatch = ops.findLast(
+      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    );
+    expect(finalPatch?.cardId).toBe("card_2");
+    expect(finalPatch?.state).toMatchObject({
+      status: "complete",
+      entries: [],
+      cancellable: false,
+    });
   });
 
   it("renders execute tool commands as code blocks", async () => {
