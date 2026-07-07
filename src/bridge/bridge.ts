@@ -14,8 +14,10 @@ import {
   interpretLarkMessage,
   type InterpretedMessage,
   type LarkCommand,
+  type PromptSegment,
 } from "../interpreter/lark-interpreter.js";
 import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
+import { hydratePrompt } from "./prompt-hydrator.js";
 import type { PermissionMode } from "../acp/humming-client.js";
 import { AgentAuthError } from "../acp/agent-process.js";
 import { SessionAlreadyBoundError } from "../session-store/file-session-store.js";
@@ -27,7 +29,6 @@ import type {
   SessionStore,
 } from "../session-store/session-store.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
-import type * as acp from "@agentclientprotocol/sdk";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_MAX_CONCURRENT_CHATS = 10;
@@ -764,7 +765,7 @@ export class LarkBridge {
           threadId,
           userId,
           messageId,
-          interpreted.blocks,
+          interpreted.segments,
         );
         return;
       default:
@@ -919,7 +920,7 @@ export class LarkBridge {
     threadId: string | null,
     userId: string,
     messageId: string,
-    prompt: acp.ContentBlock[],
+    segments: PromptSegment[],
   ): Promise<void> {
     const binding = await this.resolveBinding(chatId);
     if (!binding) {
@@ -949,7 +950,8 @@ export class LarkBridge {
       });
 
     const isGroup = event.message.chat_type === CHAT_TYPE_GROUP;
-    const [userName, chatName] = await Promise.all([
+    const [prompt, userName, chatName] = await Promise.all([
+      hydratePrompt(segments, { downloader: this.http, logger: this.logger }),
       this.http.getUserName(userId),
       isGroup ? this.http.getChatName(chatId) : Promise.resolve(""),
     ]);

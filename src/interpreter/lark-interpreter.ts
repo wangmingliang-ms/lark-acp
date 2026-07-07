@@ -1,12 +1,16 @@
 /**
- * Lark message interpreter — translate a Lark message event into
- * the ACP `ContentBlock[]` shape an agent expects as its prompt.
+ * Lark message interpreter — translate a Lark message event into the pure
+ * {@link PromptSegment}[] shape the bridge hydrates into an agent prompt.
+ *
+ * Images (standalone and post-embedded) become `image-ref` segments; the
+ * bridge's prompt hydrator downloads them into ACP image blocks. Every other
+ * attachment is rendered as a descriptive text segment. This module stays
+ * pure — no bytes are downloaded here.
  *
  * Content shapes are based on the Lark Open Platform docs:
  * https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/events/message_content
  */
 
-import type * as acp from "@agentclientprotocol/sdk";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 
 type LarkRawMention = NonNullable<Lark.RawMessageEvent["message"]["mentions"]>[number];
@@ -165,12 +169,13 @@ export type LarkCommand =
  * - `empty`: no actionable content (e.g. a stripped-to-nothing self-mention).
  * - `command`: a recognised slash-style command — bridge should act on it
  *   directly without sending anything to the agent.
- * - `prompt`: ACP content blocks ready to forward to the agent.
+ * - `prompt`: interpreter segments (text + image-ref) for the bridge to
+ *   hydrate and forward to the agent.
  */
 export type InterpretedMessage =
   | { readonly kind: "empty" }
   | { readonly kind: "command"; readonly command: LarkCommand }
-  | { readonly kind: "prompt"; readonly blocks: acp.ContentBlock[] };
+  | { readonly kind: "prompt"; readonly segments: PromptSegment[] };
 
 export interface InterpretOptions {
   /**
@@ -192,10 +197,11 @@ const BIND_COMMAND_TOKEN = "/bind";
  * Text messages (and only text messages) are eligible to be classified as
  * commands. Every other message type becomes a `prompt` (or `empty`).
  *
- * No binary attachments are downloaded — images, files, audio, video and
- * stickers are all rendered as descriptive text placeholders carrying
- * `message_id` / `image_key` / `file_key` so the agent can fetch them
- * out-of-band (e.g. through a future Lark MCP tool) if it needs to.
+ * The interpreter stays pure: it emits {@link PromptSegment}s, never
+ * downloading bytes. Images (standalone and post-embedded) become `image-ref`
+ * segments carrying `message_id` / `image_key`, which the bridge's hydrator
+ * downloads into ACP image blocks. Every other attachment (file, audio, video,
+ * sticker, …) is rendered as a descriptive text segment.
  */
 export function interpretLarkMessage(
   event: Lark.RawMessageEvent,
@@ -208,13 +214,13 @@ export function interpretLarkMessage(
     if (!text) return { kind: "empty" };
     const command = detectCommand(text);
     if (command) return { kind: "command", command };
-    return { kind: "prompt", blocks: [{ type: "text", text }] };
+    return { kind: "prompt", segments: [{ kind: "text", text }] };
   }
 
-  return blocksToPrompt(parseNonTextMessage(message));
+  return segmentsToPrompt(normalizeSegments(parseNonTextMessage(message)));
 }
 
-function parseNonTextMessage(message: Lark.RawMessageEvent["message"]): acp.ContentBlock[] {
+function parseNonTextMessage(message: Lark.RawMessageEvent["message"]): PromptSegment[] {
   switch (message.message_type) {
     case "post":
       return parsePost(message.content, message.message_id);
@@ -235,14 +241,37 @@ function parseNonTextMessage(message: Lark.RawMessageEvent["message"]): acp.Cont
     case "location":
       return parseLocation(message.content);
     case "merge_forward":
-      return [{ type: "text", text: "[合并转发消息 — 请通过工具调用获取子消息]" }];
+      return [{ kind: "text", text: "[合并转发消息 — 请通过工具调用获取子消息]" }];
     default:
-      return [{ type: "text", text: `[${message.message_type} 消息 — 暂不支持]` }];
+      return [{ kind: "text", text: `[${message.message_type} 消息 — 暂不支持]` }];
   }
 }
 
-function blocksToPrompt(blocks: acp.ContentBlock[]): InterpretedMessage {
-  return blocks.length ? { kind: "prompt", blocks } : { kind: "empty" };
+function segmentsToPrompt(segments: PromptSegment[]): InterpretedMessage {
+  return segments.length ? { kind: "prompt", segments } : { kind: "empty" };
+}
+
+/**
+ * Regularise an interleaved segment list: merge adjacent text segments into
+ * one and drop empty-text segments. Image-ref segments are passed through
+ * untouched, so text/image ordering is preserved.
+ */
+function normalizeSegments(segments: PromptSegment[]): PromptSegment[] {
+  const out: PromptSegment[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "image-ref") {
+      out.push(segment);
+      continue;
+    }
+    if (segment.text.length === 0) continue;
+    const last = out[out.length - 1];
+    if (last && last.kind === "text") {
+      out[out.length - 1] = { kind: "text", text: last.text + segment.text };
+      continue;
+    }
+    out.push(segment);
+  }
+  return out;
 }
 
 function detectCommand(text: string): LarkCommand | null {
@@ -319,11 +348,17 @@ function extractTextContent(
   return text.trim();
 }
 
-function parsePost(raw: string, messageId: string): acp.ContentBlock[] {
+function parsePost(raw: string, messageId: string): PromptSegment[] {
   const payload = safeParse<PostPayload>(raw);
-  if (!payload) return [{ type: "text", text: "[富文本消息解析失败]" }];
+  if (!payload) return [{ kind: "text", text: "[富文本消息解析失败]" }];
 
+  const segments: PromptSegment[] = [];
   const lineBuffer: string[] = [];
+  const flushText = (): void => {
+    const text = lineBuffer.join("\n").trim();
+    if (text) segments.push({ kind: "text", text });
+    lineBuffer.length = 0;
+  };
 
   if (payload.title) {
     lineBuffer.push(`**${payload.title}**`, "");
@@ -331,8 +366,8 @@ function parsePost(raw: string, messageId: string): acp.ContentBlock[] {
 
   const paragraphs = payload.content;
   if (!paragraphs?.length) {
-    const text = lineBuffer.join("\n").trim();
-    return text ? [{ type: "text", text }] : [];
+    flushText();
+    return segments;
   }
 
   for (const para of paragraphs) {
@@ -355,7 +390,12 @@ function parsePost(raw: string, messageId: string): acp.ContentBlock[] {
     const lineParts: string[] = [];
     for (const el of para) {
       if (el.tag === "img") {
-        lineParts.push(imagePlaceholder(messageId, el.image_key));
+        if (lineParts.length) {
+          lineBuffer.push(lineParts.join(""));
+          lineParts.length = 0;
+        }
+        flushText();
+        segments.push({ kind: "image-ref", messageId, imageKey: el.image_key });
         continue;
       }
       const rendered = elementToText(el);
@@ -364,67 +404,63 @@ function parsePost(raw: string, messageId: string): acp.ContentBlock[] {
     if (lineParts.length) lineBuffer.push(lineParts.join(""));
   }
 
-  const text = lineBuffer.join("\n").trim();
-  return text ? [{ type: "text", text }] : [];
+  flushText();
+  return segments;
 }
 
-function parseImage(raw: string, messageId: string): acp.ContentBlock[] {
+function parseImage(raw: string, messageId: string): PromptSegment[] {
   const payload = safeParse<ImagePayload>(raw);
   const key = payload?.image_key;
-  if (!key) return [{ type: "text", text: "[图片消息缺少 image_key]" }];
-  return [{ type: "text", text: imagePlaceholder(messageId, key) }];
+  if (!key) return [{ kind: "text", text: "[图片消息缺少 image_key]" }];
+  return [{ kind: "image-ref", messageId, imageKey: key }];
 }
 
-function imagePlaceholder(messageId: string, imageKey: string): string {
-  return `[图片 (message_id=${messageId}, image_key=${imageKey})]`;
-}
-
-function parseFile(raw: string): acp.ContentBlock[] {
+function parseFile(raw: string): PromptSegment[] {
   const p = safeParse<FilePayload>(raw);
   const name = p?.file_name ?? "未命名";
   const key = p?.file_key ?? "unknown";
-  return [{ type: "text", text: `[文件: ${name} (file_key=${key})]` }];
+  return [{ kind: "text", text: `[文件: ${name} (file_key=${key})]` }];
 }
 
-function parseAudio(raw: string): acp.ContentBlock[] {
+function parseAudio(raw: string): PromptSegment[] {
   const p = safeParse<AudioPayload>(raw);
   const dur = p?.duration ? `${p.duration}ms` : "未知时长";
   const key = p?.file_key ?? "unknown";
-  return [{ type: "text", text: `[音频: ${dur} (file_key=${key})]` }];
+  return [{ kind: "text", text: `[音频: ${dur} (file_key=${key})]` }];
 }
 
-function parseMedia(raw: string): acp.ContentBlock[] {
+function parseMedia(raw: string): PromptSegment[] {
   const p = safeParse<MediaPayload>(raw);
   const name = p?.file_name ?? "未命名";
   const dur = p?.duration ? `${p.duration}ms` : "未知时长";
   const key = p?.file_key ?? "unknown";
-  return [{ type: "text", text: `[视频: ${name} ${dur} (file_key=${key})]` }];
+  return [{ kind: "text", text: `[视频: ${name} ${dur} (file_key=${key})]` }];
 }
 
-function parseSticker(raw: string): acp.ContentBlock[] {
+function parseSticker(raw: string): PromptSegment[] {
   const p = safeParse<StickerPayload>(raw);
   const key = p?.file_key ?? "unknown";
-  return [{ type: "text", text: `[表情包 (file_key=${key})]` }];
+  return [{ kind: "text", text: `[表情包 (file_key=${key})]` }];
 }
 
-function parseShareChat(raw: string): acp.ContentBlock[] {
+function parseShareChat(raw: string): PromptSegment[] {
   const p = safeParse<ShareChatPayload>(raw);
   const id = p?.chat_id ?? "unknown";
-  return [{ type: "text", text: `[群名片: chat_id=${id}]` }];
+  return [{ kind: "text", text: `[群名片: chat_id=${id}]` }];
 }
 
-function parseShareUser(raw: string): acp.ContentBlock[] {
+function parseShareUser(raw: string): PromptSegment[] {
   const p = safeParse<ShareUserPayload>(raw);
   const id = p?.user_id ?? "unknown";
-  return [{ type: "text", text: `[个人名片: user_id=${id}]` }];
+  return [{ kind: "text", text: `[个人名片: user_id=${id}]` }];
 }
 
-function parseLocation(raw: string): acp.ContentBlock[] {
+function parseLocation(raw: string): PromptSegment[] {
   const p = safeParse<LocationPayload>(raw);
   const name = p?.name ?? "未命名地点";
   const lat = p?.latitude ?? "?";
   const lon = p?.longitude ?? "?";
-  return [{ type: "text", text: `[位置: ${name} (${lat}, ${lon})]` }];
+  return [{ kind: "text", text: `[位置: ${name} (${lat}, ${lon})]` }];
 }
 
 // ---- Element renderers ----
