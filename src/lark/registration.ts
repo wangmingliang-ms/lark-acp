@@ -1,5 +1,3 @@
-import * as qrcode from "qrcode-terminal";
-
 export type FeishuRegistrationDomain = "feishu" | "lark";
 
 export type FeishuRegistrationTransport = (url: string, body: URLSearchParams) => Promise<unknown>;
@@ -24,17 +22,23 @@ export type FeishuBotProbeResult = {
   readonly botOpenId?: string;
 };
 
-export type FeishuQrRegistrationResult = FeishuRegistrationCredentials & {
+export type FeishuLinkRegistrationResult = FeishuRegistrationCredentials & {
   readonly botName?: string;
   readonly botOpenId?: string;
 };
 
-export type FeishuQrRegistrationProgress =
+export type FeishuQrRegistrationResult = FeishuLinkRegistrationResult;
+
+export type FeishuLinkRegistrationProgress =
   | { readonly kind: "connecting" }
-  | { readonly kind: "qr"; readonly qrUrl: string; readonly rendered: boolean }
+  | { readonly kind: "link"; readonly url: string }
   | { readonly kind: "polling" }
   | { readonly kind: "success"; readonly appId: string; readonly domain: FeishuRegistrationDomain }
   | { readonly kind: "failed"; readonly reason: string };
+
+export type FeishuQrRegistrationProgress =
+  | Exclude<FeishuLinkRegistrationProgress, { readonly kind: "link" }>
+  | { readonly kind: "qr"; readonly qrUrl: string; readonly rendered: boolean };
 
 export type FeishuRegistrationOptions = {
   readonly domain?: FeishuRegistrationDomain;
@@ -47,6 +51,11 @@ export type PollFeishuRegistrationOptions = FeishuRegistrationOptions & {
   readonly timeoutSeconds: number;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
+};
+
+export type RunFeishuLinkRegistrationOptions = FeishuRegistrationOptions & {
+  readonly timeoutSeconds?: number;
+  readonly onProgress?: (event: FeishuLinkRegistrationProgress) => void;
 };
 
 export type RunFeishuQrRegistrationOptions = FeishuRegistrationOptions & {
@@ -93,7 +102,7 @@ export async function initFeishuRegistration(opts: FeishuRegistrationOptions = {
 }
 
 /**
- * Start a PersonalAgent scan-to-create registration and return the QR URL plus poll metadata.
+ * Start a PersonalAgent link-to-create registration and return the setup URL plus poll metadata.
  *
  * @throws {FeishuRegistrationError} when the server response is malformed.
  */
@@ -177,28 +186,22 @@ export async function pollFeishuRegistration(
 
 /** Render a QR URL to the terminal. Returns false when rendering fails. */
 export async function renderQrToTerminal(
-  url: string,
-  renderer: QrTerminalRenderer = DEFAULT_QR_RENDERER,
+  _url?: string,
+  _renderer?: QrTerminalRenderer,
 ): Promise<boolean> {
-  try {
-    await renderer.render(url);
-    return true;
-  } catch {
-    return false;
-  }
+  return false;
 }
 
-/** Run init → begin → QR → poll → best-effort bot probe. */
-export async function runFeishuQrRegistration(
-  opts: RunFeishuQrRegistrationOptions = {},
-): Promise<FeishuQrRegistrationResult | null> {
+/** Run init → begin → setup link → poll → best-effort bot probe. */
+export async function runFeishuLinkRegistration(
+  opts: RunFeishuLinkRegistrationOptions = {},
+): Promise<FeishuLinkRegistrationResult | null> {
   const domain = opts.domain ?? "feishu";
   const timeoutSeconds = opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
   opts.onProgress?.({ kind: "connecting" });
   await initFeishuRegistration({ domain, transport: opts.transport });
   const begin = await beginFeishuRegistration({ domain, transport: opts.transport });
-  const rendered = await renderQrToTerminal(begin.qrUrl);
-  opts.onProgress?.({ kind: "qr", qrUrl: begin.qrUrl, rendered });
+  opts.onProgress?.({ kind: "link", url: begin.qrUrl });
   opts.onProgress?.({ kind: "polling" });
   const credentials = await pollFeishuRegistration({
     domain,
@@ -218,6 +221,31 @@ export async function runFeishuQrRegistration(
     ...credentials,
     ...(bot?.botName !== undefined ? { botName: bot.botName } : {}),
     ...(bot?.botOpenId !== undefined ? { botOpenId: bot.botOpenId } : {}),
+  };
+}
+
+/** Backward-compatible alias for callers that imported the earlier QR-named API. */
+export async function runFeishuQrRegistration(
+  opts: RunFeishuQrRegistrationOptions = {},
+): Promise<FeishuQrRegistrationResult | null> {
+  return runFeishuLinkRegistration({
+    domain: opts.domain,
+    transport: opts.transport,
+    timeoutSeconds: opts.timeoutSeconds,
+    onProgress: mapQrRegistrationProgress(opts.onProgress),
+  });
+}
+
+function mapQrRegistrationProgress(
+  onProgress: ((event: FeishuQrRegistrationProgress) => void) | undefined,
+): ((event: FeishuLinkRegistrationProgress) => void) | undefined {
+  if (onProgress === undefined) return undefined;
+  return (event) => {
+    if (event.kind === "link") {
+      onProgress({ kind: "qr", qrUrl: event.url, rendered: false });
+      return;
+    }
+    onProgress(event);
   };
 }
 
@@ -363,9 +391,3 @@ function optionalObjectStringField(
 async function sleepMs(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
-
-const DEFAULT_QR_RENDERER: QrTerminalRenderer = {
-  render(url: string): void {
-    qrcode.generate(url, { small: true });
-  },
-};

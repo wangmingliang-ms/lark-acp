@@ -41,9 +41,9 @@ import {
 } from "../src/index.js";
 import { installHomeTemplates } from "../src/home-templates.js";
 import {
-  runFeishuQrRegistration,
+  runFeishuLinkRegistration,
+  type FeishuLinkRegistrationProgress,
   type FeishuRegistrationDomain,
-  type FeishuQrRegistrationProgress,
 } from "../src/lark/registration.js";
 import type {
   LarkLogger,
@@ -2342,13 +2342,13 @@ async function runSetup(args: ParsedArgs): Promise<void> {
   }
 
   const target = args.setupTarget ?? "feishu";
-  process.stdout.write("Feishu / Lark scan setup\n\n");
-  const result = await runFeishuQrRegistration({
+  process.stdout.write("Feishu / Lark setup\n\n");
+  const result = await runFeishuLinkRegistration({
     domain: target,
     onProgress: printSetupProgress,
   });
   if (result === null) {
-    throw new CliError("Feishu / Lark scan setup did not complete. No credentials were changed.");
+    throw new CliError("Feishu / Lark setup did not complete. No credentials were changed.");
   }
 
   writeSetupCredentials(configPath, { appId: result.appId, appSecret: result.appSecret });
@@ -2363,28 +2363,28 @@ async function runSetup(args: ParsedArgs): Promise<void> {
   );
 }
 
-function printSetupProgress(event: FeishuQrRegistrationProgress): void {
+function printSetupProgress(event: FeishuLinkRegistrationProgress): void {
+  process.stdout.write(formatSetupProgress(event));
+}
+
+function formatSetupProgress(event: FeishuLinkRegistrationProgress): string {
   switch (event.kind) {
     case "connecting":
-      process.stdout.write("Connecting to Feishu / Lark...\n");
-      return;
-    case "qr":
-      if (event.rendered) {
-        process.stdout.write("\nScan the QR code above with Feishu / Lark mobile.\n");
-      } else {
-        process.stdout.write("Open this URL with Feishu / Lark mobile:\n");
-      }
-      process.stdout.write(`${event.qrUrl}\n\n`);
-      return;
+      return "Connecting to Feishu / Lark...\n";
+    case "link":
+      return [
+        "Open this setup link in Feishu / Lark (mobile or desktop):",
+        event.url,
+        "",
+        "Humming does not show a QR code. The link opens Feishu / Lark's guided flow: log in if prompted, choose or create the group, search for the bot name, and confirm creation.",
+        "",
+      ].join("\n");
     case "polling":
-      process.stdout.write("Waiting for scan approval...\n");
-      return;
+      return "Waiting for setup completion...\n";
     case "success":
-      process.stdout.write(`Configuration received for ${maskCredentialId(event.appId)}.\n\n`);
-      return;
+      return `Configuration received for ${maskCredentialId(event.appId)}.\n\n`;
     case "failed":
-      process.stdout.write(`Setup failed or was denied: ${event.reason}\n`);
-      return;
+      return `Setup failed or was denied: ${event.reason}\n`;
     default:
       assertNever(event);
   }
@@ -2618,6 +2618,7 @@ export {
   runInit,
   runSetup,
   writeSetupCredentials,
+  formatSetupProgress,
   formatSetupSummary,
   maskCredentialId,
   resolveUpdateRef,

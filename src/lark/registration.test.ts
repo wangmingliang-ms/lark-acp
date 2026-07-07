@@ -29,7 +29,7 @@ function makeTransport(responses: readonly unknown[]): {
   };
 }
 
-describe("Feishu scan-to-create registration client", () => {
+describe("Feishu link-to-create registration client", () => {
   it("verifies that client_secret auth is supported", async () => {
     const { transport, calls } = makeTransport([
       { nonce: "abc", supported_auth_methods: ["client_secret"] },
@@ -53,7 +53,7 @@ describe("Feishu scan-to-create registration client", () => {
     );
   });
 
-  it("begins a PersonalAgent registration and returns the QR URL without leaking codes", async () => {
+  it("begins a PersonalAgent registration and returns the setup URL without leaking codes", async () => {
     const { transport, calls } = makeTransport([
       {
         device_code: "device-secret",
@@ -137,17 +137,12 @@ describe("Feishu scan-to-create registration client", () => {
     expect(result?.domain).toBe("lark");
   });
 
-  it("renders QR through an injected terminal renderer", async () => {
-    const rendered: string[] = [];
-
-    const ok = await renderQrToTerminal("https://example.com/qr", {
-      render: async (url) => {
-        rendered.push(url);
-      },
-    });
-
-    expect(ok).toBe(true);
-    expect(rendered).toEqual(["https://example.com/qr"]);
+  it("does not render terminal QR codes for the current link-based flow", async () => {
+    await expect(
+      renderQrToTerminal("https://example.com/qr", {
+        render: async () => {},
+      }),
+    ).resolves.toBe(false);
   });
 });
 

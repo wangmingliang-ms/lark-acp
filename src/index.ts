@@ -71,11 +71,14 @@ export {
   pollFeishuRegistration,
   probeFeishuBot,
   renderQrToTerminal,
+  runFeishuLinkRegistration,
   runFeishuQrRegistration,
 } from "./lark/registration.js";
 export type {
   FeishuBeginRegistrationResult,
   FeishuBotProbeResult,
+  FeishuLinkRegistrationProgress,
+  FeishuLinkRegistrationResult,
   FeishuQrRegistrationProgress,
   FeishuQrRegistrationResult,
   FeishuRegistrationCredentials,
@@ -84,6 +87,7 @@ export type {
   FeishuRegistrationTransport,
   PollFeishuRegistrationOptions,
   QrTerminalRenderer,
+  RunFeishuLinkRegistrationOptions,
   RunFeishuQrRegistrationOptions,
 } from "./lark/registration.js";
 export {

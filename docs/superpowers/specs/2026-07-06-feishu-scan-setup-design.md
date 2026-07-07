@@ -1,8 +1,8 @@
-# Feishu Scan Setup Design
+# Feishu Link Setup Design
 
 ## Goal
 
-Add a pure-local `humming setup` flow that mirrors Hermes Agent's Feishu/Lark scan-to-create onboarding: show a QR code, let the user scan it in Feishu/Lark mobile, receive the newly created bot app credentials, save them to `~/.humming/settings.json`, and start Humming with no manual developer-console work.
+Add a pure-local `humming setup` flow that mirrors Feishu/Lark's PersonalAgent onboarding: print the returned setup link, let the user open it in Feishu/Lark, receive the newly created bot app credentials, save them to `~/.humming/settings.json`, and start Humming with no manual developer-console work.
 
 ## Findings from Hermes
 
@@ -14,8 +14,8 @@ Hermes does not automate the Feishu developer console with a browser. It uses Fe
 The sequence is:
 
 1. `action=init` to confirm `client_secret` auth is supported.
-2. `action=begin`, `archetype=PersonalAgent`, `auth_method=client_secret`, `request_user_info=open_id` to receive a device code and QR verification URL.
-3. Render the returned verification URL as a QR code.
+2. `action=begin`, `archetype=PersonalAgent`, `auth_method=client_secret`, `request_user_info=open_id` to receive a device code and setup verification URL.
+3. Print the returned setup URL. Feishu/Lark currently opens a guided flow from that link: the user logs in if prompted, selects or creates the target group, searches for the bot name, and confirms creation. Humming should explicitly say it does not display a QR code.
 4. Poll with `action=poll`, the device code, and `tp=ob_app` until the user approves, denies, or the token expires.
 5. On success, map `client_id` to Humming `credentials.appId` and `client_secret` to `credentials.appSecret`.
 6. Best-effort probe `/open-apis/bot/v3/info` so the CLI can confirm the bot is reachable.
@@ -36,7 +36,7 @@ The command should:
 1. Resolve `--home` and `--config` with the same rules as `proxy`.
 2. Install home templates.
 3. Refuse to overwrite existing `credentials.appId` + `credentials.appSecret` unless the user explicitly passes `--force`.
-4. Print an ASCII QR code when the optional QR renderer is available; otherwise print the verification URL.
+4. Print the setup link and explain the Feishu/Lark guided flow. Do not render an ASCII QR code.
 5. Poll until success, denial, expiry, or timeout.
 6. Write/update only the `credentials` block in `settings.json`, preserving runtime, agents, bindings, and other existing settings.
 7. chmod `settings.json` to `0600` best-effort.
@@ -52,12 +52,12 @@ The command should:
 
 ## Code structure
 
-- Create `src/lark/registration.ts` for the registration client and QR rendering boundary.
+- Create `src/lark/registration.ts` for the registration client and setup-link progress boundary.
 - Add `setup` parsing and execution in `bin/humming.ts`.
 - Keep deterministic JSON read/merge/write helpers in the CLI layer because they update Humming's CLI settings file, not Lark transport behavior.
 - Add tests before production code:
   - registration client HTTP body/response behavior,
-  - QR renderer fallback behavior,
+  - setup-link progress behavior,
   - CLI parser recognizes `setup`, `setup feishu`, and `setup --force`,
   - settings merge preserves existing runtime/agents/bindings,
   - secret never appears in setup stdout.
@@ -68,4 +68,4 @@ The command should:
 - `npm run build`
 - `npm test`
 - `git diff --check`
-- A real non-secret live probe for `action=init` may be used, but no real setup flow should be executed without the user present to scan the QR.
+- A real non-secret live probe for `action=init` may be used, but no real setup flow should be executed without the user present to open the setup link and complete the Feishu/Lark guided flow.

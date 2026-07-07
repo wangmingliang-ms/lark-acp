@@ -9,11 +9,14 @@ export {
   pollFeishuRegistration,
   probeFeishuBot,
   renderQrToTerminal,
+  runFeishuLinkRegistration,
   runFeishuQrRegistration,
 } from "./registration.js";
 export type {
   FeishuBeginRegistrationResult,
   FeishuBotProbeResult,
+  FeishuLinkRegistrationProgress,
+  FeishuLinkRegistrationResult,
   FeishuQrRegistrationProgress,
   FeishuQrRegistrationResult,
   FeishuRegistrationCredentials,
@@ -22,6 +25,7 @@ export type {
   FeishuRegistrationTransport,
   PollFeishuRegistrationOptions,
   QrTerminalRenderer,
+  RunFeishuLinkRegistrationOptions,
   RunFeishuQrRegistrationOptions,
 } from "./registration.js";
 export {
