@@ -74,17 +74,18 @@ describe("setup credential persistence", () => {
     expect(summary).not.toContain("cli_abcdef123456");
   });
 
-  it("describes the link-based Feishu setup flow without QR or scan wording", () => {
+  it("highlights the Feishu setup link and describes the guided flow", () => {
     const output = formatSetupProgress({
       kind: "link",
       url: "https://open.feishu.cn/page/launcher?user_code=redacted&from=humming&tp=humming",
     });
 
-    expect(output).toContain("Open this setup link in Feishu / Lark");
-    expect(output).toContain("Humming does not show a QR code");
+    expect(output).toContain("ACTION REQUIRED: open this setup link in Feishu / Lark");
+    expect(output).toContain("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     expect(output).toContain("log in if prompted");
     expect(output).toContain("choose or create the group");
     expect(output).toContain("search for the bot name");
+    expect(output).not.toContain("QR");
     expect(output).not.toContain("Scan");
     expect(output).not.toContain("scan");
   });

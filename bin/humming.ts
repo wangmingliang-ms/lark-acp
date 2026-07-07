@@ -2373,10 +2373,12 @@ function formatSetupProgress(event: FeishuLinkRegistrationProgress): string {
       return "Connecting to Feishu / Lark...\n";
     case "link":
       return [
-        "Open this setup link in Feishu / Lark (mobile or desktop):",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "ACTION REQUIRED: open this setup link in Feishu / Lark",
         event.url,
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        "Humming does not show a QR code. The link opens Feishu / Lark's guided flow: log in if prompted, choose or create the group, search for the bot name, and confirm creation.",
+        "Then log in if prompted, choose or create the group, search for the bot name, and confirm creation.",
         "",
       ].join("\n");
     case "polling":

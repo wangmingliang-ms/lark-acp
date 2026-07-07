@@ -15,7 +15,7 @@ The sequence is:
 
 1. `action=init` to confirm `client_secret` auth is supported.
 2. `action=begin`, `archetype=PersonalAgent`, `auth_method=client_secret`, `request_user_info=open_id` to receive a device code and setup verification URL.
-3. Print the returned setup URL. Feishu/Lark currently opens a guided flow from that link: the user logs in if prompted, selects or creates the target group, searches for the bot name, and confirms creation. Humming should explicitly say it does not display a QR code.
+3. Print the returned setup URL prominently. Feishu/Lark currently opens a guided flow from that link: the user logs in if prompted, selects or creates the target group, searches for the bot name, and confirms creation.
 4. Poll with `action=poll`, the device code, and `tp=ob_app` until the user approves, denies, or the token expires.
 5. On success, map `client_id` to Humming `credentials.appId` and `client_secret` to `credentials.appSecret`.
 6. Best-effort probe `/open-apis/bot/v3/info` so the CLI can confirm the bot is reachable.
@@ -36,7 +36,7 @@ The command should:
 1. Resolve `--home` and `--config` with the same rules as `proxy`.
 2. Install home templates.
 3. Refuse to overwrite existing `credentials.appId` + `credentials.appSecret` unless the user explicitly passes `--force`.
-4. Print the setup link and explain the Feishu/Lark guided flow. Do not render an ASCII QR code.
+4. Print the setup link prominently and explain the Feishu/Lark guided flow.
 5. Poll until success, denial, expiry, or timeout.
 6. Write/update only the `credentials` block in `settings.json`, preserving runtime, agents, bindings, and other existing settings.
 7. chmod `settings.json` to `0600` best-effort.
