@@ -333,8 +333,15 @@ type FileRuntime = {
   readonly lifecycleNotifyChatIds?: readonly string[];
 };
 
+type FileSetup = {
+  readonly domain?: FeishuRegistrationDomain;
+  readonly ownerOpenId?: string;
+  readonly botName?: string;
+};
+
 type FileConfig = {
   readonly credentials: FileCredentials;
+  readonly setup: FileSetup;
   readonly dataDir?: string;
   readonly runtime: FileRuntime;
   readonly agents: Readonly<Record<string, UserPresetPatch>>;
@@ -347,7 +354,13 @@ type StoredBinding = {
   readonly cwd: string;
 };
 
-const EMPTY_FILE_CONFIG: FileConfig = { credentials: {}, runtime: {}, agents: {}, bindings: {} };
+const EMPTY_FILE_CONFIG: FileConfig = {
+  credentials: {},
+  setup: {},
+  runtime: {},
+  agents: {},
+  bindings: {},
+};
 
 class CliError extends Error {}
 
@@ -424,6 +437,7 @@ function readConfigFile(filePath: string): FileConfig {
   if (!root) throw new CliError(`config file ${filePath} must contain a JSON object`);
 
   const credentialsObj = asObjectOpt("credentials", root["credentials"]) ?? {};
+  const setupObj = asObjectOpt("setup", root["setup"]) ?? {};
   const runtimeObj = asObjectOpt("runtime", root["runtime"]) ?? {};
 
   const credentials: FileCredentials = {
@@ -433,6 +447,12 @@ function readConfigFile(filePath: string): FileConfig {
     ...(asStringOpt("credentials.appSecret", credentialsObj["appSecret"]) !== undefined
       ? { appSecret: asStringOpt("credentials.appSecret", credentialsObj["appSecret"])! }
       : {}),
+  };
+
+  const setup: FileSetup = {
+    ...optRegistrationDomainField("setup.domain", setupObj["domain"]),
+    ...optStringField("setup.ownerOpenId", setupObj["ownerOpenId"]),
+    ...optStringField("setup.botName", setupObj["botName"]),
   };
 
   const permissionMode = asPermissionModeOpt(
@@ -468,6 +488,7 @@ function readConfigFile(filePath: string): FileConfig {
 
   return {
     credentials,
+    setup,
     ...(dataDir !== undefined ? { dataDir } : {}),
     runtime,
     agents,
@@ -551,6 +572,18 @@ function optStringField(label: string, value: unknown): Record<string, string> {
   if (v === undefined) return {};
   const key = label.split(".").pop() ?? label;
   return { [key]: v };
+}
+
+function optRegistrationDomainField(
+  label: string,
+  value: unknown,
+): { readonly domain?: FeishuRegistrationDomain } {
+  const v = asStringOpt(label, value);
+  if (v === undefined) return {};
+  if (v !== "feishu" && v !== "lark") {
+    throw new CliError(`${label} must be one of: feishu | lark`);
+  }
+  return { domain: v };
 }
 
 function optBoolField(label: string, value: unknown): Record<string, boolean> {
@@ -1322,6 +1355,15 @@ type SetupLifecycleEnrollmentResult =
       readonly reason: "missing-owner-open-id" | "no-chat-id" | "failed";
     };
 
+type SetupCredentialResult = {
+  readonly credentials: SetupLifecycleRegistration;
+  readonly created: boolean;
+};
+
+type SetupCredentialRegistration = (
+  target: FeishuRegistrationDomain,
+) => Promise<SetupLifecycleRegistration | null>;
+
 const SETTINGS_FILE_MODE = 0o600;
 
 function maskCredentialId(value: string): string {
@@ -1359,6 +1401,60 @@ function writeSetupCredentials(settingsPath: string, credentials: SetupCredentia
     },
   };
   atomicWritePrivateJson(settingsPath, next);
+}
+
+function writeSetupMetadata(settingsPath: string, setup: SetupLifecycleRegistration): void {
+  const existing = readSettingsObjectForWrite(settingsPath);
+  const currentSetup = readSetupObjectForWrite(existing);
+  const nextSetup = {
+    ...currentSetup,
+    domain: setup.domain,
+    ...(setup.ownerOpenId !== undefined ? { ownerOpenId: setup.ownerOpenId } : {}),
+    ...(setup.botName !== undefined ? { botName: setup.botName } : {}),
+  };
+  atomicWritePrivateJson(settingsPath, { ...existing, setup: nextSetup });
+}
+
+async function ensureSetupCredentials(
+  existing: FileConfig,
+  settingsPath: string,
+  target: FeishuRegistrationDomain,
+  force: boolean,
+  register: SetupCredentialRegistration = registerSetupCredentials,
+): Promise<SetupCredentialResult> {
+  const appId = existing.credentials.appId;
+  const appSecret = existing.credentials.appSecret;
+  if (!force && appId !== undefined && appSecret !== undefined) {
+    return {
+      credentials: {
+        appId,
+        appSecret,
+        domain: existing.setup.domain ?? target,
+        ...(existing.setup.ownerOpenId !== undefined
+          ? { ownerOpenId: existing.setup.ownerOpenId }
+          : {}),
+        ...(existing.setup.botName !== undefined ? { botName: existing.setup.botName } : {}),
+      },
+      created: false,
+    };
+  }
+
+  const result = await register(target);
+  if (result === null) {
+    throw new CliError("Feishu / Lark setup did not complete. No credentials were changed.");
+  }
+  writeSetupCredentials(settingsPath, { appId: result.appId, appSecret: result.appSecret });
+  writeSetupMetadata(settingsPath, result);
+  return { credentials: result, created: true };
+}
+
+async function registerSetupCredentials(
+  target: FeishuRegistrationDomain,
+): Promise<SetupLifecycleRegistration | null> {
+  return runFeishuLinkRegistration({
+    domain: target,
+    onProgress: printSetupProgress,
+  });
 }
 
 function appendLifecycleNotifyChatId(settingsPath: string, chatId: string): void {
@@ -1436,6 +1532,13 @@ function readRuntimeObjectForWrite(settings: Record<string, unknown>): Record<st
   if (runtime === undefined) return {};
   if (!isRecord(runtime)) throw new CliError("settings file runtime must be a JSON object");
   return runtime;
+}
+
+function readSetupObjectForWrite(settings: Record<string, unknown>): Record<string, unknown> {
+  const setup = settings["setup"];
+  if (setup === undefined) return {};
+  if (!isRecord(setup)) throw new CliError("settings file setup must be a JSON object");
+  return setup;
 }
 
 function readStringArrayForWrite(value: unknown): readonly string[] {
@@ -2458,22 +2561,16 @@ async function runSetup(args: ParsedArgs): Promise<void> {
 
   const target = args.setupTarget ?? "feishu";
   process.stdout.write("Feishu / Lark setup\n\n");
-  const result = await runFeishuLinkRegistration({
-    domain: target,
-    onProgress: printSetupProgress,
-  });
-  if (result === null) {
-    throw new CliError("Feishu / Lark setup did not complete. No credentials were changed.");
-  }
+  const credentialStep = await ensureSetupCredentials(
+    existing,
+    configPath,
+    target,
+    args.setupForce === true,
+  );
+  process.stdout.write(formatSetupCredentialStep(credentialStep));
 
-  writeSetupCredentials(configPath, { appId: result.appId, appSecret: result.appSecret });
-  const lifecycleEnrollment = await enrollSetupLifecycleNotification(configPath, {
-    appId: result.appId,
-    appSecret: result.appSecret,
-    domain: result.domain,
-    ...(result.ownerOpenId !== undefined ? { ownerOpenId: result.ownerOpenId } : {}),
-    ...(result.botName !== undefined ? { botName: result.botName } : {}),
-  });
+  const result = credentialStep.credentials;
+  const lifecycleEnrollment = await enrollSetupLifecycleNotification(configPath, result);
   process.stdout.write(formatSetupLifecycleEnrollment(lifecycleEnrollment));
   process.stdout.write(
     formatSetupSummary({
@@ -2488,6 +2585,11 @@ async function runSetup(args: ParsedArgs): Promise<void> {
 
 function printSetupProgress(event: FeishuLinkRegistrationProgress): void {
   process.stdout.write(formatSetupProgress(event));
+}
+
+function formatSetupCredentialStep(result: SetupCredentialResult): string {
+  if (result.created) return "Credentials: created and saved.\n\n";
+  return "Credentials: already configured, skipping app registration.\n\n";
 }
 
 function formatSetupLifecycleEnrollment(result: SetupLifecycleEnrollmentResult): string {
@@ -2750,8 +2852,10 @@ export {
   runInit,
   runSetup,
   writeSetupCredentials,
+  ensureSetupCredentials,
   enrollSetupLifecycleNotification,
   formatSetupProgress,
+  formatSetupCredentialStep,
   formatSetupLifecycleEnrollment,
   formatSetupSummary,
   maskCredentialId,

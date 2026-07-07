@@ -4,10 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import {
   enrollSetupLifecycleNotification,
+  ensureSetupCredentials,
   formatSetupProgress,
   formatSetupSummary,
   maskCredentialId,
   parseArgs,
+  readConfigFile,
   writeSetupCredentials,
 } from "./humming.js";
 
@@ -57,6 +59,43 @@ describe("setup credential persistence", () => {
       credentials: { appId: "cli_created", appSecret: "created-secret" },
     });
     expect((fs.statSync(settings).mode & 0o777).toString(8)).toBe("600");
+  });
+
+  it("skips credential registration when credentials already exist", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-existing-"));
+    const settings = path.join(dir, "settings.json");
+    fs.writeFileSync(
+      settings,
+      JSON.stringify({
+        credentials: { appId: "cli_existing", appSecret: "existing-secret" },
+        setup: { ownerOpenId: "ou_existing_owner" },
+        runtime: { agent: "claude" },
+      }),
+      "utf-8",
+    );
+
+    const result = await ensureSetupCredentials(
+      readConfigFile(settings),
+      settings,
+      "feishu",
+      false,
+      async () => {
+        throw new Error("registration should be skipped");
+      },
+    );
+
+    expect(result).toEqual({
+      credentials: {
+        appId: "cli_existing",
+        appSecret: "existing-secret",
+        domain: "feishu",
+        ownerOpenId: "ou_existing_owner",
+      },
+      created: false,
+    });
+    expect(readConfigFile(settings).runtime.agent).toBe("claude");
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("masks identifiers and never includes the app secret in the success summary", () => {
