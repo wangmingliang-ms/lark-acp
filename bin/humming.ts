@@ -123,7 +123,7 @@ const ENV_UPDATE_REF = "HUMMING_REF";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 1440;
 const DEFAULT_MAX_CHATS = 10;
-const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
+const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAllow";
 const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
 /**
  * Agent used when neither `--agent` nor settings.json `runtime.agent` names one.
@@ -677,6 +677,8 @@ type ParsedArgs = {
   readonly targetAgent?: string;
   readonly targetSessionId?: string;
   readonly controlJson?: string | boolean;
+  readonly controlJsonFile?: string;
+  readonly controlJsonStdin?: boolean;
   readonly setupTarget?: FeishuRegistrationDomain;
   readonly setupForce?: boolean;
 };
@@ -877,6 +879,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly targetAgent?: string;
       readonly targetSessionId?: string;
       readonly controlJson?: string | boolean;
+      readonly controlJsonFile?: string;
+      readonly controlJsonStdin?: boolean;
       readonly setupTarget?: FeishuRegistrationDomain;
       readonly setupForce?: boolean;
     } = {},
@@ -910,6 +914,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(extra.targetAgent !== undefined ? { targetAgent: extra.targetAgent } : {}),
       ...(extra.targetSessionId !== undefined ? { targetSessionId: extra.targetSessionId } : {}),
       ...(extra.controlJson !== undefined ? { controlJson: extra.controlJson } : {}),
+      ...(extra.controlJsonFile !== undefined ? { controlJsonFile: extra.controlJsonFile } : {}),
+      ...(extra.controlJsonStdin !== undefined ? { controlJsonStdin: extra.controlJsonStdin } : {}),
       ...(extra.setupTarget !== undefined ? { setupTarget: extra.setupTarget } : {}),
       ...(extra.setupForce !== undefined ? { setupForce: extra.setupForce } : {}),
     };
@@ -1025,6 +1031,8 @@ function parseSessionsFlags(
   readonly targetAgent?: string;
   readonly targetSessionId?: string;
   readonly controlJson?: string | boolean;
+  readonly controlJsonFile?: string;
+  readonly controlJsonStdin?: boolean;
 } {
   const action = argv[start];
   if (
@@ -1049,6 +1057,11 @@ function parseSessionsFlags(
         "sessions set-agent does not accept --json; switch the Agent first, then use sessions set-control with ids from the new agent's capabilities",
       );
     }
+    if (parsed.jsonFile !== undefined || parsed.jsonStdin !== undefined) {
+      throw new CliError(
+        "sessions set-agent does not accept JSON control payloads; switch the Agent first, then use sessions set-control with ids from the new agent's capabilities",
+      );
+    }
     return {
       sessionsAction: "set-agent",
       targetChatId: parsed.chatId,
@@ -1058,13 +1071,19 @@ function parseSessionsFlags(
   }
   if (action === "set-control") {
     if (!parsed.chatId) throw new CliError("sessions set-control requires --chat-id <id>");
-    if (typeof parsed.json !== "string")
-      throw new CliError("sessions set-control requires --json <json>");
+    const inputCount = countControlJsonInputs(parsed.json, parsed.jsonFile, parsed.jsonStdin);
+    if (inputCount !== 1) {
+      throw new CliError(
+        "sessions set-control requires exactly one of --json <json>, --json-file <path>, or --json-stdin",
+      );
+    }
     return {
       sessionsAction: "set-control",
       targetChatId: parsed.chatId,
       ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
-      controlJson: parsed.json,
+      ...(typeof parsed.json === "string" ? { controlJson: parsed.json } : {}),
+      ...(parsed.jsonFile !== undefined ? { controlJsonFile: parsed.jsonFile } : {}),
+      ...(parsed.jsonStdin !== undefined ? { controlJsonStdin: parsed.jsonStdin } : {}),
     };
   }
   if (action === "list") {
@@ -1097,6 +1116,15 @@ function parseSessionsFlags(
   };
 }
 
+function countControlJsonInputs(
+  json: string | boolean | undefined,
+  jsonFile: string | undefined,
+  jsonStdin: boolean | undefined,
+): number {
+  return [typeof json === "string", jsonFile !== undefined, jsonStdin === true].filter(Boolean)
+    .length;
+}
+
 function parseTargetFlags(
   argv: readonly string[],
   start: number,
@@ -1107,6 +1135,8 @@ function parseTargetFlags(
   readonly agent?: string;
   readonly sessionId?: string;
   readonly json?: string | boolean;
+  readonly jsonFile?: string;
+  readonly jsonStdin?: boolean;
 } {
   let chatId: string | undefined;
   let threadId: string | null | undefined;
@@ -1114,6 +1144,8 @@ function parseTargetFlags(
   let agent: string | undefined;
   let sessionId: string | undefined;
   let json: string | boolean | undefined;
+  let jsonFile: string | undefined;
+  let jsonStdin: boolean | undefined;
   let i = start;
   while (i < argv.length) {
     const token = argv[i];
@@ -1158,6 +1190,19 @@ function parseTargetFlags(
       }
       continue;
     }
+    if (token === "--json-file") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--json-file requires a value");
+      }
+      jsonFile = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--json-stdin") {
+      jsonStdin = true;
+      i += 1;
+      continue;
+    }
     throw new CliError(`unknown control option: ${token ?? "<none>"}`);
   }
   const envChatId = nonEmptyEnv(ENV_CHAT_ID);
@@ -1176,6 +1221,8 @@ function parseTargetFlags(
     ...(agent !== undefined ? { agent } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
     ...(json !== undefined ? { json } : {}),
+    ...(jsonFile !== undefined ? { jsonFile } : {}),
+    ...(jsonStdin !== undefined ? { jsonStdin } : {}),
   };
 }
 
@@ -1708,7 +1755,7 @@ function printHelp(): void {
     `                         Start a short-lived probe session for the selected`,
     `                         agent and print its model/mode/config capabilities`,
     `                         without changing the current topic session.`,
-    `  sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
+    `  sessions set-control --chat-id <id> [--thread-id <id>] (--json '<controls>' | --json-file <path> | --json-stdin)`,
     `                         Persist controls to sessions.json and apply them to`,
     `                         the live runtime when present. The controls JSON uses`,
     `                         ACP-shaped fields: modelId, modeId, config, plus`,
@@ -2180,6 +2227,26 @@ async function runSessionSetAgent(args: ParsedArgs): Promise<void> {
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
 }
 
+function readControlJsonInput(args: ParsedArgs): string {
+  if (typeof args.controlJson === "string") return args.controlJson;
+  if (args.controlJsonFile !== undefined) {
+    const filePath = path.resolve(expandTilde(args.controlJsonFile));
+    try {
+      return fs.readFileSync(filePath, "utf-8");
+    } catch (err) {
+      throw new CliError(`failed to read --json-file ${filePath}: ${formatError(err)}`);
+    }
+  }
+  if (args.controlJsonStdin === true) {
+    try {
+      return fs.readFileSync(0, "utf-8");
+    } catch (err) {
+      throw new CliError(`failed to read --json-stdin: ${formatError(err)}`);
+    }
+  }
+  throw new CliError("sessions set-control requires a JSON controls payload");
+}
+
 async function runSessions(args: ParsedArgs): Promise<void> {
   if (args.sessionsAction === "list") {
     await runSessionList(args);
@@ -2198,11 +2265,8 @@ async function runSessions(args: ParsedArgs): Promise<void> {
   }
   const chatId = args.targetChatId;
   if (!chatId) throw new CliError("sessions set-control requires --chat-id <id>");
-  if (typeof args.controlJson !== "string") {
-    throw new CliError("sessions set-control requires --json <controls>");
-  }
 
-  const controls = parseControlJson(args.controlJson);
+  const controls = parseControlJson(readControlJsonInput(args));
   const homeDir = resolveHomeDir(args.home);
   const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
     method: "setControls",
@@ -2855,6 +2919,7 @@ export {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  readControlJsonInput,
   runProxy,
   runInit,
   runSetup,
@@ -2869,5 +2934,6 @@ export {
   resolveUpdateRef,
   restartHasExplicitOptions,
   DEFAULT_AGENT,
+  DEFAULT_PERMISSION_MODE,
 };
 export type { ParsedArgs };

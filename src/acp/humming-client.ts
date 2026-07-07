@@ -227,10 +227,10 @@ function redactCommand(command: string): string {
 /**
  * Strategy for handling agent-side permission requests.
  *
- * - `alwaysAsk` (default) — forward every request to the user as a Lark card
+ * - `alwaysAllow` (default) — auto-pick the agent's first `allow_*` option
+ *   without bothering the user. Falls back to `cancelled` if no allow option exists.
+ * - `alwaysAsk` — forward every request to the user as a Lark card
  *   and block the agent until they pick an option.
- * - `alwaysAllow` — auto-pick the agent's first `allow_*` option without
- *   bothering the user. Falls back to `cancelled` if no allow option exists.
  * - `alwaysDeny` — auto-pick the agent's first `reject_*` option, falling
  *   back to `cancelled` (which the agent treats as a denial).
  */

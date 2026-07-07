@@ -56,7 +56,7 @@ describe("installHomeTemplates", () => {
           controls: {
             modelId: "example-model-id",
             modeId: "example-mode-id",
-            bridgePermissionMode: "alwaysAsk",
+            bridgePermissionMode: "alwaysAllow",
           },
         },
       ],

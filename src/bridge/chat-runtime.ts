@@ -727,6 +727,9 @@ export class ChatRuntime {
         state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
         state.client.adoptProgressCard(pending.progressCardId);
 
+        await this.applyPendingControlsBeforePrompt(state, pending.messageId);
+        if (this.aborted || this.state !== state) return;
+
         this.promptInFlight = true;
         try {
           await this.runPrompt(state, pending);
@@ -741,6 +744,89 @@ export class ChatRuntime {
     } finally {
       if (this.state) this.state.processing = false;
     }
+  }
+
+  private async applyPendingControlsBeforePrompt(
+    state: ChatRuntimeState,
+    messageId: string,
+  ): Promise<void> {
+    let consumed: Awaited<ReturnType<SessionStore["consumePendingControls"]>>;
+    try {
+      consumed = await this.opts.sessionStore.consumePendingControls({
+        chatId: this.opts.chatId,
+        threadId: this.opts.threadId,
+        sessionId: state.agent.sessionId,
+      });
+    } catch (err) {
+      this.logger.warn({ err }, "pending session controls lookup failed");
+      return;
+    }
+    const pendingControls = consumed.pendingControls;
+    if (pendingControls === undefined || !hasControls(pendingControls)) return;
+
+    const beforeSnapshot = cloneCapabilitiesSnapshot({
+      ...state.sessionCapabilities,
+      bridgePermissionMode: state.client.getPermissionMode(),
+    });
+    try {
+      this.validateControls(state.sessionCapabilities, pendingControls);
+      const nextCapabilities = await this.applyControlsToState(state, pendingControls);
+      if (pendingControls.bridgePermissionMode !== undefined) {
+        state.client.setPermissionMode(pendingControls.bridgePermissionMode);
+      }
+      state.sessionCapabilities = nextCapabilities;
+      await this.persistSession(state.agent.sessionId, pendingControls);
+      await this.notifyPendingControlSuccess(
+        messageId,
+        state,
+        beforeSnapshot,
+        {
+          ...state.sessionCapabilities,
+          bridgePermissionMode: state.client.getPermissionMode(),
+        },
+        pendingControls,
+      );
+    } catch (err) {
+      this.logger.warn({ err }, "pending session controls apply failed");
+      await this.notifyPendingControlFailure(messageId, err);
+    }
+  }
+
+  private async notifyPendingControlFailure(messageId: string, err: unknown): Promise<void> {
+    const body = [
+      "之前排队的 session control 设置在本轮发送前应用失败，已丢弃；当前消息会继续使用旧 profile。",
+      "",
+      formatControlFailure(err),
+      "",
+      "请让 agent 重新查询 capabilities 后，使用有效的 modelId / modeId / config 值再试。",
+    ].join("\n");
+    await this.opts.presenter
+      .replyNoticeCard(messageId, {
+        title: "⚠️ 排队的 Session 设置未生效",
+        body,
+        template: "orange",
+      })
+      .catch((sendErr) =>
+        this.logger.warn({ err: sendErr }, "pending control failure notice failed"),
+      );
+  }
+
+  private async notifyPendingControlSuccess(
+    messageId: string,
+    state: ChatRuntimeState,
+    before: SessionCapabilitiesSnapshot,
+    after: SessionCapabilitiesSnapshot,
+    controls: SessionControls,
+  ): Promise<void> {
+    await this.opts.presenter
+      .replyNoticeCard(messageId, {
+        title: "✅ 排队的 Session profile 已生效",
+        body: renderControlSuccessBody(before, after, controls),
+        template: "green",
+      })
+      .catch((sendErr) =>
+        this.logger.warn({ err: sendErr }, "pending control success notice failed"),
+      );
   }
 
   private async runPrompt(state: ChatRuntimeState, pending: PendingMessage): Promise<void> {
@@ -878,6 +964,9 @@ export class ChatRuntime {
         cwd: this.opts.agentCwd,
         ...(previous?.controls !== undefined || controls !== undefined
           ? { controls: mergeSessionControls(previous?.controls, controls) }
+          : {}),
+        ...(previous?.pendingControls !== undefined
+          ? { pendingControls: previous.pendingControls }
           : {}),
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,

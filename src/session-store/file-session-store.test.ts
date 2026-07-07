@@ -229,6 +229,47 @@ describe("FileSessionStore session controls", () => {
     });
   });
 
+  it("queues and consumes pending controls as one-shot next-turn state", async () => {
+    await store.save(
+      record({
+        chatId: "oc_A",
+        threadId: "th_1",
+        sessionId: "s_t1",
+        controls: { modelId: "model-old" },
+        pendingControls: { config: { approval_mode: { value: "ask" } } },
+      }),
+    );
+
+    const queued = await store.setPendingControls(
+      { chatId: "oc_A", threadId: "th_1" },
+      {
+        modeId: "agent",
+        config: {
+          approval_mode: { value: "auto" },
+          auto_edit: { type: "boolean", value: true },
+        },
+      },
+    );
+    expect(queued).toMatchObject({
+      controls: { modelId: "model-old" },
+      pendingControls: {
+        modeId: "agent",
+        config: {
+          approval_mode: { value: "auto" },
+          auto_edit: { type: "boolean", value: true },
+        },
+      },
+    });
+
+    const consumed = await store.consumePendingControls({ chatId: "oc_A", threadId: "th_1" });
+    expect(consumed.pendingControls).toMatchObject({ modeId: "agent" });
+    expect(consumed.record.pendingControls).toBeUndefined();
+    expect(await store.getLatest("oc_A", "th_1")).toMatchObject({
+      controls: { modelId: "model-old" },
+      pendingControls: undefined,
+    });
+  });
+
   it("throws when setControls targets a missing session", async () => {
     await expect(
       store.setControls({ chatId: "oc_missing", threadId: null }, { modeId: "agent" }),

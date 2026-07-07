@@ -13,7 +13,7 @@
       "controls": {
         "modelId": "example-model-id",
         "modeId": "example-mode-id",
-        "bridgePermissionMode": "alwaysAsk",
+        "bridgePermissionMode": "alwaysAllow",
         "config": {
           "example_boolean_config": {
             "type": "boolean",

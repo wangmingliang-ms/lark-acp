@@ -68,7 +68,15 @@ humming control agent-capabilities --agent copilot --json
 
 If the probe fails and a chat id is available, humming sends a `目标 Agent 不可用` notification to the user. Treat that as a hard blocker: do not switch Agent or write controls until the target Agent is installed/authenticated and the probe succeeds.
 
-Set controls with one JSON payload:
+Set controls with one JSON payload. Prefer `--json-file` or `--json-stdin` on Windows to avoid PowerShell 5.1 / npm shim quote rewriting:
+
+```bash
+humming sessions set-control --json-file /absolute/path/to/controls.json
+# or
+humming sessions set-control --json-stdin < /absolute/path/to/controls.json
+```
+
+Inline JSON is also supported when the shell preserves quotes correctly:
 
 ```bash
 humming sessions set-control --json '{
@@ -78,7 +86,7 @@ humming sessions set-control --json '{
     "<boolean config id>": { "type": "boolean", "value": true },
     "<select config id>": { "value": "<one select option value>" }
   },
-  "bridgePermissionMode": "alwaysAsk"
+  "bridgePermissionMode": "alwaysAllow"
 }'
 ```
 
@@ -86,7 +94,9 @@ All fields are optional; include only the controls the user asked to change. ACP
 
 If set-control fails, humming should surface a clear error notice to the user and keep the live runtime plus `sessions.json` unchanged. Ask the agent to query capabilities again and retry with valid ids/values.
 
-When set-control succeeds, humming sends a `Session profile 已更新` notice that includes the current Agent, Mode, Model, Permission, and Config controls. If the runtime is not currently running, the notice is sent to the chat and the next message will start/resume with the stored profile.
+If set-control succeeds while the current topic is idle, humming sends a `Session profile 已更新` notice that includes the current Agent, Mode, Model, Permission, and Config controls. If the runtime is not currently running, the notice is sent to the chat and the next message will start/resume with the stored profile.
+
+If set-control is requested while the current topic has an in-flight prompt, Humming saves the requested change as one-shot `pendingControls`. The current prompt continues with the old profile. Before the next prompt is sent to the ACP agent, Humming consumes `pendingControls`, applies them, merges them into `controls`, and removes `pendingControls`. If applying fails, Humming still removes `pendingControls`, sends an error notice, and continues the new prompt with the old profile.
 
 ## Switching the current topic's Agent
 

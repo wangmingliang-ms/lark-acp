@@ -134,6 +134,22 @@ function stubSessionStore(): SessionStore {
     setControls: async () => {
       throw new Error("setControls not implemented in stub");
     },
+    setPendingControls: async () => {
+      throw new Error("setPendingControls not implemented in stub");
+    },
+    consumePendingControls: async () => ({
+      record: {
+        chatId: "oc_test",
+        threadId: null,
+        sessionId: "sess_fake",
+        agentCommand: "node",
+        agentArgs: [],
+        cwd: "/tmp",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      pendingControls: undefined,
+    }),
     clearThread: async () => {},
     delete: async () => {},
   };
@@ -163,10 +179,8 @@ function makeFakeAgent(): FakeAgentHandle {
     resolveClosed = resolve;
   });
 
-  let resolvePrompt: (r: acp.PromptResponse) => void = () => {};
-  const promptResult = new Promise<acp.PromptResponse>((resolve) => {
-    resolvePrompt = resolve;
-  });
+  const promptResolvers: Array<(r: acp.PromptResponse) => void> = [];
+  const queuedPromptResponses: acp.PromptResponse[] = [];
 
   let exitHandler: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = null;
   const proc = {
@@ -182,7 +196,15 @@ function makeFakeAgent(): FakeAgentHandle {
   const connection = {
     // Stays pending until `resolvePrompt` is called — the crux of the bug is
     // that the SDK never rejects this when the stream closes.
-    prompt: () => promptResult,
+    prompt: () =>
+      new Promise<acp.PromptResponse>((resolve) => {
+        const queued = queuedPromptResponses.shift();
+        if (queued) {
+          resolve(queued);
+          return;
+        }
+        promptResolvers.push(resolve);
+      }),
     cancel: async () => {},
     unstable_setSessionModel: async () => ({}),
     setSessionMode: async () => ({}),
@@ -234,7 +256,12 @@ function makeFakeAgent(): FakeAgentHandle {
 
   return {
     agent,
-    resolvePrompt: (stopReason) => resolvePrompt({ stopReason }),
+    resolvePrompt: (stopReason) => {
+      const response: acp.PromptResponse = { stopReason };
+      const resolve = promptResolvers.shift();
+      if (resolve) resolve(response);
+      else queuedPromptResponses.push(response);
+    },
     exitProcess: (code, signal = null) => {
       proc.exitCode = code;
       proc.signalCode = signal;
@@ -607,6 +634,135 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       "cannot be changed while this topic has an in-flight prompt",
     );
     expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it("preserves pending controls from an in-flight turn and applies them before the next queued prompt", async () => {
+    const fake = makeFakeAgent();
+    const setModel = vi.fn(async () => ({}));
+    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      prompt,
+      unstable_setSessionModel: setModel,
+    } as AgentProcess["connection"];
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    let latest: SessionRecord | null = null;
+    const store: SessionStore = {
+      ...stubSessionStore(),
+      getLatest: async () => latest,
+      save: async (record) => {
+        latest = record;
+      },
+      consumePendingControls: async () => {
+        if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
+        const pendingControls = latest.pendingControls;
+        latest = { ...latest, pendingControls: undefined };
+        return { record: latest, pendingControls };
+      },
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: store,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first" }],
+      messageId: "om_pending_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(latest, "bootstrap should persist the session before the prompt runs").toBeTruthy();
+    latest = {
+      ...latest!,
+      pendingControls: { modelId: "model-new" },
+    };
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "second" }],
+      messageId: "om_pending_second",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("end_turn");
+
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
+    expect(setModel.mock.invocationCallOrder[0]).toBeLessThan(prompt.mock.invocationCallOrder[1]!);
+
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
+    expect(latest?.pendingControls).toBeUndefined();
+  });
+
+  it("applies persisted pending controls after restart before sending the first resumed prompt", async () => {
+    const fake = makeFakeAgent();
+    const setModel = vi.fn(async () => ({}));
+    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      prompt,
+      unstable_setSessionModel: setModel,
+    } as AgentProcess["connection"];
+    spawnAndResumeAgentMock.mockResolvedValue({ agent: fake.agent, resumed: true });
+
+    let latest: SessionRecord | null = {
+      chatId: "oc_test",
+      threadId: null,
+      sessionId: "sess_fake",
+      agentCommand: "node",
+      agentArgs: [],
+      cwd: "/tmp",
+      controls: { modelId: "model-old" },
+      pendingControls: { modelId: "model-new" },
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: {
+        ...stubSessionStore(),
+        getLatest: async () => latest,
+        save: async (record) => {
+          latest = record;
+        },
+        consumePendingControls: async () => {
+          if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
+          const pendingControls = latest.pendingControls;
+          latest = { ...latest, pendingControls: undefined };
+          return { record: latest, pendingControls };
+        },
+      },
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "after restart" }],
+      messageId: "om_pending_restart",
+      chatId: "oc_test",
+    });
+
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    const appliedCall = setModel.mock.calls.findIndex((call) => call[0].modelId === "model-new");
+    expect(appliedCall).toBeGreaterThanOrEqual(0);
+    expect(setModel.mock.invocationCallOrder[appliedCall]).toBeLessThan(
+      prompt.mock.invocationCallOrder[0]!,
+    );
+    expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
+    expect(latest?.pendingControls).toBeUndefined();
   });
 
   it("cleans invalid persisted controls before applying stored session settings", async () => {

@@ -36,7 +36,7 @@ const DEFAULT_SHOW_TOOLS = true;
 const DEFAULT_SHOW_CANCEL_BUTTON = true;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
-const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
+const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAllow";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
 /** Debounce for settings.json change events (fs.watch double-fires). */
 const SETTINGS_RELOAD_DEBOUNCE_MS = 300;
@@ -215,7 +215,7 @@ export interface LarkBridgeAgentOptions {
    */
   idleStatusCardMs?: number;
   /**
-   * How to handle agent-side permission requests. Default `"alwaysAsk"`.
+   * How to handle agent-side permission requests. Default `"alwaysAllow"`.
    * `"alwaysAllow"` / `"alwaysDeny"` auto-resolve without involving the user.
    */
   permissionMode?: PermissionMode;
@@ -550,9 +550,26 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     controls: SessionControls,
-  ): Promise<{ readonly applied: boolean; readonly recordSessionId: string }> {
+  ): Promise<{
+    readonly applied: boolean;
+    readonly queued?: boolean;
+    readonly recordSessionId: string;
+  }> {
     const runtime = this.chats.get(runtimeKey(chatId, threadId));
     if (runtime) {
+      if (runtime.processing) {
+        const before = await this.sessionStore.getLatest(chatId, threadId);
+        const record = await this.sessionStore.setPendingControls({ chatId, threadId }, controls);
+        await this.presenter
+          .replyNoticeCard(
+            runtime.lastMessageId ?? chatId,
+            buildPendingControlQueuedNotice(before, record, controls),
+          )
+          .catch((err) =>
+            this.logger.warn({ err, chatId, threadId }, "pending control queue notice failed"),
+          );
+        return { applied: false, queued: true, recordSessionId: record.sessionId };
+      }
       await runtime.applyControls(controls);
       return { applied: true, recordSessionId: runtime.capabilities().session.sessionId };
     }
@@ -1699,6 +1716,34 @@ function buildStoredControlUpdatedNotice(
     title: "✅ Session profile 已更新",
     body: lines.join("\n"),
     template: "green",
+  };
+}
+
+function buildPendingControlQueuedNotice(
+  before: SessionRecord | null,
+  after: SessionRecord,
+  changed: SessionControls,
+): NoticeCardSpec {
+  const pending = after.pendingControls;
+  const lines = [
+    "当前 topic 正在处理上一条消息，新的 session profile 已保存为下一轮生效。",
+    "",
+    "当前任务会继续使用旧 profile；下一次向 agent 发送 prompt 前，Humming 会先应用这些设置，成功后自动清掉 pendingControls。",
+    "",
+    "**排队修改**",
+    ...storedControlChangeLines(before?.pendingControls, pending, changed),
+    "",
+    "**当前已排队 profile**",
+    `• Agent：${after.agentLabel ?? after.agentCommand}`,
+    `• Mode：${displayControlMode(pending)}`,
+    `• Model：${displayControlModel(pending)}`,
+    `• Permission：${displayControlPermission(pending)}`,
+    `• Controls：${displayControlConfig(pending)}`,
+  ];
+  return {
+    title: "⏳ Session profile 已排队",
+    body: lines.join("\n"),
+    template: "blue",
   };
 }
 

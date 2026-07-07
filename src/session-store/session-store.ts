@@ -39,6 +39,8 @@ export interface SessionRecord {
   agentLabel?: string;
   cwd: string;
   controls?: SessionControls;
+  /** One-shot next-turn control changes, consumed before the next ACP prompt. */
+  pendingControls?: SessionControls;
   createdAt: number;
   updatedAt: number;
 }
@@ -133,6 +135,17 @@ export interface SessionStore {
 
   /** Merge control fields into one existing/current session record. */
   setControls(target: SessionControlTarget, controls: SessionControls): Promise<SessionRecord>;
+
+  /** Merge control fields into the one-shot next-turn queue for one existing/current session. */
+  setPendingControls(
+    target: SessionControlTarget,
+    controls: SessionControls,
+  ): Promise<SessionRecord>;
+
+  /** Consume the one-shot next-turn controls for one existing/current session. */
+  consumePendingControls(
+    target: SessionControlTarget,
+  ): Promise<{ readonly record: SessionRecord; readonly pendingControls?: SessionControls }>;
 
   /** Drop all persisted ACP sessions for one chat/thread. */
   clearThread(chatId: string, threadId: string | null): Promise<void>;

@@ -166,6 +166,35 @@ export class FileSessionStore implements SessionStore {
     return updated;
   }
 
+  async setPendingControls(
+    target: SessionControlTarget,
+    controls: SessionControls,
+  ): Promise<SessionRecord> {
+    const record = await this.findControlTarget(target);
+    const updated: SessionRecord = {
+      ...record,
+      pendingControls: mergeControls(record.pendingControls, controls),
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async consumePendingControls(
+    target: SessionControlTarget,
+  ): Promise<{ readonly record: SessionRecord; readonly pendingControls?: SessionControls }> {
+    const record = await this.findControlTarget(target);
+    const pendingControls = record.pendingControls;
+    if (pendingControls === undefined) return { record };
+    const updated: SessionRecord = {
+      ...record,
+      pendingControls: undefined,
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return { record: updated, pendingControls };
+  }
+
   async clearThread(chatId: string, threadId: string | null): Promise<void> {
     const records = this.data.get(chatId);
     if (!records) return;
@@ -208,6 +237,7 @@ export class FileSessionStore implements SessionStore {
     if (this.flushScheduled) return;
     this.flushScheduled = true;
     setImmediate(() => {
+      if (!this.flushScheduled) return;
       try {
         this.flushNow();
       } catch (err) {

@@ -23,10 +23,12 @@ import {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  readControlJsonInput,
   runInit,
   resolveUpdateRef,
   restartHasExplicitOptions,
   DEFAULT_AGENT,
+  DEFAULT_PERMISSION_MODE,
   type ParsedArgs,
 } from "./humming.js";
 import { buildRegistry } from "./agents.js";
@@ -244,6 +246,43 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(args.controlJson).toBe(json);
   });
 
+  it("parses set-control JSON file and stdin payload sources", () => {
+    const fromFile = parseArgs([
+      "sessions",
+      "set-control",
+      "--chat-id",
+      "oc_A",
+      "--json-file",
+      "controls.json",
+    ]);
+    expect(fromFile.sessionsAction).toBe("set-control");
+    expect(fromFile.controlJsonFile).toBe("controls.json");
+    expect(fromFile.controlJson).toBeUndefined();
+
+    const fromStdin = parseArgs(["sessions", "set-control", "--chat-id", "oc_A", "--json-stdin"]);
+    expect(fromStdin.sessionsAction).toBe("set-control");
+    expect(fromStdin.controlJsonStdin).toBe(true);
+    expect(fromStdin.controlJson).toBeUndefined();
+  });
+
+  it("rejects ambiguous or missing set-control JSON payload sources", () => {
+    expect(() => parseArgs(["sessions", "set-control", "--chat-id", "oc_A"])).toThrowError(
+      /exactly one of --json/,
+    );
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "set-control",
+        "--chat-id",
+        "oc_A",
+        "--json",
+        '{"modeId":"agent"}',
+        "--json-file",
+        "controls.json",
+      ]),
+    ).toThrowError(/exactly one of --json/);
+  });
+
   it("parses session list with optional cwd and agent", () => {
     const args = parseArgs([
       "sessions",
@@ -353,6 +392,19 @@ describe("parseControlJson", () => {
     });
   });
 
+  it("reads set-control payloads from a JSON file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-json-file-"));
+    try {
+      const file = path.join(dir, "controls.json");
+      fs.writeFileSync(file, '{"modeId":"agent"}', "utf-8");
+      const args = parseArgs(["sessions", "set-control", "--chat-id", "oc_A", "--json-file", file]);
+      expect(readControlJsonInput(args)).toBe('{"modeId":"agent"}');
+      expect(parseControlJson(readControlJsonInput(args))).toEqual({ modeId: "agent" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects invalid permission modes", () => {
     expect(() => parseControlJson('{"bridgePermissionMode":"bypass"}')).toThrowError(
       /bridgePermissionMode/,
@@ -388,7 +440,7 @@ describe("runInit", () => {
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "sessions.back.json"), "utf-8")),
     ).toMatchObject({
-      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAsk" } }],
+      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAllow" } }],
     });
     expect(fs.existsSync(path.join(home, "settings.json"))).toBe(false);
     expect(fs.existsSync(path.join(home, "sessions.json"))).toBe(false);
@@ -538,6 +590,27 @@ describe("legacy migration isolation", () => {
     migrateLegacyIfNeeded(explicitHome, settings, silentLogger);
 
     expect(fs.existsSync(settings)).toBe(false);
+  });
+});
+
+describe("default permission mode", () => {
+  it("defaults runtime.permissionMode to auto-approve when unset", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-permission-default-"));
+    try {
+      const settings = path.join(dir, "settings.json");
+      fs.writeFileSync(
+        settings,
+        JSON.stringify({ credentials: { appId: "cli_x", appSecret: "secret" } }),
+      );
+      const cfg = readConfigFile(settings);
+      const inv = resolveDefaultAgent(parseArgs(["proxy"]), registry, cfg.runtime.agent);
+      expect(inv.label).toBe(DEFAULT_AGENT);
+      expect(DEFAULT_PERMISSION_MODE).toBe("alwaysAllow");
+      expect(cfg.runtime.permissionMode).toBeUndefined();
+      expect(parseArgs(["proxy"]).permissionMode).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
