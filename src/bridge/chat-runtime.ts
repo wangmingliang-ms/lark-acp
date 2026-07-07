@@ -805,6 +805,7 @@ export class ChatRuntime {
     this.logger.info({ stopReason: result.stopReason, usage: result.usage ?? null }, "prompt done");
     await state.client.finalize(stopReasonToStatus(result.stopReason));
     await this.persistSession(state.agent.sessionId);
+    await this.applyPendingControlsBeforePrompt(state, pending.messageId);
   }
 
   /**

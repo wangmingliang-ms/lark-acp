@@ -699,7 +699,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(setMode).not.toHaveBeenCalled();
   });
 
-  it("preserves pending controls from an in-flight turn and applies them before the next queued prompt", async () => {
+  it("applies controls queued during an in-flight turn as soon as that turn finishes", async () => {
     const fake = makeFakeAgent();
     const setModel = vi.fn(async () => ({}));
     const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
@@ -711,6 +711,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     spawnAgentMock.mockResolvedValue(fake.agent);
 
     let latest: SessionRecord | null = null;
+    const notices: Array<{ title: string; body: string; template: string }> = [];
     const store: SessionStore = {
       ...stubSessionStore(),
       getLatest: async () => latest,
@@ -726,13 +727,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     };
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter([]),
+      presenter: recordingPresenter([], notices),
       sessionStore: store,
     });
 
     await runtime.enqueue({
-      prompt: [{ type: "text", text: "first" }],
-      messageId: "om_pending_first",
+      prompt: [{ type: "text", text: "change my mode" }],
+      messageId: "om_pending_current_turn",
       chatId: "oc_test",
     });
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
@@ -745,27 +746,20 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       pendingControls: { modelId: "model-new" },
     };
 
-    await runtime.enqueue({
-      prompt: [{ type: "text", text: "second" }],
-      messageId: "om_pending_second",
-      chatId: "oc_test",
-    });
     fake.resolvePrompt("end_turn");
 
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
-    expect(setModel.mock.invocationCallOrder[0]).toBeLessThan(prompt.mock.invocationCallOrder[1]!);
-
-    fake.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(runtime.processing).toBe(false), {
       timeout: 1_000,
       interval: 20,
     });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
     expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
     expect(latest?.pendingControls).toBeUndefined();
+    expect(notices.at(-1)).toMatchObject({
+      title: "✅ 排队的 Session profile 已生效",
+      template: "green",
+    });
   });
 
   it("applies persisted pending controls after restart before sending the first resumed prompt", async () => {
