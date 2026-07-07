@@ -10,6 +10,8 @@ import {
 const STDIO_PIPED: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"];
 const WIN32_PLATFORM = "win32";
 const STDERR_BUFFER_LINES = 50;
+const DEFAULT_AGENT_INITIALIZE_TIMEOUT_MS = 60_000;
+const DEFAULT_AGENT_SESSION_TIMEOUT_MS = 60_000;
 
 /**
  * Environment variables Claude Code sets for its own child processes. The
@@ -227,11 +229,17 @@ export async function spawnAgent(opts: SpawnAgentOptions): Promise<AgentProcess>
 
   let sessionResult: Awaited<ReturnType<typeof connection.newSession>>;
   try {
-    sessionResult = await connection.newSession({ cwd: opts.cwd, mcpServers: [] });
+    sessionResult = await withTimeout(
+      connection.newSession({ cwd: opts.cwd, mcpServers: [] }),
+      DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+      `agent newSession (${formatAgentCommand(opts.command, opts.args)})`,
+    );
   } catch (err) {
     if (isAuthError(err)) {
+      killAgent(proc);
       throw new AgentAuthError(opts.command, authHintFor(opts.command, opts.args), err);
     }
+    killAgent(proc);
     throw new Error("Failed to create agent session", { cause: err });
   }
   opts.logger.info({ sessionId: sessionResult.sessionId }, "agent session created");
@@ -338,18 +346,26 @@ export async function spawnAndResumeAgent(
     try {
       let sessionCaps: SessionRuntimeCapabilities;
       if (hasResume) {
-        const resumeResult = await connection.unstable_resumeSession({
-          sessionId: previousSessionId,
-          cwd: opts.cwd,
-          mcpServers: [],
-        });
+        const resumeResult = await withTimeout(
+          connection.unstable_resumeSession({
+            sessionId: previousSessionId,
+            cwd: opts.cwd,
+            mcpServers: [],
+          }),
+          DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+          `agent resumeSession (${formatAgentCommand(opts.command, opts.args)})`,
+        );
         sessionCaps = capabilitiesFromSessionResponse(resumeResult);
       } else {
-        const loadResult = await connection.loadSession({
-          sessionId: previousSessionId,
-          cwd: opts.cwd,
-          mcpServers: [],
-        });
+        const loadResult = await withTimeout(
+          connection.loadSession({
+            sessionId: previousSessionId,
+            cwd: opts.cwd,
+            mcpServers: [],
+          }),
+          DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+          `agent loadSession (${formatAgentCommand(opts.command, opts.args)})`,
+        );
         sessionCaps = capabilitiesFromSessionResponse(loadResult);
       }
       opts.logger.info(
@@ -374,11 +390,17 @@ export async function spawnAndResumeAgent(
 
   let sessionResult: Awaited<ReturnType<typeof connection.newSession>>;
   try {
-    sessionResult = await connection.newSession({ cwd: opts.cwd, mcpServers: [] });
+    sessionResult = await withTimeout(
+      connection.newSession({ cwd: opts.cwd, mcpServers: [] }),
+      DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+      `agent newSession (${formatAgentCommand(opts.command, opts.args)})`,
+    );
   } catch (err) {
     if (isAuthError(err)) {
+      killAgent(proc);
       throw new AgentAuthError(opts.command, authHintFor(opts.command, opts.args), err);
     }
+    killAgent(proc);
     throw new Error("Failed to create agent session after resume failure", { cause: err });
   }
   opts.logger.info({ sessionId: sessionResult.sessionId }, "fresh session created");
@@ -440,15 +462,20 @@ async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {
 
   let initResult: Awaited<ReturnType<typeof connection.initialize>>;
   try {
-    initResult = await connection.initialize({
-      protocolVersion: acp.PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-      },
-    });
+    initResult = await withTimeout(
+      connection.initialize({
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      }),
+      DEFAULT_AGENT_INITIALIZE_TIMEOUT_MS,
+      `agent initialize (${formatAgentCommand(command, args)})`,
+    );
   } catch (err) {
     const tail = getRecentStderr();
     const stderrSuffix = tail.length > 0 ? `\nstderr:\n${tail.join("\n")}` : "";
+    killAgent(proc);
     throw new Error(
       `Failed to initialize agent (${command} ${args.join(" ")}). Is the agent installed?${stderrSuffix}`,
       { cause: err },
@@ -469,4 +496,21 @@ export function killAgent(proc: ChildProcess): void {
   } catch {
     // already dead
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function formatAgentCommand(command: string, args: readonly string[]): string {
+  return [command, ...args].join(" ");
 }
