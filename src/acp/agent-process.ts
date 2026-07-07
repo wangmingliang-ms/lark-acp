@@ -229,8 +229,9 @@ export async function spawnAgent(opts: SpawnAgentOptions): Promise<AgentProcess>
 
   let sessionResult: Awaited<ReturnType<typeof connection.newSession>>;
   try {
-    sessionResult = await withTimeout(
+    sessionResult = await withAgentRequest(
       connection.newSession({ cwd: opts.cwd, mcpServers: [] }),
+      connection,
       DEFAULT_AGENT_SESSION_TIMEOUT_MS,
       `agent newSession (${formatAgentCommand(opts.command, opts.args)})`,
     );
@@ -346,23 +347,25 @@ export async function spawnAndResumeAgent(
     try {
       let sessionCaps: SessionRuntimeCapabilities;
       if (hasResume) {
-        const resumeResult = await withTimeout(
+        const resumeResult = await withAgentRequest(
           connection.unstable_resumeSession({
             sessionId: previousSessionId,
             cwd: opts.cwd,
             mcpServers: [],
           }),
+          connection,
           DEFAULT_AGENT_SESSION_TIMEOUT_MS,
           `agent resumeSession (${formatAgentCommand(opts.command, opts.args)})`,
         );
         sessionCaps = capabilitiesFromSessionResponse(resumeResult);
       } else {
-        const loadResult = await withTimeout(
+        const loadResult = await withAgentRequest(
           connection.loadSession({
             sessionId: previousSessionId,
             cwd: opts.cwd,
             mcpServers: [],
           }),
+          connection,
           DEFAULT_AGENT_SESSION_TIMEOUT_MS,
           `agent loadSession (${formatAgentCommand(opts.command, opts.args)})`,
         );
@@ -390,8 +393,9 @@ export async function spawnAndResumeAgent(
 
   let sessionResult: Awaited<ReturnType<typeof connection.newSession>>;
   try {
-    sessionResult = await withTimeout(
+    sessionResult = await withAgentRequest(
       connection.newSession({ cwd: opts.cwd, mcpServers: [] }),
+      connection,
       DEFAULT_AGENT_SESSION_TIMEOUT_MS,
       `agent newSession (${formatAgentCommand(opts.command, opts.args)})`,
     );
@@ -462,13 +466,14 @@ async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {
 
   let initResult: Awaited<ReturnType<typeof connection.initialize>>;
   try {
-    initResult = await withTimeout(
+    initResult = await withAgentRequest(
       connection.initialize({
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
         },
       }),
+      connection,
       DEFAULT_AGENT_INITIALIZE_TIMEOUT_MS,
       `agent initialize (${formatAgentCommand(command, args)})`,
     );
@@ -498,7 +503,12 @@ export function killAgent(proc: ChildProcess): void {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+function withAgentRequest<T>(
+  promise: Promise<T>,
+  connection: acp.ClientSideConnection,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(
@@ -506,7 +516,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
       timeoutMs,
     );
   });
-  return Promise.race([promise, timeout]).finally(() => {
+  const disconnected = connection.closed.then(
+    () => {
+      throw new AgentDisconnectedError();
+    },
+    (cause) => {
+      throw new AgentDisconnectedError(cause);
+    },
+  );
+  return Promise.race([promise, disconnected, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
 }
