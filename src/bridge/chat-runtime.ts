@@ -45,6 +45,7 @@ export interface ChatRuntimeOptions {
   showTools: boolean;
   showCancelButton: boolean;
   permissionTimeoutMs: number;
+  idleStatusCardMs: number;
   permissionMode: PermissionMode;
   agentLabel?: string;
   /**
@@ -295,6 +296,7 @@ export class ChatRuntime {
       showTools: this.opts.showTools,
       showCancelButton: this.opts.showCancelButton,
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
+      idleStatusCardMs: this.opts.idleStatusCardMs,
       permissionMode:
         latest?.controls?.bridgePermissionMode ??
         this.opts.inheritedControls?.bridgePermissionMode ??

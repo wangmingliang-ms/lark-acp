@@ -258,6 +258,11 @@ export interface HummingClientOptions {
   permissionTimeoutMs: number;
   /** Permission gate strategy — see {@link PermissionMode}. */
   permissionMode: PermissionMode;
+  /**
+   * After a content-bearing card goes quiet for this many ms, create a fresh
+   * empty status card. The next visible event reuses that card slot. 0 disables.
+   */
+  idleStatusCardMs: number;
   /** Lazily returns current agent/model/mode/permission metadata for card footer. */
   metaProvider?: () => SessionCardMeta;
   /** Receives ACP session metadata updates so the runtime can persist them. */
@@ -283,6 +288,7 @@ export class HummingClient implements acp.Client {
   private readonly showTools: boolean;
   private readonly showCancelButton: boolean;
   private readonly permissionTimeoutMs: number;
+  private readonly idleStatusCardMs: number;
   private readonly metaProvider?: () => SessionCardMeta;
   private readonly onSessionInfoUpdate?: (
     update: Extract<acp.SessionUpdate, { sessionUpdate: "session_info_update" }>,
@@ -301,6 +307,8 @@ export class HummingClient implements acp.Client {
 
   private cardId: string | null = null;
   private cardCreating: Promise<string | null> | null = null;
+  private idleStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleStatusCardPending = false;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
   private permissionBoundaryThisPrompt = false;
@@ -321,6 +329,7 @@ export class HummingClient implements acp.Client {
     this.showTools = opts.showTools;
     this.showCancelButton = opts.showCancelButton;
     this.permissionTimeoutMs = opts.permissionTimeoutMs;
+    this.idleStatusCardMs = opts.idleStatusCardMs;
     this.metaProvider = opts.metaProvider;
     this.onSessionInfoUpdate = opts.onSessionInfoUpdate;
     this.permissionMode = opts.permissionMode;
@@ -380,6 +389,7 @@ export class HummingClient implements acp.Client {
     }
 
     const requestId = crypto.randomUUID();
+    const reuseStatusCard = this.hasReusableStatusCard();
     const toolCallId = params.toolCall?.toolCallId;
     if (toolCallId) {
       const toolStatus = (params.toolCall?.status ?? "pending") as ToolStatus;
@@ -389,7 +399,7 @@ export class HummingClient implements acp.Client {
         params.toolCall?.rawInput,
         params.toolCall?.locations,
       );
-      if (this.showTools) {
+      if (this.showTools && !reuseStatusCard) {
         this.upsertTool(
           toolCallId,
           display.title,
@@ -404,7 +414,7 @@ export class HummingClient implements acp.Client {
         ...(display.detail !== undefined ? { detail: display.detail } : {}),
       });
     }
-    await this.finishCurrentConversationSegment();
+    if (!reuseStatusCard) await this.finishCurrentConversationSegment();
     this.permissionBoundaryThisPrompt = true;
 
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
@@ -423,24 +433,41 @@ export class HummingClient implements acp.Client {
         );
       }
 
-      this.presenter
-        .sendInterruptCard(
-          this.currentMessageId,
-          params,
-          requestId,
-          this.currentChatId,
-          this.currentThreadId,
-        )
+      this.sendOrUpdatePermissionCard(params, requestId)
         .then((cardMessageId) => {
           const stillPending = this.pendingPermissions.get(requestId);
           if (stillPending) stillPending.cardMessageId = cardMessageId;
         })
         .catch((err) => {
-          this.logger.warn({ err, requestId }, "sendInterruptCard failed");
+          this.logger.warn({ err, requestId }, "send permission card failed");
           this.disposePending(requestId);
           resolve({ outcome: { outcome: "cancelled" } });
         });
     });
+  }
+
+  private async sendOrUpdatePermissionCard(
+    params: acp.RequestPermissionRequest,
+    requestId: string,
+  ): Promise<string | null> {
+    const pendingStatusCardId = this.consumeIdleStatusCardId();
+    if (pendingStatusCardId) {
+      const updated = await this.presenter.updateInterruptCard(
+        pendingStatusCardId,
+        params,
+        requestId,
+        this.currentChatId,
+        this.currentThreadId,
+      );
+      if (updated) return pendingStatusCardId;
+    }
+    return this.presenter.sendInterruptCard(
+      this.currentMessageId,
+      params,
+      requestId,
+      this.currentChatId,
+      this.currentThreadId,
+    );
   }
 
   private async finishCurrentConversationSegment(): Promise<void> {
@@ -448,6 +475,7 @@ export class HummingClient implements acp.Client {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    this.clearIdleStatusTimer();
     while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
 
     if (!this.hasRenderableState()) return;
@@ -528,6 +556,7 @@ export class HummingClient implements acp.Client {
       case "agent_message_chunk":
         if (!this.acceptingRenderableUpdates) return;
         if (u.content.type === "text") {
+          this.markVisibleContentArriving();
           this.appendText("text", u.content.text);
           this.markCompactionNeededIfOverSoftLimit();
           this.status = "responding";
@@ -538,6 +567,7 @@ export class HummingClient implements acp.Client {
       case "agent_thought_chunk":
         if (!this.acceptingRenderableUpdates) return;
         if (u.content.type === "text" && this.showThoughts) {
+          this.markVisibleContentArriving();
           this.appendText("thought", u.content.text);
           this.markCompactionNeededIfOverSoftLimit();
           if (this.status !== "responding") this.status = "thinking";
@@ -554,6 +584,7 @@ export class HummingClient implements acp.Client {
         }
         const toolCallId = u.toolCallId;
         if (!toolCallId) return;
+        this.markVisibleContentArriving();
         this.status = "calling_tool";
         const display = formatToolDisplay(
           u.kind ?? "tool",
@@ -589,6 +620,7 @@ export class HummingClient implements acp.Client {
         // the formatted command/detail only and drop raw stdout/diff output,
         // which would blow past Lark card size limits.
         const detail = display.detail;
+        this.markVisibleContentArriving();
         if (this.status !== "responding") this.status = "calling_tool";
         this.upsertTool(
           toolCallId,
@@ -639,6 +671,7 @@ export class HummingClient implements acp.Client {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    this.clearIdleStatusTimer();
     // Wait for any in-flight flush so we don't race the final patch.
     while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
     const hasRenderableState = this.hasRenderableState();
@@ -657,6 +690,7 @@ export class HummingClient implements acp.Client {
     this.sealedToolMeta.clear();
     this.cardId = null;
     this.cardCreating = null;
+    this.idleStatusCardPending = false;
     this.permissionBoundaryThisPrompt = false;
     this.needsBoundaryCompaction = false;
     this.acceptingRenderableUpdates = false;
@@ -777,6 +811,81 @@ export class HummingClient implements acp.Client {
     return this.timeline.length > 0 || this.cardId !== null || this.cardCreating !== null;
   }
 
+  private hasReusableStatusCard(): boolean {
+    return this.idleStatusCardPending && this.timeline.length === 0 && this.cardId !== null;
+  }
+
+  private consumeIdleStatusCardId(): string | null {
+    if (!this.hasReusableStatusCard()) return null;
+    const cardId = this.cardId;
+    this.idleStatusCardPending = false;
+    this.cardId = null;
+    this.cardCreating = null;
+    this.timeline = [];
+    return cardId;
+  }
+
+  private clearIdleStatusTimer(): void {
+    if (!this.idleStatusTimer) return;
+    clearTimeout(this.idleStatusTimer);
+    this.idleStatusTimer = null;
+  }
+
+  private markVisibleContentArriving(): void {
+    this.clearIdleStatusTimer();
+    if (this.idleStatusCardPending) this.idleStatusCardPending = false;
+  }
+
+  private scheduleIdleStatusTimer(
+    renderedEntries: readonly TimelineEntry[],
+    cancellable: boolean,
+  ): void {
+    this.clearIdleStatusTimer();
+    if (this.idleStatusCardMs <= 0) return;
+    if (!this.acceptingRenderableUpdates || !cancellable) return;
+    if (this.idleStatusCardPending || renderedEntries.length === 0) return;
+
+    this.idleStatusTimer = setTimeout(() => {
+      this.idleStatusTimer = null;
+      this.createIdleStatusCard().catch((err) =>
+        this.logger.warn({ err }, "idle status card creation failed"),
+      );
+    }, this.idleStatusCardMs);
+  }
+
+  private async createIdleStatusCard(): Promise<void> {
+    if (
+      !this.acceptingRenderableUpdates ||
+      this.idleStatusCardPending ||
+      this.timeline.length === 0
+    ) {
+      return;
+    }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    while (this.flushing) await new Promise<void>((r) => setTimeout(r, 10));
+    if (
+      !this.acceptingRenderableUpdates ||
+      this.idleStatusCardPending ||
+      this.timeline.length === 0
+    ) {
+      return;
+    }
+
+    this.status = "sealed";
+    await this.renderCard({ cancellable: false });
+
+    this.timeline = [];
+    this.cardId = null;
+    this.cardCreating = null;
+    this.status = "thinking";
+    this.idleStatusCardPending = true;
+    await this.renderCard({ cancellable: true });
+    if (this.cardId === null) this.idleStatusCardPending = false;
+  }
+
   // ----- Card flush -------------------------------------------------------
 
   private scheduleFlush(): void {
@@ -818,9 +927,10 @@ export class HummingClient implements acp.Client {
     if (!this.currentMessageId && !this.cardId) return;
     this.flushing = true;
     try {
+      const renderedEntries = this.previewEntriesForRender();
       const state = {
         status: this.status,
-        entries: this.previewEntriesForRender(),
+        entries: renderedEntries,
         cancellable: opts.cancellable && this.showCancelButton,
         chatId: this.currentChatId,
         threadId: this.currentThreadId,
@@ -830,6 +940,7 @@ export class HummingClient implements acp.Client {
       if (this.cardId) {
         const updated = await this.presenter.updateUnifiedCard(this.cardId, state);
         if (!updated) await this.notifyCardUpdateFailure(opts.cancellable ? "running" : "terminal");
+        this.scheduleIdleStatusTimer(renderedEntries, opts.cancellable);
         return;
       }
       if (this.cardCreating) {
@@ -839,6 +950,7 @@ export class HummingClient implements acp.Client {
           const updated = await this.presenter.updateUnifiedCard(id, state);
           if (!updated)
             await this.notifyCardUpdateFailure(opts.cancellable ? "running" : "terminal");
+          this.scheduleIdleStatusTimer(renderedEntries, opts.cancellable);
         }
         return;
       }
@@ -847,6 +959,7 @@ export class HummingClient implements acp.Client {
       try {
         const id = await promise;
         if (id) this.cardId = id;
+        this.scheduleIdleStatusTimer(renderedEntries, opts.cancellable);
       } finally {
         this.cardCreating = null;
       }

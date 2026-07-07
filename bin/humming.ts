@@ -124,6 +124,7 @@ const ENV_UPDATE_REF = "HUMMING_REF";
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 1440;
 const DEFAULT_MAX_CHATS = 10;
 const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
+const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
 /**
  * Agent used when neither `--agent` nor settings.json `runtime.agent` names one.
  * Makes a bare `humming start` / `humming proxy` work out-of-the-box on a
@@ -331,6 +332,8 @@ type FileRuntime = {
   readonly groupRequireMention?: boolean;
   readonly unboundCwd?: string;
   readonly lifecycleNotifyChatIds?: readonly string[];
+  /** Default idle gap before sending a reusable status card (10s). */
+  readonly idleStatusCardMs?: number;
 };
 
 type FileSetup = {
@@ -479,6 +482,11 @@ function readConfigFile(filePath: string): FileConfig {
     ...optBoolField("runtime.groupRequireMention", runtimeObj["groupRequireMention"]),
     ...optStringField("runtime.unboundCwd", runtimeObj["unboundCwd"]),
     ...optStringArrayField("runtime.lifecycleNotifyChatIds", runtimeObj["lifecycleNotifyChatIds"]),
+    ...optNumberField(
+      "runtime.idleStatusCardMs",
+      asNonNegIntOpt("runtime.idleStatusCardMs", runtimeObj["idleStatusCardMs"]),
+      "idleStatusCardMs",
+    ),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
   };
 
@@ -1195,6 +1203,7 @@ type EffectiveConfig = {
   readonly showTools: boolean;
   readonly showCancelButton: boolean;
   readonly permissionMode: PermissionMode;
+  readonly idleStatusCardMs: number;
   readonly groupRequireMention: boolean;
   readonly lifecycleNotifyChatIds: readonly string[];
   /** Reception-area cwd for unbound chats (default = home dir; null disables). */
@@ -1272,6 +1281,7 @@ function resolveConfig(
   const hideCancelButton = args.hideCancelButton ?? file.runtime.hideCancelButton ?? false;
   const groupRequireMention = args.groupRequireMention ?? file.runtime.groupRequireMention ?? false;
   const lifecycleNotifyChatIds = file.runtime.lifecycleNotifyChatIds ?? [];
+  const idleStatusCardMs = file.runtime.idleStatusCardMs ?? DEFAULT_IDLE_STATUS_CARD_MS;
 
   // Reception area: default ON, cwd = home dir. Precedence: --unbound-cwd flag
   // > runtime.unboundCwd > home dir. An explicit empty string disables it
@@ -1308,6 +1318,7 @@ function resolveConfig(
     showTools: !hideTools,
     showCancelButton: !hideCancelButton,
     permissionMode,
+    idleStatusCardMs,
     groupRequireMention,
     lifecycleNotifyChatIds,
     unboundCwd,
@@ -2403,6 +2414,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
       showTools: cfg.showTools,
       showCancelButton: cfg.showCancelButton,
       permissionMode: cfg.permissionMode,
+      idleStatusCardMs: cfg.idleStatusCardMs,
     },
     session: {
       idleTimeoutMs: cfg.idleTimeoutMs,

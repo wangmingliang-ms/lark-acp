@@ -35,6 +35,7 @@ const DEFAULT_SHOW_THOUGHTS = true;
 const DEFAULT_SHOW_TOOLS = true;
 const DEFAULT_SHOW_CANCEL_BUTTON = true;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
 const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
 /** Debounce for settings.json change events (fs.watch double-fires). */
@@ -209,6 +210,11 @@ export interface LarkBridgeAgentOptions {
    */
   permissionTimeoutMs?: number;
   /**
+   * After a content-bearing card is quiet for this many ms, send a new empty
+   * status card that the next visible event can reuse. 0 disables. Default 10s.
+   */
+  idleStatusCardMs?: number;
+  /**
    * How to handle agent-side permission requests. Default `"alwaysAsk"`.
    * `"alwaysAllow"` / `"alwaysDeny"` auto-resolve without involving the user.
    */
@@ -288,6 +294,7 @@ interface DisplayOptions {
   readonly showTools: boolean;
   readonly showCancelButton: boolean;
   readonly permissionTimeoutMs: number;
+  readonly idleStatusCardMs: number;
   readonly permissionMode: PermissionMode;
 }
 
@@ -398,6 +405,7 @@ export class LarkBridge {
       showTools: opts.agent.showTools ?? DEFAULT_SHOW_TOOLS,
       showCancelButton: opts.agent.showCancelButton ?? DEFAULT_SHOW_CANCEL_BUTTON,
       permissionTimeoutMs: opts.agent.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
+      idleStatusCardMs: opts.agent.idleStatusCardMs ?? DEFAULT_IDLE_STATUS_CARD_MS,
       permissionMode: opts.agent.permissionMode ?? DEFAULT_PERMISSION_MODE,
     };
 
@@ -1177,6 +1185,7 @@ export class LarkBridge {
       showTools: this.display.showTools,
       showCancelButton: this.display.showCancelButton,
       permissionTimeoutMs: this.display.permissionTimeoutMs,
+      idleStatusCardMs: this.display.idleStatusCardMs,
       permissionMode: this.display.permissionMode,
       agentLabel: effective.label,
       ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),

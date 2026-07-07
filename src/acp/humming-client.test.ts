@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import {
   CARD_MARKDOWN_ELEMENT_CHAR_LIMIT,
@@ -21,6 +21,12 @@ type RenderOp =
       readonly kind: "permission";
       readonly requestId: string;
       readonly params: acp.RequestPermissionRequest;
+    }
+  | {
+      readonly kind: "updatePermission";
+      readonly cardId: string;
+      readonly requestId: string;
+      readonly params: acp.RequestPermissionRequest;
     };
 
 const logger: LarkLogger = {
@@ -37,7 +43,7 @@ function cloneState(state: UnifiedCardState): UnifiedCardState {
 
 function recordingPresenter(
   ops: RenderOp[],
-  options: { failUpdates?: boolean } = {},
+  options: { failUpdates?: boolean; failPermissionUpdates?: boolean } = {},
 ): LarkPresenter {
   let cardSeq = 0;
   return {
@@ -45,6 +51,10 @@ function recordingPresenter(
     sendInterruptCard: async (_messageId, params, requestId) => {
       ops.push({ kind: "permission", requestId, params });
       return `permission_${requestId}`;
+    },
+    updateInterruptCard: async (cardId, params, requestId) => {
+      ops.push({ kind: "updatePermission", cardId, requestId, params });
+      return !options.failPermissionUpdates;
     },
     updatePermissionCard: async () => {},
     expirePermissionCard: async () => {},
@@ -69,7 +79,17 @@ function recordingPresenter(
   };
 }
 
-function makeClient(ops: RenderOp[], options: { failUpdates?: boolean } = {}): HummingClient {
+function makeClient(
+  ops: RenderOp[],
+  options: {
+    failUpdates?: boolean;
+    failPermissionUpdates?: boolean;
+    idleStatusCardMs?: number;
+    onSessionInfoUpdate?: (
+      update: Extract<acp.SessionUpdate, { sessionUpdate: "session_info_update" }>,
+    ) => void;
+  } = {},
+): HummingClient {
   const client = new HummingClient({
     presenter: recordingPresenter(ops, options),
     logger,
@@ -78,6 +98,10 @@ function makeClient(ops: RenderOp[], options: { failUpdates?: boolean } = {}): H
     showCancelButton: true,
     permissionTimeoutMs: 0,
     permissionMode: "alwaysAsk",
+    idleStatusCardMs: options.idleStatusCardMs ?? 0,
+    ...(options.onSessionInfoUpdate !== undefined
+      ? { onSessionInfoUpdate: options.onSessionInfoUpdate }
+      : {}),
   });
   client.setContext("om_user", "oc_chat", "omt_thread");
   return client;
@@ -115,7 +139,198 @@ async function waitForFlush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 160));
 }
 
+function textChunk(text: string): acp.SessionNotification {
+  return {
+    sessionId: "sess_1",
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+    },
+  };
+}
+
 describe("HummingClient card-v2 conversation rendering", () => {
+  it("creates a reusable status card after visible content goes idle", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, { idleStatusCardMs: 1_000 });
+
+      await client.sessionUpdate(textChunk("First segment."));
+      await vi.advanceTimersByTimeAsync(160);
+      await client.sessionUpdate(textChunk(" still streaming."));
+      await vi.advanceTimersByTimeAsync(160);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const sendsBeforeSecondSegment = ops.filter((op) => op.kind === "sendUnified");
+      expect(sendsBeforeSecondSegment).toHaveLength(2);
+      expect(sendsBeforeSecondSegment[1]?.state).toMatchObject({
+        status: "thinking",
+        entries: [],
+        cancellable: true,
+      });
+
+      await client.sessionUpdate(textChunk("Second segment after idle."));
+      await vi.advanceTimersByTimeAsync(160);
+
+      const finalUpdate = ops.findLast(
+        (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+      );
+      expect(finalUpdate?.cardId).toBe("card_2");
+      expect(finalUpdate?.state).toMatchObject({
+        status: "responding",
+        entries: [{ kind: "text", text: "Second segment after idle." }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses an idle status card as the approval card when permission is requested", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, { idleStatusCardMs: 1_000 });
+
+      await client.sessionUpdate(textChunk("I need to inspect files."));
+      await vi.advanceTimersByTimeAsync(160);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const statusCard = ops.findLast(
+        (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
+      );
+      expect(statusCard?.state.entries).toEqual([]);
+
+      const responsePromise = client.requestPermission(permissionRequest());
+      await vi.advanceTimersByTimeAsync(160);
+
+      const approvalUpdate = ops.find(
+        (op): op is Extract<RenderOp, { kind: "updatePermission" }> =>
+          op.kind === "updatePermission",
+      );
+      expect(approvalUpdate?.cardId).toBe("card_2");
+      expect(ops.some((op) => op.kind === "permission")).toBe(false);
+      if (!approvalUpdate) throw new Error("expected approval update");
+      client.handleCardAction(approvalUpdate.requestId, "allow");
+      await responsePromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to a fresh approval card when pending status card approval patch fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, {
+        idleStatusCardMs: 1_000,
+        failPermissionUpdates: true,
+      });
+
+      await client.sessionUpdate(textChunk("I need permission after a pause."));
+      await vi.advanceTimersByTimeAsync(160);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const responsePromise = client.requestPermission(permissionRequest());
+      await vi.advanceTimersByTimeAsync(160);
+
+      const approvalPatch = ops.find(
+        (op): op is Extract<RenderOp, { kind: "updatePermission" }> =>
+          op.kind === "updatePermission",
+      );
+      const freshApproval = ops.find(
+        (op): op is Extract<RenderOp, { kind: "permission" }> => op.kind === "permission",
+      );
+      expect(approvalPatch?.cardId).toBe("card_2");
+      expect(freshApproval).toBeDefined();
+      if (!freshApproval) throw new Error("expected fresh approval fallback");
+      client.handleCardAction(freshApproval.requestId, "allow");
+      await responsePromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updates a pending idle status card into a failed terminal card", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, { idleStatusCardMs: 1_000 });
+
+      await client.sessionUpdate(textChunk("Before failure."));
+      await vi.advanceTimersByTimeAsync(160);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await client.finalize("failed");
+
+      const finalUpdate = ops.findLast(
+        (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+      );
+      expect(finalUpdate?.cardId).toBe("card_2");
+      expect(finalUpdate?.state).toMatchObject({
+        status: "failed",
+        entries: [],
+        cancellable: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updates a pending idle status card into a cancelled terminal card", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, { idleStatusCardMs: 1_000 });
+
+      await client.sessionUpdate(textChunk("Before cancel."));
+      await vi.advanceTimersByTimeAsync(160);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await client.finalize("cancelled");
+
+      const finalUpdate = ops.findLast(
+        (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+      );
+      expect(finalUpdate?.cardId).toBe("card_2");
+      expect(finalUpdate?.state).toMatchObject({
+        status: "cancelled",
+        entries: [],
+        cancellable: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not rotate the initial empty progress card before first agent content", async () => {
+    vi.useFakeTimers();
+    try {
+      const ops: RenderOp[] = [];
+      const client = makeClient(ops, { idleStatusCardMs: 1_000 });
+
+      client.adoptProgressCard("progress_card_1");
+      await client.showPreparing();
+      await client.showForwarded();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await client.sessionUpdate(textChunk("First content after slow bootstrap."));
+      await vi.advanceTimersByTimeAsync(160);
+
+      expect(ops.some((op) => op.kind === "sendUnified")).toBe(false);
+      const updates = ops.filter(
+        (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+      );
+      expect(updates.map((op) => op.cardId)).toEqual([
+        "progress_card_1",
+        "progress_card_1",
+        "progress_card_1",
+      ]);
+      expect(updates.at(-1)?.state.entries).toEqual([
+        { kind: "text", text: "First content after slow bootstrap." },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("adopts the bridge-created progress card and patches it through agent output", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
@@ -232,6 +447,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
       showTools: true,
       showCancelButton: true,
       permissionTimeoutMs: 0,
+      idleStatusCardMs: 0,
       permissionMode: "alwaysAsk",
     });
     client.setContext("om_user", "oc_chat", "omt_thread");

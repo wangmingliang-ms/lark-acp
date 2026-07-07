@@ -46,6 +46,7 @@ function opts(logger: LarkLogger = createPinoLogger()): ChatRuntimeOptions {
     showTools: true,
     showCancelButton: true,
     permissionTimeoutMs: 0,
+    idleStatusCardMs: 0,
     permissionMode: "alwaysAllow",
     presenter: {} as ChatRuntimeOptions["presenter"],
     sessionStore: {} as ChatRuntimeOptions["sessionStore"],
@@ -97,6 +98,7 @@ function recordingPresenter(
   return {
     replyText: async () => {},
     sendInterruptCard: async () => null,
+    updateInterruptCard: async () => false,
     updatePermissionCard: async () => {},
     expirePermissionCard: async () => {},
     replyNoticeCard: async (_id, notice) => {

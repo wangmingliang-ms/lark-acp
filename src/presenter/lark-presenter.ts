@@ -287,11 +287,7 @@ function buildSessionMetaElement(state: UnifiedCardState): object | null {
 }
 
 function isEmptyTerminalState(state: UnifiedCardState): boolean {
-  return (
-    state.entries.length === 0 &&
-    !state.cancellable &&
-    (state.status === "complete" || state.status === "cancelled" || state.status === "failed")
-  );
+  return state.entries.length === 0 && !state.cancellable && state.status === "complete";
 }
 
 function emptyStateMessage(status: AgentStatus): string {
@@ -401,6 +397,25 @@ export class LarkCardPresenter implements LarkPresenter {
         replyInThread: threadId !== null,
       },
     );
+  }
+
+  async updateInterruptCard(
+    cardMessageId: string,
+    params: acp.RequestPermissionRequest,
+    requestId: string,
+    chatId: string,
+    threadId: string | null,
+  ): Promise<boolean> {
+    try {
+      await this.http.patchCard(
+        cardMessageId,
+        buildPermissionCard(params, requestId, chatId, threadId),
+      );
+      return true;
+    } catch (err) {
+      this.logger.warn({ err: conciseError(err), cardMessageId }, "updateInterruptCard failed");
+      return false;
+    }
   }
 
   async updatePermissionCard(

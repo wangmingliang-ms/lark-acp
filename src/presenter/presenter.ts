@@ -104,6 +104,19 @@ export interface LarkPresenter {
     threadId: string | null,
   ): Promise<string | null>;
 
+  /**
+   * Replace an existing empty status/progress card with an ACP permission request.
+   * Used when a silence-triggered status card is waiting to be reused by the
+   * next visible event.
+   */
+  updateInterruptCard(
+    cardMessageId: string,
+    params: acp.RequestPermissionRequest,
+    requestId: string,
+    chatId: string,
+    threadId: string | null,
+  ): Promise<boolean>;
+
   /** Replace a permission card with a "resolved" confirmation. */
   updatePermissionCard(
     messageId: string,

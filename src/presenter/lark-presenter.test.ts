@@ -159,6 +159,25 @@ describe("LarkCardPresenter card summary", () => {
     expect(content).not.toContain("准备中");
   });
 
+  it("keeps empty failed cards visibly failed instead of using the empty-output warning", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.updateUnifiedCard("card_1", {
+      status: "failed",
+      entries: [],
+      cancellable: false,
+      chatId: "oc_1",
+      threadId: null,
+    });
+
+    const content = cards[0]?.body?.elements?.[0]?.content ?? "";
+    expect(cards[0]?.header?.title?.content).toBe("⚠️ 出错");
+    expect(cards[0]?.header?.template).toBe("red");
+    expect(cards[0]?.config?.summary?.content).toBe("⚠️ 出错");
+    expect(content).toContain("本轮任务出错");
+  });
+
   it("always renders session metadata at the bottom of conversation cards", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
