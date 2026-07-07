@@ -123,6 +123,15 @@ interface LocationPayload {
 // ---- Public API ----
 
 /**
+ * Interpreter → hydrator 的中间产物。纯解释器只识别结构、产出这些段，
+ * **不下载字节**（下载是 bridge 层的 effect）。`image-ref` 只携带下载所
+ * 需的最小信息（messageId + imageKey）。
+ */
+export type PromptSegment =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "image-ref"; readonly messageId: string; readonly imageKey: string };
+
+/**
  * High-level commands a user can issue via plain-text messages.
  *
  * Detection is intentionally strict: only exact, whitespace-trimmed matches
