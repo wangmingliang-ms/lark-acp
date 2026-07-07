@@ -452,65 +452,7 @@ export class ChatRuntime {
     snapshot: SessionCapabilitiesSnapshot,
     controls: SessionControlPatch,
   ): void {
-    if (controls.modelId !== undefined) {
-      if (!snapshot.models) {
-        throw new ControlApplyError(
-          "Model",
-          controls.modelId,
-          "agent does not expose ACP model controls",
-        );
-      }
-      if (!snapshot.models.availableModels.some((model) => model.modelId === controls.modelId)) {
-        throw new ControlApplyError("Model", controls.modelId, "modelId is not in availableModels");
-      }
-    }
-
-    if (controls.modeId !== undefined) {
-      if (!snapshot.modes) {
-        throw new ControlApplyError(
-          "Mode",
-          controls.modeId,
-          "agent does not expose ACP mode controls",
-        );
-      }
-      if (!snapshot.modes.availableModes.some((mode) => mode.id === controls.modeId)) {
-        throw new ControlApplyError("Mode", controls.modeId, "modeId is not in availableModes");
-      }
-    }
-
-    for (const [configId, value] of Object.entries(controls.config ?? {})) {
-      const option = snapshot.configOptions?.find((candidate) => candidate.id === configId);
-      if (!option) {
-        throw new ControlApplyError("Config", configId, "configId is not in configOptions");
-      }
-      if (option.type === "boolean") {
-        if (!("type" in value) || value.type !== "boolean" || typeof value.value !== "boolean") {
-          throw new ControlApplyError("Config", configId, "expected boolean config value");
-        }
-        continue;
-      }
-      if (typeof value.value !== "string") {
-        throw new ControlApplyError("Config", configId, "expected select config value");
-      }
-      if (!selectOptionValues(option.options).has(value.value)) {
-        throw new ControlApplyError(
-          "Config",
-          configId,
-          `select value is not in available options: ${value.value}`,
-        );
-      }
-    }
-
-    if (
-      controls.bridgePermissionMode !== undefined &&
-      !PERMISSION_MODES.includes(controls.bridgePermissionMode)
-    ) {
-      throw new ControlApplyError(
-        "Permission",
-        controls.bridgePermissionMode,
-        "bridgePermissionMode is not supported",
-      );
-    }
+    validateSessionControls(snapshot, controls);
   }
 
   private async notifyControlFailure(messageId: string | null, err: unknown): Promise<void> {
@@ -1177,6 +1119,71 @@ function displayConfigValue(snapshot: SessionCapabilitiesSnapshot, configId: str
   return option ? displayConfigCurrentValue(option) : "—";
 }
 
+export function validateSessionControls(
+  snapshot: SessionCapabilitiesSnapshot,
+  controls: SessionControlPatch,
+): void {
+  if (controls.modelId !== undefined) {
+    if (!snapshot.models) {
+      throw new ControlApplyError(
+        "Model",
+        controls.modelId,
+        "agent does not expose ACP model controls",
+      );
+    }
+    if (!snapshot.models.availableModels.some((model) => model.modelId === controls.modelId)) {
+      throw new ControlApplyError("Model", controls.modelId, "modelId is not in availableModels");
+    }
+  }
+
+  if (controls.modeId !== undefined) {
+    if (!snapshot.modes) {
+      throw new ControlApplyError(
+        "Mode",
+        controls.modeId,
+        "agent does not expose ACP mode controls",
+      );
+    }
+    if (!snapshot.modes.availableModes.some((mode) => mode.id === controls.modeId)) {
+      throw new ControlApplyError("Mode", controls.modeId, "modeId is not in availableModes");
+    }
+  }
+
+  for (const [configId, value] of Object.entries(controls.config ?? {})) {
+    const option = snapshot.configOptions?.find((candidate) => candidate.id === configId);
+    if (!option) {
+      throw new ControlApplyError("Config", configId, "configId is not in configOptions");
+    }
+    if (option.type === "boolean") {
+      if (!("type" in value) || value.type !== "boolean" || typeof value.value !== "boolean") {
+        throw new ControlApplyError("Config", configId, "expected boolean config value");
+      }
+      continue;
+    }
+    if (typeof value.value !== "string") {
+      throw new ControlApplyError("Config", configId, "expected select config value");
+    }
+    if (!selectOptionValues(option.options).has(value.value)) {
+      throw new ControlApplyError(
+        "Config",
+        configId,
+        `select value is not in available options: ${value.value}`,
+      );
+    }
+  }
+
+  if (
+    controls.bridgePermissionMode !== undefined &&
+    !PERMISSION_MODES.includes(controls.bridgePermissionMode)
+  ) {
+    throw new ControlApplyError(
+      "Permission",
+      controls.bridgePermissionMode,
+      "bridgePermissionMode is not supported",
+    );
+  }
+}
+
 function cloneCapabilitiesSnapshot(
   snapshot: SessionCapabilitiesSnapshot,
 ): SessionCapabilitiesSnapshot {
@@ -1370,7 +1377,7 @@ class ControlApplyError extends Error {
   }
 }
 
-function formatControlFailure(err: unknown): string {
+export function formatControlFailure(err: unknown): string {
   if (err instanceof ControlApplyError) {
     return truncateUserVisibleText(`失败项: ${err.kind} ${err.target}\n原因: ${err.reason}`);
   }
