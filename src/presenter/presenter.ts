@@ -38,8 +38,15 @@ export type TimelineEntry =
  */
 export type NoticeTemplate = "blue" | "wathet" | "green" | "grey" | "red" | "orange";
 
-/** A short, single-card notice (e.g. command acknowledgement). */
+/** A short, single-card notice (e.g. lifecycle or control acknowledgement). */
 export interface NoticeCardSpec {
+  readonly title: string;
+  readonly body: string;
+  readonly template: NoticeTemplate;
+}
+
+/** A slash-command execution result. Uses the same readable body budget as message cards. */
+export interface CommandResultCardSpec {
   readonly title: string;
   readonly body: string;
   readonly template: NoticeTemplate;
@@ -132,10 +139,17 @@ export interface LarkPresenter {
 
   /**
    * Reply to `replyToMessageId` with a single-card notice — used for
-   * lightweight system acknowledgements (e.g. confirming a chat command
-   * was accepted) where {@link UnifiedCardState} would be overkill.
+   * lightweight system acknowledgements where {@link UnifiedCardState} would
+   * be overkill. This path is intentionally compact; use
+   * {@link replyCommandResultCard} for slash-command listing/query output.
    */
   replyNoticeCard(replyToMessageId: string, notice: NoticeCardSpec): Promise<void>;
+
+  /**
+   * Reply to `replyToMessageId` with a slash-command execution result. The body
+   * budget tracks message-card readability limits rather than notice/toast limits.
+   */
+  replyCommandResultCard(replyToMessageId: string, result: CommandResultCardSpec): Promise<void>;
 
   /**
    * Send a fresh single-card notice directly into a chat, without replying to

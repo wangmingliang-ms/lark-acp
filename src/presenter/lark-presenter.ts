@@ -1,9 +1,11 @@
 import type * as acp from "@agentclientprotocol/sdk";
+import { CARD_MARKDOWN_SOFT_CHAR_LIMIT } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 import { markdownToPost, splitMarkdown } from "./lark-markdown.js";
 import type {
   AgentStatus,
+  CommandResultCardSpec,
   LarkPresenter,
   NoticeCardSpec,
   TimelineEntry,
@@ -40,13 +42,15 @@ const CANCEL_BUTTON_TEXT = "中断当前任务";
 // https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-structure
 const CARD_SCHEMA_V2 = "2.0";
 const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
-// Notice cards are used for command output such as `/capabilities` and can be
-// legitimately longer than a tiny toast. Keep a generous whole-card cap for
-// runaway stderr/errors, but split markdown into smaller card elements below.
-export const NOTICE_BODY_CHAR_LIMIT = 12_000;
-const NOTICE_MARKDOWN_ELEMENT_CHAR_LIMIT = 3_000;
+// Notices are deliberately compact. Slash-command output has a separate path
+// below so result listings do not force lifecycle/control notices to grow.
+export const NOTICE_BODY_CHAR_LIMIT = 1_500;
+export const COMMAND_RESULT_BODY_CHAR_LIMIT = CARD_MARKDOWN_SOFT_CHAR_LIMIT;
+const COMMAND_RESULT_MARKDOWN_ELEMENT_CHAR_LIMIT = 3_000;
 const NOTICE_TRUNCATION_SUFFIX =
   "\n\n…\n\n_内容过长，已截断；完整细节请查看 bridge.log 或本地日志。_";
+const COMMAND_RESULT_TRUNCATION_SUFFIX =
+  "\n\n…\n\n_结果内容超过 4096 字符，已截断；完整细节请查看 bridge.log 或本地日志。_";
 
 function buildV2Card(
   headerContent: string,
@@ -202,22 +206,22 @@ function buildResolvedCard(
   );
 }
 
-function truncateNoticeBody(body: string): string {
-  if (body.length <= NOTICE_BODY_CHAR_LIMIT) return body;
-  return `${body.slice(0, Math.max(0, NOTICE_BODY_CHAR_LIMIT - NOTICE_TRUNCATION_SUFFIX.length)).trimEnd()}${NOTICE_TRUNCATION_SUFFIX}`;
+function truncateBody(body: string, limit: number, suffix: string): string {
+  if (body.length <= limit) return body;
+  return `${body.slice(0, Math.max(0, limit - suffix.length)).trimEnd()}${suffix}`;
 }
 
-function splitNoticeBody(body: string): string[] {
+function splitCardMarkdownBody(body: string, limit: number): string[] {
   const chunks: string[] = [];
   let remaining = body;
-  while (remaining.length > NOTICE_MARKDOWN_ELEMENT_CHAR_LIMIT) {
-    let splitAt = remaining.lastIndexOf("\n\n", NOTICE_MARKDOWN_ELEMENT_CHAR_LIMIT);
+  while (remaining.length > limit) {
+    let splitAt = remaining.lastIndexOf("\n\n", limit);
     if (splitAt > 0) splitAt += 2;
     if (splitAt <= 0) {
-      splitAt = remaining.lastIndexOf("\n", NOTICE_MARKDOWN_ELEMENT_CHAR_LIMIT);
+      splitAt = remaining.lastIndexOf("\n", limit);
       if (splitAt > 0) splitAt += 1;
     }
-    if (splitAt <= 0) splitAt = NOTICE_MARKDOWN_ELEMENT_CHAR_LIMIT;
+    if (splitAt <= 0) splitAt = limit;
     chunks.push(remaining.slice(0, splitAt));
     remaining = remaining.slice(splitAt);
   }
@@ -225,8 +229,8 @@ function splitNoticeBody(body: string): string[] {
   return chunks;
 }
 
-function buildNoticeBodyElements(body: string): object[] {
-  return splitNoticeBody(truncateNoticeBody(body)).flatMap((chunk, index) => [
+function buildMarkdownBodyElements(body: string, elementLimit: number): object[] {
+  return splitCardMarkdownBody(body, elementLimit).flatMap((chunk, index) => [
     ...(index > 0 ? [{ tag: "hr" }] : []),
     { tag: "markdown", content: chunk },
   ]);
@@ -236,8 +240,27 @@ function buildNoticeCard(notice: NoticeCardSpec): object {
   return buildV2Card(
     notice.title,
     notice.template,
-    buildNoticeBodyElements(notice.body),
+    [
+      {
+        tag: "markdown",
+        content: truncateBody(notice.body, NOTICE_BODY_CHAR_LIMIT, NOTICE_TRUNCATION_SUFFIX),
+      },
+    ],
     notice.title,
+  );
+}
+
+function buildCommandResultCard(result: CommandResultCardSpec): object {
+  const body = truncateBody(
+    result.body,
+    COMMAND_RESULT_BODY_CHAR_LIMIT,
+    COMMAND_RESULT_TRUNCATION_SUFFIX,
+  );
+  return buildV2Card(
+    result.title,
+    result.template,
+    buildMarkdownBodyElements(body, COMMAND_RESULT_MARKDOWN_ELEMENT_CHAR_LIMIT),
+    result.title,
   );
 }
 
@@ -476,6 +499,17 @@ export class LarkCardPresenter implements LarkPresenter {
       await this.http.replyCard(replyToMessageId, buildNoticeCard(notice));
     } catch (err) {
       this.logger.warn({ err, replyToMessageId }, "replyNoticeCard failed");
+    }
+  }
+
+  async replyCommandResultCard(
+    replyToMessageId: string,
+    result: CommandResultCardSpec,
+  ): Promise<void> {
+    try {
+      await this.http.replyCard(replyToMessageId, buildCommandResultCard(result));
+    } catch (err) {
+      this.logger.warn({ err, replyToMessageId }, "replyCommandResultCard failed");
     }
   }
 

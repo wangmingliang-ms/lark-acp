@@ -36,6 +36,7 @@ export { createPinoLogger } from "./logger/logger.js";
 export type {
   AgentStatus,
   LarkPresenter,
+  CommandResultCardSpec,
   NoticeCardSpec,
   NoticeTemplate,
   TimelineEntry,

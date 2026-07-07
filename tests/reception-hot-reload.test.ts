@@ -36,6 +36,7 @@ vi.mock("../src/acp/agent-process.js", async (importOriginal) => {
 
 class RecordingPresenter implements LarkPresenter {
   readonly notices: NoticeCardSpec[] = [];
+  readonly commandResults: NoticeCardSpec[] = [];
   async replyText(): Promise<void> {}
   async sendInterruptCard(): Promise<string | null> {
     return null;
@@ -47,6 +48,9 @@ class RecordingPresenter implements LarkPresenter {
   async expirePermissionCard(): Promise<void> {}
   async replyNoticeCard(_id: string, notice: NoticeCardSpec): Promise<void> {
     this.notices.push(notice);
+  }
+  async replyCommandResultCard(_id: string, result: NoticeCardSpec): Promise<void> {
+    this.commandResults.push(result);
   }
   async sendNoticeCard(_chatId: string, notice: NoticeCardSpec): Promise<string | null> {
     this.notices.push(notice);
@@ -453,23 +457,23 @@ describe("compact slash session profile commands", () => {
       "th_topic",
     );
 
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "ℹ️ Humming commands", template: "blue" });
-    expect(notice?.body).toContain("/capabilities");
-    expect(notice?.body).toContain("/capabilities <agent>");
-    expect(notice?.body).toContain("/agent <agent>");
-    expect(notice?.body).toContain("/model auto");
-    expect(notice?.body).toContain("/mode <mode-id>");
-    expect(notice?.body).toContain("/permission <alwaysAsk|alwaysAllow|alwaysDeny>");
-    expect(notice?.body).toContain("/bind <路径>");
-    expect(notice?.body).toContain("/cancel");
-    expect(notice?.body).toContain("/stop");
-    expect(notice?.body).toContain("/new");
-    expect(notice?.body).toContain("/restart");
-    expect(notice?.body).toContain("/where");
-    expect(notice?.body).toContain("/pwd");
-    expect(notice?.body).toContain("/unbind");
-    expect(notice?.body).toContain("/unpin");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "ℹ️ Humming commands", template: "blue" });
+    expect(result?.body).toContain("/capabilities");
+    expect(result?.body).toContain("/capabilities <agent>");
+    expect(result?.body).toContain("/agent <agent>");
+    expect(result?.body).toContain("/model auto");
+    expect(result?.body).toContain("/mode <mode-id>");
+    expect(result?.body).toContain("/permission <alwaysAsk|alwaysAllow|alwaysDeny>");
+    expect(result?.body).toContain("/bind <路径>");
+    expect(result?.body).toContain("/cancel");
+    expect(result?.body).toContain("/stop");
+    expect(result?.body).toContain("/new");
+    expect(result?.body).toContain("/restart");
+    expect(result?.body).toContain("/where");
+    expect(result?.body).toContain("/pwd");
+    expect(result?.body).toContain("/unbind");
+    expect(result?.body).toContain("/unpin");
   });
 
   it("lists available Agents via bare /agent", async () => {
@@ -484,11 +488,11 @@ describe("compact slash session profile commands", () => {
       "th_topic",
     );
 
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🤖 可用 Agents", template: "blue" });
-    expect(notice?.body).toContain("claude — Claude Code");
-    expect(notice?.body).toContain("codex — Codex CLI");
-    expect(notice?.body).toContain("/agent <agent>");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🤖 可用 Agents", template: "blue" });
+    expect(result?.body).toContain("claude — Claude Code");
+    expect(result?.body).toContain("codex — Codex CLI");
+    expect(result?.body).toContain("/agent <agent>");
   });
 
   it("lists available Models via bare /model by probing the effective Agent", async () => {
@@ -507,11 +511,11 @@ describe("compact slash session profile commands", () => {
     expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
       expect.objectContaining({ command: CLAUDE.command, args: CLAUDE.args, cwd: repoA }),
     );
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🧠 可用 Models", template: "blue" });
-    expect(notice?.body).toContain("model-old — Old（当前）");
-    expect(notice?.body).toContain("model-new — New");
-    expect(notice?.body).toContain("/model auto");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🧠 可用 Models", template: "blue" });
+    expect(result?.body).toContain("model-old — Old（当前）");
+    expect(result?.body).toContain("model-new — New");
+    expect(result?.body).toContain("/model auto");
   });
 
   it("lists available Modes via bare /mode by probing the effective Agent", async () => {
@@ -527,11 +531,11 @@ describe("compact slash session profile commands", () => {
       "th_topic",
     );
 
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🧭 可用 Modes", template: "blue" });
-    expect(notice?.body).toContain("ask — Ask（当前）");
-    expect(notice?.body).toContain("agent — Agent：Autonomous mode");
-    expect(notice?.body).toContain("/mode <mode-id>");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🧭 可用 Modes", template: "blue" });
+    expect(result?.body).toContain("ask — Ask（当前）");
+    expect(result?.body).toContain("agent — Agent：Autonomous mode");
+    expect(result?.body).toContain("/mode <mode-id>");
   });
 
   it("lists bridge permission modes via bare /permission", async () => {
@@ -546,12 +550,12 @@ describe("compact slash session profile commands", () => {
       "th_topic",
     );
 
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🛂 可用 Permission modes", template: "blue" });
-    expect(notice?.body).toContain("alwaysAsk");
-    expect(notice?.body).toContain("alwaysAllow");
-    expect(notice?.body).toContain("alwaysDeny");
-    expect(notice?.body).toContain("/permission <mode>");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🛂 可用 Permission modes", template: "blue" });
+    expect(result?.body).toContain("alwaysAsk");
+    expect(result?.body).toContain("alwaysAllow");
+    expect(result?.body).toContain("alwaysDeny");
+    expect(result?.body).toContain("/permission <mode>");
   });
 
   it("lists full capabilities for the current effective Agent via /capabilities", async () => {
@@ -570,18 +574,18 @@ describe("compact slash session profile commands", () => {
     expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
       expect.objectContaining({ command: CLAUDE.command, args: CLAUDE.args, cwd: repoA }),
     );
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
-    expect(notice?.body).toContain("查询范围：当前有效 Agent");
-    expect(notice?.body).toContain("**Models**");
-    expect(notice?.body).toContain("model-old — Old（当前）");
-    expect(notice?.body).toContain("**Modes**");
-    expect(notice?.body).toContain("agent — Agent：Autonomous mode");
-    expect(notice?.body).toContain("**Config options**");
-    expect(notice?.body).toContain("autoSave — Auto Save (boolean, 当前 on)");
-    expect(notice?.body).toContain("effort — Effort (select, 当前 high; 可选 low=Low, high=High)");
-    expect(notice?.body).toContain("**Permission modes**");
-    expect(notice?.body).toContain("alwaysAsk");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
+    expect(result?.body).toContain("查询范围：当前有效 Agent");
+    expect(result?.body).toContain("**Models**");
+    expect(result?.body).toContain("model-old — Old（当前）");
+    expect(result?.body).toContain("**Modes**");
+    expect(result?.body).toContain("agent — Agent：Autonomous mode");
+    expect(result?.body).toContain("**Config options**");
+    expect(result?.body).toContain("autoSave — Auto Save (boolean, 当前 on)");
+    expect(result?.body).toContain("effort — Effort (select, 当前 high; 可选 low=Low, high=High)");
+    expect(result?.body).toContain("**Permission modes**");
+    expect(result?.body).toContain("alwaysAsk");
   });
 
   it("probes another Agent capabilities via /capabilities <agent> without switching", async () => {
@@ -615,10 +619,10 @@ describe("compact slash session profile commands", () => {
       sessionId: "s_claude",
       agentLabel: "claude",
     });
-    const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
-    expect(notice?.body).toContain("查询范围：probe: /capabilities codex");
-    expect(notice?.body).toContain("Agent：codex");
+    const result = presenter.commandResults.at(-1);
+    expect(result).toMatchObject({ title: "🧩 Agent capabilities", template: "blue" });
+    expect(result?.body).toContain("查询范围：probe: /capabilities codex");
+    expect(result?.body).toContain("Agent：codex");
   });
 
   it("handles /model auto through the shared stored setControls path without spawning a runtime", async () => {

@@ -30,6 +30,7 @@ import type { LarkCommand } from "../src/interpreter/lark-interpreter.js";
 /** Records every notice card the bridge tries to render. */
 class RecordingPresenter implements LarkPresenter {
   readonly notices: NoticeCardSpec[] = [];
+  readonly commandResults: NoticeCardSpec[] = [];
   readonly texts: string[] = [];
 
   async replyText(_messageId: string, text: string): Promise<void> {
@@ -38,10 +39,16 @@ class RecordingPresenter implements LarkPresenter {
   async sendInterruptCard(): Promise<string | null> {
     return null;
   }
+  async updateInterruptCard(): Promise<boolean> {
+    return true;
+  }
   async updatePermissionCard(): Promise<void> {}
   async expirePermissionCard(): Promise<void> {}
   async replyNoticeCard(_replyToMessageId: string, notice: NoticeCardSpec): Promise<void> {
     this.notices.push(notice);
+  }
+  async replyCommandResultCard(_replyToMessageId: string, result: NoticeCardSpec): Promise<void> {
+    this.commandResults.push(result);
   }
   async sendNoticeCard(_chatId: string, notice: NoticeCardSpec): Promise<string | null> {
     this.notices.push(notice);

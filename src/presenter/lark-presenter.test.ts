@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
-import { LarkCardPresenter, NOTICE_BODY_CHAR_LIMIT } from "./lark-presenter.js";
+import {
+  COMMAND_RESULT_BODY_CHAR_LIMIT,
+  LarkCardPresenter,
+  NOTICE_BODY_CHAR_LIMIT,
+} from "./lark-presenter.js";
+import { CARD_MARKDOWN_SOFT_CHAR_LIMIT } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 
@@ -283,28 +288,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(calls.map((call) => call.opts?.replyInThread)).toEqual([true, true]);
   });
 
-  it("splits long-but-valid notice card bodies without truncating them", async () => {
-    const cards: CardWithConfig[] = [];
-    const presenter = makePresenter(cards);
-    const body = `Capabilities\n\n${"model description\n".repeat(260)}`;
-
-    await presenter.replyNoticeCard("om_1", {
-      title: "🧩 Agent capabilities",
-      body,
-      template: "blue",
-    });
-
-    const elements = cards[0]?.body?.elements ?? [];
-    const rendered = elements
-      .filter((element) => element.tag === "markdown")
-      .map((element) => element.content ?? "")
-      .join("");
-    expect(rendered).toBe(body);
-    expect(rendered).not.toContain("内容过长，已截断");
-    expect(elements.filter((element) => element.tag === "markdown").length).toBeGreaterThan(1);
-  });
-
-  it("truncates oversized notice card bodies", async () => {
+  it("truncates oversized notice card bodies at the compact notice limit", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -318,9 +302,52 @@ describe("LarkCardPresenter card summary", () => {
       .filter((element) => element.tag === "markdown")
       .map((element) => element.content ?? "");
     const content = contents.join("");
+    expect(NOTICE_BODY_CHAR_LIMIT).toBe(1_500);
     expect(content.length).toBeLessThanOrEqual(NOTICE_BODY_CHAR_LIMIT);
-    expect(contents.every((chunk) => chunk.length <= 3_000)).toBe(true);
+    expect(contents).toHaveLength(1);
     expect(content).toContain("内容过长，已截断");
     expect(content).toContain("bridge.log");
+  });
+
+  it("renders command result cards with the message-card 4096 character budget", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const body = `Capabilities\n\n${"model description\n".repeat(180)}`;
+
+    await presenter.replyCommandResultCard("om_1", {
+      title: "🧩 Agent capabilities",
+      body,
+      template: "blue",
+    });
+
+    const elements = cards[0]?.body?.elements ?? [];
+    const rendered = elements
+      .filter((element) => element.tag === "markdown")
+      .map((element) => element.content ?? "")
+      .join("");
+    expect(COMMAND_RESULT_BODY_CHAR_LIMIT).toBe(CARD_MARKDOWN_SOFT_CHAR_LIMIT);
+    expect(COMMAND_RESULT_BODY_CHAR_LIMIT).toBe(4_096);
+    expect(rendered).toBe(body);
+    expect(rendered).not.toContain("内容过长，已截断");
+    expect(elements.filter((element) => element.tag === "markdown").length).toBeGreaterThan(1);
+  });
+
+  it("truncates oversized command result card bodies at the message-card budget", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.replyCommandResultCard("om_1", {
+      title: "🧩 Agent capabilities",
+      body: `Capabilities\n\n${"x".repeat(COMMAND_RESULT_BODY_CHAR_LIMIT + 1_000)}`,
+      template: "blue",
+    });
+
+    const contents = (cards[0]?.body?.elements ?? [])
+      .filter((element) => element.tag === "markdown")
+      .map((element) => element.content ?? "");
+    const content = contents.join("");
+    expect(content.length).toBeLessThanOrEqual(COMMAND_RESULT_BODY_CHAR_LIMIT);
+    expect(contents.every((chunk) => chunk.length <= 3_000)).toBe(true);
+    expect(content).toContain("结果内容超过 4096 字符，已截断");
   });
 });

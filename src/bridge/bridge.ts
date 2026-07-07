@@ -846,7 +846,7 @@ export class LarkBridge {
         return;
       }
       case "help":
-        await this.presenter.replyNoticeCard(messageId, buildHelpNotice());
+        await this.presenter.replyCommandResultCard(messageId, buildHelpNotice());
         return;
       case "capabilities":
         await this.handleCapabilitiesCommand(command.agent, chatId, threadId, messageId);
@@ -855,7 +855,7 @@ export class LarkBridge {
         await this.handleBind(command.cwd, command.agent, chatId, messageId);
         return;
       case "bind-usage":
-        await this.presenter.replyNoticeCard(messageId, BIND_USAGE_NOTICE);
+        await this.presenter.replyCommandResultCard(messageId, BIND_USAGE_NOTICE);
         return;
       case "unbind":
         await this.handleUnbind(chatId, messageId);
@@ -867,7 +867,10 @@ export class LarkBridge {
         await this.handleSetAgentCommand(command.agent, chatId, threadId, messageId);
         return;
       case "list-agents":
-        await this.presenter.replyNoticeCard(messageId, buildAgentListNotice(this.availableAgents));
+        await this.presenter.replyCommandResultCard(
+          messageId,
+          buildAgentListNotice(this.availableAgents),
+        );
         return;
       case "set-model":
         await this.handleSetControlsCommand(
@@ -895,7 +898,7 @@ export class LarkBridge {
         );
         return;
       case "list-permissions":
-        await this.presenter.replyNoticeCard(
+        await this.presenter.replyCommandResultCard(
           messageId,
           buildPermissionListNotice(this.display.permissionMode),
         );
@@ -904,7 +907,7 @@ export class LarkBridge {
         await this.handleProfileCommand(chatId, threadId, messageId);
         return;
       case "profile-command-usage":
-        await this.presenter.replyNoticeCard(
+        await this.presenter.replyCommandResultCard(
           messageId,
           buildProfileCommandUsageNotice(command.command),
         );
@@ -1012,7 +1015,7 @@ export class LarkBridge {
   ): Promise<void> {
     const snapshot = await this.resolveSessionCapabilitiesForListing(chatId, threadId, messageId);
     if (!snapshot) return;
-    await this.presenter.replyNoticeCard(messageId, buildModelListNotice(snapshot));
+    await this.presenter.replyCommandResultCard(messageId, buildModelListNotice(snapshot));
   }
 
   private async handleListModesCommand(
@@ -1022,7 +1025,7 @@ export class LarkBridge {
   ): Promise<void> {
     const snapshot = await this.resolveSessionCapabilitiesForListing(chatId, threadId, messageId);
     if (!snapshot) return;
-    await this.presenter.replyNoticeCard(messageId, buildModeListNotice(snapshot));
+    await this.presenter.replyCommandResultCard(messageId, buildModeListNotice(snapshot));
   }
 
   private async handleCapabilitiesCommand(
@@ -1035,7 +1038,10 @@ export class LarkBridge {
       ? await this.probeCapabilitiesForAgent(agent, chatId, threadId, messageId)
       : await this.resolveSessionCapabilitiesForListing(chatId, threadId, messageId);
     if (!snapshot) return;
-    await this.presenter.replyNoticeCard(messageId, buildCapabilitiesNotice(snapshot, agent));
+    await this.presenter.replyCommandResultCard(
+      messageId,
+      buildCapabilitiesNotice(snapshot, agent),
+    );
   }
 
   private async probeCapabilitiesForAgent(

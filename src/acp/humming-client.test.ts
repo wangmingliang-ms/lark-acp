@@ -66,6 +66,14 @@ function recordingPresenter(
         template: notice.template,
       });
     },
+    replyCommandResultCard: async (_messageId, result) => {
+      ops.push({
+        kind: "notice",
+        title: result.title,
+        body: result.body,
+        template: result.template,
+      });
+    },
     sendNoticeCard: async () => null,
     sendUnifiedCard: async (_replyToMessageId, state) => {
       ops.push({ kind: "sendUnified", state: cloneState(state) });
