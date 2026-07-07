@@ -195,24 +195,36 @@ export class ChatRuntime {
     this.logger.info("shutting down chat runtime");
     state.client.cancelPendingPermission();
     if (finalStatus !== null) {
-      await withTimeout(state.client.finalize(finalStatus), SHUTDOWN_FINALIZE_TIMEOUT_MS).catch(
-        (err) => this.logger.warn({ err }, "shutdown card finalize failed"),
-      );
+      await withTimeout(
+        state.client.finalizeIfRenderable(finalStatus),
+        SHUTDOWN_FINALIZE_TIMEOUT_MS,
+      ).catch((err) => this.logger.warn({ err }, "shutdown card finalize failed"));
     }
     this.state = null;
     killAgent(state.agent.process);
   }
 
   /**
-   * Replace this runtime with an externally-bound session. The old in-flight
-   * prompt is killed and finalised, but no crash notice is emitted — the user
-   * gets the explicit "session bound" notice from the bridge instead.
+   * Replace this runtime for a Humming management command such as set-agent or
+   * bind-session. The command itself sends the user-facing success/failure
+   * notice, so avoid creating a second empty "已取消" card. If a prompt card is
+   * already visible, we still seal it as cancelled to remove the live cancel
+   * button; otherwise the single management-command notice is enough.
    */
   async supersede(): Promise<void> {
-    if (!this.state) return;
+    this.aborted = true;
+    const state = this.state;
+    if (!state) return;
+    this.logger.info("superseding chat runtime");
     this.suppressPromptErrorNotice = true;
     this.cancelRequested = true;
-    await this.shutdown("cancelled");
+    state.client.cancelPendingPermission();
+    await withTimeout(
+      state.client.finalizeIfRenderable("complete"),
+      SHUTDOWN_FINALIZE_TIMEOUT_MS,
+    ).catch((err) => this.logger.warn({ err }, "supersede card finalize failed"));
+    this.state = null;
+    killAgent(state.agent.process);
   }
 
   /** Forward a card-action event to the underlying ACP client. */

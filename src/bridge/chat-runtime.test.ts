@@ -606,7 +606,67 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
     expect(saved).toHaveLength(1);
     expect(saved.at(-1)).toMatchObject({ sessionId: "sess_fake", agentLabel: "claude" });
-    expect(states.at(-1)).toMatchObject({ status: "cancelled", cancellable: false });
+    expect(states.at(-1)).toMatchObject({ status: "complete", cancellable: false });
+  });
+
+  it("does not create a phantom cancelled card when superseded after prompt state reset", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const states: UnifiedCardState[] = [];
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states),
+      sessionStore: stubSessionStore(),
+      agentLabel: "claude",
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "quick command" }],
+      messageId: "om_supersede_after_done",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    const renderedBeforeSupersede = states.length;
+
+    await runtime.supersede();
+
+    expect(states).toHaveLength(renderedBeforeSupersede);
+    expect(states.some((state) => state.status === "cancelled")).toBe(false);
+  });
+
+  it("does not create a phantom cancelled card when shutdown happens after prompt state reset", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const states: UnifiedCardState[] = [];
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states),
+      sessionStore: stubSessionStore(),
+      agentLabel: "claude",
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "quick command" }],
+      messageId: "om_shutdown_after_done",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    const renderedBeforeShutdown = states.length;
+
+    await runtime.shutdown("cancelled");
+
+    expect(states).toHaveLength(renderedBeforeShutdown);
+    expect(states.some((state) => state.status === "cancelled")).toBe(false);
   });
 
   it("rejects live control changes while a prompt is in flight", async () => {

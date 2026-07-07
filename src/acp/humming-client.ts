@@ -719,6 +719,24 @@ export class HummingClient implements acp.Client {
       this.compactTimelineForFinalCard();
       await this.renderCard({ cancellable: false });
     }
+    this.resetPromptState();
+  }
+
+  /**
+   * Finalise only if a prompt card is currently visible. Management commands
+   * such as `sessions set-agent` send their own explicit result notice; if the
+   * old prompt had already reset, creating a brand-new empty terminal card is
+   * just noisy and looks like a phantom cancellation.
+   */
+  async finalizeIfRenderable(status: AgentStatus): Promise<void> {
+    if (!this.hasRenderableState()) {
+      this.resetPromptState();
+      return;
+    }
+    await this.finalize(status);
+  }
+
+  private resetPromptState(): void {
     this.timeline = [];
     this.sealedToolMeta.clear();
     this.cardId = null;
