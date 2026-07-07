@@ -41,6 +41,10 @@ function assertNeverToolStatus(x: never): never {
   throw new Error(`unexpected tool status: ${String(x)}`);
 }
 
+function isTerminalStatus(status: AgentStatus): boolean {
+  return status === "complete" || status === "cancelled" || status === "failed";
+}
+
 function normalizeToolStatus(status: ToolStatus): ToolStatus {
   switch (status) {
     case "pending":
@@ -621,6 +625,12 @@ export class HummingClient implements acp.Client {
     const hasRenderableState = this.hasRenderableState();
     const shouldSkipEmptyFinalCard = !hasRenderableState && this.permissionBoundaryThisPrompt;
     if (!shouldSkipEmptyFinalCard) {
+      if (!hasRenderableState && isTerminalStatus(status)) {
+        this.logger.warn(
+          { status, currentMessageId: this.currentMessageId },
+          "agent prompt finalized with no renderable output",
+        );
+      }
       this.compactTimelineForFinalCard();
       await this.renderCard({ cancellable: false });
     }

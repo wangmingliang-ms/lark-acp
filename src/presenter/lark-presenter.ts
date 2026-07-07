@@ -25,6 +25,10 @@ const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> 
   failed: { content: "⚠️ 出错", template: "red" },
 };
 
+const EMPTY_OUTPUT_HEADER = { content: "⚠️ 空回复", template: "orange" } as const;
+const EMPTY_OUTPUT_BODY =
+  "Agent 本轮结束了，但没有产生任何可显示内容。可能是 resumed session 空转、上下文过长导致输出被截断，或 agent 只返回了不可渲染的元数据。请重试；如果持续出现，建议新开 session 后继续。";
+
 const CANCEL_BUTTON_TEXT = "中断当前任务";
 
 // Card JSON 2.0 — required for the `collapsible_panel` element used by
@@ -36,10 +40,6 @@ const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 export const NOTICE_BODY_CHAR_LIMIT = 1_500;
 const NOTICE_TRUNCATION_SUFFIX =
   "\n\n…\n\n_内容过长，已截断；完整细节请查看 bridge.log 或本地日志。_";
-
-function summaryForStatus(status: AgentStatus): string {
-  return STATUS_HEADER[status].content;
-}
 
 function buildV2Card(
   headerContent: string,
@@ -284,10 +284,21 @@ function buildSessionMetaElement(state: UnifiedCardState): object | null {
   };
 }
 
+function isEmptyTerminalState(state: UnifiedCardState): boolean {
+  return (
+    state.entries.length === 0 &&
+    !state.cancellable &&
+    (state.status === "complete" || state.status === "cancelled" || state.status === "failed")
+  );
+}
+
 function buildUnifiedCard(state: UnifiedCardState): object {
   const elements: object[] = [];
+  const emptyTerminal = isEmptyTerminalState(state);
 
-  if (state.entries.length === 0) {
+  if (emptyTerminal) {
+    elements.push({ tag: "markdown", content: EMPTY_OUTPUT_BODY });
+  } else if (state.entries.length === 0) {
     elements.push({ tag: "markdown", content: "_准备中..._" });
   } else {
     state.entries.forEach((entry, i) => {
@@ -316,8 +327,8 @@ function buildUnifiedCard(state: UnifiedCardState): object {
     elements.push(metaElement);
   }
 
-  const header = STATUS_HEADER[state.status];
-  return buildV2Card(header.content, header.template, elements, summaryForStatus(state.status));
+  const header = emptyTerminal ? EMPTY_OUTPUT_HEADER : STATUS_HEADER[state.status];
+  return buildV2Card(header.content, header.template, elements, header.content);
 }
 
 export interface LarkCardPresenterOptions {

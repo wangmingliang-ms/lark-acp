@@ -120,6 +120,26 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[0]?.config?.summary?.content).toBe("✅ 已结束");
   });
 
+  it("renders an explicit empty-output warning for terminal cards with no entries", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.updateUnifiedCard("card_1", {
+      status: "complete",
+      entries: [],
+      cancellable: false,
+      chatId: "oc_1",
+      threadId: null,
+    });
+
+    const content = cards[0]?.body?.elements?.[0]?.content ?? "";
+    expect(cards[0]?.header?.title?.content).toBe("⚠️ 空回复");
+    expect(cards[0]?.header?.template).toBe("orange");
+    expect(cards[0]?.config?.summary?.content).toBe("⚠️ 空回复");
+    expect(content).toContain("Agent 本轮结束了，但没有产生任何可显示内容");
+    expect(content).not.toContain("准备中");
+  });
+
   it("always renders session metadata at the bottom of conversation cards", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);

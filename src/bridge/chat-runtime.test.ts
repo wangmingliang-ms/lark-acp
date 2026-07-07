@@ -3,7 +3,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { ChatRuntime } from "./chat-runtime.js";
 import { HummingClient } from "../acp/humming-client.js";
 import type { ChatRuntimeOptions } from "./chat-runtime.js";
-import { createPinoLogger } from "../logger/logger.js";
+import { createPinoLogger, type LarkLogger } from "../logger/logger.js";
 import type { LarkPresenter, UnifiedCardState } from "../presenter/presenter.js";
 import type { SessionRecord, SessionStore } from "../session-store/session-store.js";
 import type { AgentProcess } from "../acp/agent-process.js";
@@ -33,8 +33,7 @@ vi.mock("../acp/agent-process.js", async (importOriginal) => {
  * `lastActivity`) that the bridge's idle-eviction reads, so the presenter /
  * session store are never touched.
  */
-function opts(): ChatRuntimeOptions {
-  const logger = createPinoLogger();
+function opts(logger: LarkLogger = createPinoLogger()): ChatRuntimeOptions {
   // The presenter/sessionStore are unused by the getters under test; a cast
   // keeps the test focused (CLAUDE.md §4 — documented, narrow test cast).
   return {
@@ -402,6 +401,58 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     // Let any stray rejection from the losing race branch surface.
     await new Promise((r) => setTimeout(r, 50));
     expect(replies, "a clean turn must not produce an error/crash reply").toEqual([]);
+  });
+
+  it("logs prompt usage when a turn completes with no renderable output", async () => {
+    const states: UnifiedCardState[] = [];
+    const logs: Array<{ obj: object; msg?: string }> = [];
+    const logger: LarkLogger = {
+      debug: () => {},
+      info: (obj: string | object, msg?: string) => {
+        if (typeof obj === "object") logs.push({ obj, msg });
+      },
+      warn: () => {},
+      error: () => {},
+      child: () => logger,
+    };
+    const fake = makeFakeAgent();
+    let resolvePrompt: (r: acp.PromptResponse) => void = () => {};
+    const promptResult = new Promise<acp.PromptResponse>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    fake.agent.connection.prompt = () => promptResult;
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(logger),
+      presenter: recordingPresenter(states),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "silent turn" }],
+      messageId: "om_empty",
+      chatId: "oc_test",
+    });
+    resolvePrompt({
+      stopReason: "end_turn",
+      usage: { inputTokens: 71_395, outputTokens: 16_000, totalTokens: 87_395 },
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(states.at(-1)?.status).toBe("complete");
+        expect(runtime.processing).toBe(false);
+      },
+      { timeout: 1_000, interval: 20 },
+    );
+    expect(logs).toContainEqual({
+      obj: {
+        stopReason: "end_turn",
+        usage: { inputTokens: 71_395, outputTokens: 16_000, totalTokens: 87_395 },
+      },
+      msg: "prompt done",
+    });
   });
 
   it("does not persist humming context metadata as the ACP session title", async () => {

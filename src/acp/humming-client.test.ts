@@ -178,6 +178,35 @@ describe("HummingClient card-v2 conversation rendering", () => {
     ]);
   });
 
+  it("logs when a prompt finalizes without renderable output", async () => {
+    const ops: RenderOp[] = [];
+    const warnMessages: string[] = [];
+    const client = new HummingClient({
+      presenter: recordingPresenter(ops),
+      logger: {
+        ...logger,
+        warn: (_obj: unknown, message?: string) => {
+          if (message !== undefined) warnMessages.push(message);
+        },
+        child() {
+          return this;
+        },
+      },
+      showThoughts: true,
+      showTools: true,
+      showCancelButton: true,
+      permissionTimeoutMs: 0,
+      permissionMode: "alwaysAsk",
+    });
+    client.setContext("om_user", "oc_chat", "omt_thread");
+
+    await client.finalize("complete");
+
+    expect(warnMessages).toContain("agent prompt finalized with no renderable output");
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({ kind: "sendUnified", state: { status: "complete" } });
+  });
+
   it("ignores late renderable updates after a prompt has already been finalized", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
