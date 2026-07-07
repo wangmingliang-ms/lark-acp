@@ -2553,11 +2553,6 @@ async function runSetup(args: ParsedArgs): Promise<void> {
   migrateLegacyIfNeeded(homeDir, configPath, SILENT_LOGGER);
 
   const existing = readConfigFile(configPath);
-  if (existing.credentials.appId && existing.credentials.appSecret && args.setupForce !== true) {
-    throw new CliError(
-      `Feishu / Lark credentials already exist in ${configPath}. Re-run with \`${APP_NAME} setup --force\` to replace them.`,
-    );
-  }
 
   const target = args.setupTarget ?? "feishu";
   process.stdout.write("Feishu / Lark setup\n\n");

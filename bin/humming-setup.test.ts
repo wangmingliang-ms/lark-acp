@@ -10,6 +10,7 @@ import {
   maskCredentialId,
   parseArgs,
   readConfigFile,
+  runSetup,
   writeSetupCredentials,
 } from "./humming.js";
 
@@ -94,6 +95,20 @@ describe("setup credential persistence", () => {
       created: false,
     });
     expect(readConfigFile(settings).runtime.agent).toBe("claude");
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("runSetup does not abort when credentials already exist", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-runsetup-existing-"));
+    const settings = path.join(dir, "settings.json");
+    fs.writeFileSync(
+      settings,
+      JSON.stringify({ credentials: { appId: "cli_existing", appSecret: "existing-secret" } }),
+      "utf-8",
+    );
+
+    await expect(runSetup(parseArgs(["--home", dir, "setup"]))).resolves.toBeUndefined();
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
