@@ -36,7 +36,7 @@ const DEFAULT_SHOW_TOOLS = true;
 const DEFAULT_SHOW_CANCEL_BUTTON = true;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
-const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAllow";
+const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const IDLE_CLEANUP_INTERVAL_MS = 2 * 60_000;
 /** Debounce for settings.json change events (fs.watch double-fires). */
 const SETTINGS_RELOAD_DEBOUNCE_MS = 300;
@@ -215,7 +215,7 @@ export interface LarkBridgeAgentOptions {
    */
   idleStatusCardMs?: number;
   /**
-   * How to handle agent-side permission requests. Default `"alwaysAllow"`.
+   * How to handle agent-side permission requests. Default `"alwaysAsk"`.
    * `"alwaysAllow"` / `"alwaysDeny"` auto-resolve without involving the user.
    */
   permissionMode?: PermissionMode;

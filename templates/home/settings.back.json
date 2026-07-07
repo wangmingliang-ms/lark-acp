@@ -10,7 +10,7 @@
     "hideThoughts": false,
     "hideTools": false,
     "hideCancelButton": false,
-    "permissionMode": "alwaysAllow",
+    "permissionMode": "alwaysAsk",
     "lifecycleNotifyChatIds": []
   },
   "agents": {

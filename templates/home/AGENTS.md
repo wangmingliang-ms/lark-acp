@@ -86,7 +86,7 @@ humming sessions set-control --json '{
     "<boolean config id>": { "type": "boolean", "value": true },
     "<select config id>": { "value": "<one select option value>" }
   },
-  "bridgePermissionMode": "alwaysAllow"
+  "bridgePermissionMode": "alwaysAsk"
 }'
 ```
 
@@ -154,4 +154,4 @@ On success humming sends a notice card naming the bound session title and showin
 
 ## Permission terminology
 
-ACP has per-tool `requestPermission` approvals, but no standard global permission mode. If an agent exposes Plan/Edit/Bypass as modes, set `modeId`. If it exposes approval/bypass as a config option, set `config`. Only use `bridgePermissionMode` for humming's own approval-card policy.
+ACP has per-tool `requestPermission` approvals, but no standard global permission mode. If an agent exposes Plan/Edit/Bypass as modes, set `modeId`. If it exposes approval/bypass as a config option, set `config`. Only use `bridgePermissionMode` for humming's own approval-card policy. Ordinary tool approvals still default to asking the user; Humming auto-approves only its own CLI control/session commands (for example `humming sessions set-control`), so agents can update the Humming profile without a manual approval loop.

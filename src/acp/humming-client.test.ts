@@ -186,6 +186,47 @@ describe("HummingClient card-v2 conversation rendering", () => {
     }
   });
 
+  it("auto-approves Humming control commands while keeping normal approvals interactive", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    const response = await client.requestPermission({
+      sessionId: "sess_1",
+      toolCall: {
+        toolCallId: "tool_humming",
+        title: "humming sessions set-control",
+        kind: "execute",
+        status: "pending",
+        rawInput: {
+          command: "humming",
+          args: ["sessions", "set-control", "--json-file", "controls.json"],
+        },
+      },
+      options: [{ kind: "allow_once", name: "允许", optionId: "allow" }],
+    });
+
+    expect(response).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    expect(ops.some((op) => op.kind === "permission")).toBe(false);
+  });
+
+  it("does not auto-approve non-Humming commands when permission mode is ask", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+
+    const responsePromise = client.requestPermission(permissionRequest());
+    await waitForFlush();
+
+    const permission = ops.find(
+      (op): op is Extract<RenderOp, { kind: "permission" }> => op.kind === "permission",
+    );
+    expect(permission).toBeDefined();
+    if (!permission) throw new Error("expected permission request");
+    client.handleCardAction(permission.requestId, "allow");
+    await expect(responsePromise).resolves.toEqual({
+      outcome: { outcome: "selected", optionId: "allow" },
+    });
+  });
+
   it("reuses an idle status card as the approval card when permission is requested", async () => {
     vi.useFakeTimers();
     try {

@@ -123,7 +123,7 @@ const ENV_UPDATE_REF = "HUMMING_REF";
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 1440;
 const DEFAULT_MAX_CHATS = 10;
-const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAllow";
+const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const DEFAULT_IDLE_STATUS_CARD_MS = 10_000;
 /**
  * Agent used when neither `--agent` nor settings.json `runtime.agent` names one.

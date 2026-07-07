@@ -172,6 +172,33 @@ function commandFromRawInput(rawInput: unknown): string | undefined {
   return undefined;
 }
 
+function commandTokensFromRawInput(rawInput: unknown): readonly string[] {
+  if (typeof rawInput === "string") return shellWords(rawInput);
+  if (!isRecord(rawInput)) return [];
+  const args = arrayOfStrings(rawInput["args"]) ?? arrayOfStrings(rawInput["argv"]);
+  const direct = stringField(rawInput, ["command", "cmd", "commandLine", "shellCommand", "script"]);
+  if (args) return direct ? [direct, ...args] : args;
+  return direct ? shellWords(direct) : [];
+}
+
+function shellWords(command: string): readonly string[] {
+  return command
+    .trim()
+    .split(/\s+/)
+    .filter((part) => part.length > 0);
+}
+
+function isHummingCliPermissionRequest(params: acp.RequestPermissionRequest): boolean {
+  const tokens = commandTokensFromRawInput(params.toolCall?.rawInput);
+  if (tokens.length === 0) return false;
+  const binary = commandBasename(tokens[0] ?? "");
+  return binary === "humming" || binary === "humming.cmd" || binary === "humming.ps1";
+}
+
+function commandBasename(command: string): string {
+  return (command.split(/[\\/]/).pop() ?? command).toLowerCase();
+}
+
 function stringField(raw: unknown, keys: readonly string[]): string | undefined {
   if (!isRecord(raw)) return undefined;
   for (const key of keys) {
@@ -227,10 +254,10 @@ function redactCommand(command: string): string {
 /**
  * Strategy for handling agent-side permission requests.
  *
- * - `alwaysAllow` (default) — auto-pick the agent's first `allow_*` option
- *   without bothering the user. Falls back to `cancelled` if no allow option exists.
- * - `alwaysAsk` — forward every request to the user as a Lark card
+ * - `alwaysAsk` (default) — forward every request to the user as a Lark card
  *   and block the agent until they pick an option.
+ * - `alwaysAllow` — auto-pick the agent's first `allow_*` option without
+ *   bothering the user. Falls back to `cancelled` if no allow option exists.
  * - `alwaysDeny` — auto-pick the agent's first `reject_*` option, falling
  *   back to `cancelled` (which the agent treats as a denial).
  */
@@ -376,6 +403,9 @@ export class HummingClient implements acp.Client {
   async requestPermission(
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
+    if (isHummingCliPermissionRequest(params)) {
+      return this.autoResolvePermission(params, "alwaysAllow");
+    }
     if (this.permissionMode !== "alwaysAsk") {
       return this.autoResolvePermission(params, this.permissionMode);
     }

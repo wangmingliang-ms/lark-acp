@@ -440,7 +440,7 @@ describe("runInit", () => {
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "sessions.back.json"), "utf-8")),
     ).toMatchObject({
-      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAllow" } }],
+      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAsk" } }],
     });
     expect(fs.existsSync(path.join(home, "settings.json"))).toBe(false);
     expect(fs.existsSync(path.join(home, "sessions.json"))).toBe(false);
@@ -594,7 +594,7 @@ describe("legacy migration isolation", () => {
 });
 
 describe("default permission mode", () => {
-  it("defaults runtime.permissionMode to auto-approve when unset", () => {
+  it("defaults runtime.permissionMode to ask when unset", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-permission-default-"));
     try {
       const settings = path.join(dir, "settings.json");
@@ -605,7 +605,7 @@ describe("default permission mode", () => {
       const cfg = readConfigFile(settings);
       const inv = resolveDefaultAgent(parseArgs(["proxy"]), registry, cfg.runtime.agent);
       expect(inv.label).toBe(DEFAULT_AGENT);
-      expect(DEFAULT_PERMISSION_MODE).toBe("alwaysAllow");
+      expect(DEFAULT_PERMISSION_MODE).toBe("alwaysAsk");
       expect(cfg.runtime.permissionMode).toBeUndefined();
       expect(parseArgs(["proxy"]).permissionMode).toBeUndefined();
     } finally {

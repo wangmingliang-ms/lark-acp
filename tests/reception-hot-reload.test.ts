@@ -289,7 +289,7 @@ describe("reception area", () => {
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "sessions.back.json"), "utf-8")),
     ).toMatchObject({
-      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAllow" } }],
+      oc_example_chat_id: [{ controls: { bridgePermissionMode: "alwaysAsk" } }],
     });
   });
 });
