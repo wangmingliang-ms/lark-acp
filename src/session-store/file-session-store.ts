@@ -315,7 +315,8 @@ function mergeControls(
   if (patch.clearModelId === true) delete out.modelId;
   if (patch.modelId !== undefined) out.modelId = patch.modelId;
   if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined) out.bridgePermissionMode = patch.bridgePermissionMode;
+  if (patch.bridgePermissionMode !== undefined)
+    out.bridgePermissionMode = patch.bridgePermissionMode;
   const config = mergeConfig(existing?.config, patch.config);
   if (config) out.config = config;
   else delete out.config;
@@ -336,7 +337,8 @@ function mergeControlPatches(
     out.modelId = patch.modelId;
   }
   if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined) out.bridgePermissionMode = patch.bridgePermissionMode;
+  if (patch.bridgePermissionMode !== undefined)
+    out.bridgePermissionMode = patch.bridgePermissionMode;
   const config = mergeConfig(existing?.config, patch.config);
   if (config) out.config = config;
   else delete out.config;

@@ -448,7 +448,10 @@ export class ChatRuntime {
     };
   }
 
-  private validateControls(snapshot: SessionCapabilitiesSnapshot, controls: SessionControlPatch): void {
+  private validateControls(
+    snapshot: SessionCapabilitiesSnapshot,
+    controls: SessionControlPatch,
+  ): void {
     if (controls.modelId !== undefined) {
       if (!snapshot.models) {
         throw new ControlApplyError(
@@ -1188,7 +1191,8 @@ function mergeSessionControls(
   if (patch?.clearModelId === true) delete out.modelId;
   if (patch?.modelId !== undefined) out.modelId = patch.modelId;
   if (patch?.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch?.bridgePermissionMode !== undefined) out.bridgePermissionMode = patch.bridgePermissionMode;
+  if (patch?.bridgePermissionMode !== undefined)
+    out.bridgePermissionMode = patch.bridgePermissionMode;
   const config = mergeSessionConfig(existing?.config, patch?.config);
   if (config) out.config = config;
   else delete out.config;

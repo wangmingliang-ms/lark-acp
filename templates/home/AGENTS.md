@@ -32,6 +32,12 @@ To bind or rebind a chat, update the top-level `bindings` object:
 
 Chat bindings are repo-only. Do not write an agent into `bindings`: Agent / Model / Mode / Permission / Config controls belong to the topic/session profile. New topics inherit the most recent profile from the same chat + repo; if the repo has no prior session, humming uses the global default Agent from `runtime.agent`.
 
+## Compact slash commands
+
+If the user sends `/agent <agent>`, `/model <model-id|auto>`, `/mode <mode-id>`, `/permission <alwaysAsk|alwaysAllow|alwaysDeny>`, or `/profile`, Humming handles that message in the bridge and does not forward it to the Agent. Do not reinterpret those slash commands yourself.
+
+`/model auto` means clearing the explicit model override so the Agent uses its own default/automatic model. It is not a literal ACP model id.
+
 ## Session controls
 
 Session-specific controls live in `sessions.json` and should normally be changed through the humming CLI, not by hand-editing JSON.

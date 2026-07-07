@@ -5,7 +5,7 @@
  * spy resolver, real temp-dir stores, and a narrow typed view of the private
  * routing methods. No Lark credentials, no real agent.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,12 +19,29 @@ import {
   type AgentResolver,
   type ResolvedAgentInvocation,
 } from "../src/index.js";
+import type * as Lark from "@larksuiteoapi/node-sdk";
+
+const probeAgentSessionCapabilitiesMock = vi.fn(async () => ({
+  sessionId: "probe_session",
+  capabilities: {},
+}));
+
+vi.mock("../src/acp/agent-process.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/acp/agent-process.js")>();
+  return {
+    ...actual,
+    probeAgentSessionCapabilities: (opts: unknown) => probeAgentSessionCapabilitiesMock(opts),
+  };
+});
 
 class RecordingPresenter implements LarkPresenter {
   readonly notices: NoticeCardSpec[] = [];
   async replyText(): Promise<void> {}
   async sendInterruptCard(): Promise<string | null> {
     return null;
+  }
+  async updateInterruptCard(): Promise<boolean> {
+    return true;
   }
   async updatePermissionCard(): Promise<void> {}
   async expirePermissionCard(): Promise<void> {}
@@ -78,10 +95,39 @@ interface BridgeInternals {
     error: string,
     noticeMessageId?: string | null,
   ): Promise<unknown>;
+  routeMessage(
+    event: Lark.RawMessageEvent,
+    userId: string,
+    messageId: string,
+    chatId: string,
+    threadId: string | null,
+  ): Promise<void>;
   readonly activeChatCount: number;
 }
 function asInternals(bridge: LarkBridge): BridgeInternals {
   return bridge as unknown as BridgeInternals;
+}
+
+function textEvent(
+  text: string,
+  chatId: string,
+  threadId: string | null,
+  messageId: string,
+): Lark.RawMessageEvent {
+  return {
+    message: {
+      message_id: messageId,
+      chat_id: chatId,
+      chat_type: "p2p",
+      message_type: "text",
+      content: JSON.stringify({ text }),
+      ...(threadId ? { thread_id: threadId } : {}),
+    },
+    sender: {
+      sender_type: "user",
+      sender_id: { open_id: "ou_user" },
+    },
+  } as unknown as Lark.RawMessageEvent;
 }
 
 const CLAUDE: ResolvedAgentInvocation = {
@@ -132,6 +178,11 @@ beforeEach(async () => {
   settingsPath = path.join(home, "settings.json");
 
   presenter = new RecordingPresenter();
+  probeAgentSessionCapabilitiesMock.mockReset();
+  probeAgentSessionCapabilitiesMock.mockResolvedValue({
+    sessionId: "probe_session",
+    capabilities: {},
+  });
   bindingStore = new SettingsBindingStore(settingsPath);
   sessionStore = new FileSessionStore(home);
   await bindingStore.init();
@@ -349,6 +400,182 @@ describe("hot-reload of bindings", () => {
     // the live runtime survives and the binding is still resolvable once the
     // file is (conceptually) rewritten. The reload simply deferred.
     expect(b.activeChatCount).toBe(1);
+  });
+});
+
+describe("compact slash session profile commands", () => {
+  it("handles /model auto through the shared stored setControls path without spawning a runtime", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s1",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      controls: { modelId: "opus", modeId: "default" },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/model auto", "oc_x", "th_topic", "om_model_auto"),
+      "ou_user",
+      "om_model_auto",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(b.activeChatCount).toBe(0);
+    expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
+      controls: { modeId: "default" },
+    });
+    expect(await sessionStore.getLatest("oc_x", "th_topic")).not.toMatchObject({
+      controls: { modelId: expect.any(String) },
+    });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
+    expect(notice?.body).toContain("Model：opus → —");
+  });
+
+  it("handles /permission through the shared stored setControls notice", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s1",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      controls: { bridgePermissionMode: "alwaysAsk" },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/permission alwaysAllow", "oc_x", "th_topic", "om_perm"),
+      "ou_user",
+      "om_perm",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
+      controls: { bridgePermissionMode: "alwaysAllow" },
+    });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
+    expect(notice?.body).toContain("Permission：Ask approvals → Auto approve");
+  });
+
+  it("shows /profile from stored topic profile", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "profile:1",
+      profileOnly: true,
+      agentCommand: CODEX.command,
+      agentArgs: [...CODEX.args],
+      agentLabel: CODEX.label,
+      cwd: repoA,
+      controls: { modeId: "agent", bridgePermissionMode: "alwaysAllow" },
+      pendingControls: { clearModelId: true },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/profile", "oc_x", "th_topic", "om_profile"),
+      "ou_user",
+      "om_profile",
+      "oc_x",
+      "th_topic",
+    );
+
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "📋 当前 Session profile", template: "blue" });
+    expect(notice?.body).toContain("Agent：codex");
+    expect(notice?.body).toContain(`Repo：${repoA}`);
+    expect(notice?.body).toContain("Mode：agent");
+    expect(notice?.body).toContain("Permission：Auto approve");
+    expect(notice?.body).toContain("Pending：Model: auto/default");
+    expect(notice?.body).toContain("状态：profile-only");
+  });
+
+  it("switches Agent via /agent using the same controlSetAgent notice path", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s_claude",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/agent codex", "oc_x", "th_topic", "om_agent"),
+      "ou_user",
+      "om_agent",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ command: CODEX.command, args: CODEX.args, cwd: repoA }),
+    );
+    const stored = await sessionStore.getLatest("oc_x", "th_topic");
+    expect(stored).toMatchObject({ profileOnly: true, agentLabel: "codex", cwd: repoA });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "✅ Agent 已切换", template: "green" });
+    expect(notice?.body).toContain("Agent：claude → codex");
+    expect(notice?.body).toContain("旧 Agent 的内部对话历史不会自动迁移");
+  });
+
+  it("keeps the old Agent when /agent target probe fails", async () => {
+    bridge = makeBridge({ unboundCwd: home });
+    const b = asInternals(bridge);
+    probeAgentSessionCapabilitiesMock.mockRejectedValueOnce(new Error("Authentication required"));
+    await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
+    await sessionStore.save({
+      chatId: "oc_x",
+      threadId: "th_topic",
+      sessionId: "s_claude",
+      agentCommand: CLAUDE.command,
+      agentArgs: [...CLAUDE.args],
+      agentLabel: CLAUDE.label,
+      cwd: repoA,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await b.routeMessage(
+      textEvent("/agent codex", "oc_x", "th_topic", "om_agent_fail"),
+      "ou_user",
+      "om_agent_fail",
+      "oc_x",
+      "th_topic",
+    );
+
+    expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
+      sessionId: "s_claude",
+      agentLabel: "claude",
+    });
+    const notice = presenter.notices.at(-1);
+    expect(notice).toMatchObject({ title: "⚠️ 目标 Agent 不可用", template: "red" });
+    expect(notice?.body).toContain("当前 topic 的 Agent 没有切换");
+    expect(notice?.body).toContain("Authentication required");
   });
 });
 

@@ -58,7 +58,11 @@ export type ControlResponse =
 
 export interface BridgeControlHandlers {
   capabilities(chatId: string, threadId: string | null): Promise<SessionCapabilitiesSnapshot>;
-  setControls(chatId: string, threadId: string | null, controls: SessionControlPatch): Promise<unknown>;
+  setControls(
+    chatId: string,
+    threadId: string | null,
+    controls: SessionControlPatch,
+  ): Promise<unknown>;
   bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   setAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   agentProbeFailed(

@@ -19,7 +19,7 @@ import {
 import { ChatRuntime, type PendingMessage } from "./chat-runtime.js";
 import { hydratePrompt } from "./prompt-hydrator.js";
 import type { PermissionMode } from "../acp/humming-client.js";
-import { AgentAuthError } from "../acp/agent-process.js";
+import { AgentAuthError, probeAgentSessionCapabilities } from "../acp/agent-process.js";
 import { SessionAlreadyBoundError } from "../session-store/file-session-store.js";
 import type { AgentStatus, NoticeCardSpec } from "../presenter/presenter.js";
 import type {
@@ -552,6 +552,7 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     controls: SessionControlPatch,
+    noticeMessageId?: string | null,
   ): Promise<{
     readonly applied: boolean;
     readonly queued?: boolean;
@@ -562,25 +563,27 @@ export class LarkBridge {
       if (runtime.processing) {
         const before = await this.sessionStore.getLatest(chatId, threadId);
         const record = await this.sessionStore.setPendingControls({ chatId, threadId }, controls);
+        const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
         await this.presenter
-          .replyNoticeCard(
-            runtime.lastMessageId ?? chatId,
-            buildPendingControlQueuedNotice(before, record, controls),
-          )
+          .replyNoticeCard(replyTo, buildPendingControlQueuedNotice(before, record, controls))
           .catch((err) =>
             this.logger.warn({ err, chatId, threadId }, "pending control queue notice failed"),
           );
         return { applied: false, queued: true, recordSessionId: record.sessionId };
       }
-      await runtime.applyControls(controls);
+      await runtime.applyControls(controls, noticeMessageId ?? undefined);
       return { applied: true, recordSessionId: runtime.capabilities().session.sessionId };
     }
 
     const before = await this.sessionStore.getLatest(chatId, threadId);
     const record = await this.sessionStore.setControls({ chatId, threadId }, controls);
-    await this.presenter
-      .sendNoticeCard(chatId, buildStoredControlUpdatedNotice(before, record, controls))
-      .catch((err) => this.logger.warn({ err, chatId, threadId }, "stored control notice failed"));
+    const notice = buildStoredControlUpdatedNotice(before, record, controls);
+    const sendStoredNotice = noticeMessageId
+      ? this.presenter.replyNoticeCard(noticeMessageId, notice)
+      : this.presenter.sendNoticeCard(chatId, notice);
+    await sendStoredNotice.catch((err) =>
+      this.logger.warn({ err, chatId, threadId }, "stored control notice failed"),
+    );
     return { applied: false, recordSessionId: record.sessionId };
   }
 
@@ -814,16 +817,35 @@ export class LarkBridge {
         await this.handleWhere(chatId, messageId);
         return;
       case "set-agent":
+        await this.handleSetAgentCommand(command.agent, chatId, threadId, messageId);
+        return;
       case "set-model":
+        await this.handleSetControlsCommand(
+          modelCommandToPatch(command.model),
+          chatId,
+          threadId,
+          messageId,
+        );
+        return;
       case "set-mode":
+        await this.handleSetControlsCommand({ modeId: command.mode }, chatId, threadId, messageId);
+        return;
       case "set-permission":
+        await this.handleSetControlsCommand(
+          { bridgePermissionMode: command.permissionMode },
+          chatId,
+          threadId,
+          messageId,
+        );
+        return;
       case "profile":
+        await this.handleProfileCommand(chatId, threadId, messageId);
+        return;
       case "profile-command-usage":
-        await this.presenter.replyNoticeCard(messageId, {
-          title: "ℹ️ Session profile 命令即将支持",
-          body: "该 compact slash command 已被 Humming 识别，不会转发给 Agent。实现正在接入共享的 Humming control 逻辑。",
-          template: "blue",
-        });
+        await this.presenter.replyNoticeCard(
+          messageId,
+          buildProfileCommandUsageNotice(command.command),
+        );
         return;
       default:
         return assertNever(command);
@@ -910,6 +932,110 @@ export class LarkBridge {
       body: `• 目录：${binding.cwd}\n• Agent：${binding.label}\n• 来源：${source}`,
       template: "blue",
     });
+  }
+
+  private async handleSetControlsCommand(
+    controls: SessionControlPatch,
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    await this.controlSetControls(chatId, threadId, controls, messageId);
+  }
+
+  private async handleSetAgentCommand(
+    selection: string,
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    const binding = await this.resolveBinding(chatId);
+    if (!binding) {
+      await this.presenter.replyNoticeCard(
+        messageId,
+        buildProfileCommandFailureNotice(
+          "⚠️ Agent 切换失败",
+          "当前 chat 没有可用 repo。请先 /bind <路径>，或配置默认 / reception cwd。",
+        ),
+      );
+      return;
+    }
+    let target: ResolvedAgentInvocation;
+    try {
+      target = this.resolver(selection);
+    } catch (err) {
+      await this.presenter.replyNoticeCard(
+        messageId,
+        buildProfileCommandFailureNotice(
+          "⚠️ Agent 切换失败",
+          `无法解析目标 Agent：${formatBootstrapError(err)}`,
+        ),
+      );
+      return;
+    }
+    try {
+      await probeAgentSessionCapabilities({
+        command: target.command,
+        args: [...target.args],
+        cwd: binding.cwd,
+        ...(target.env ? { env: { ...target.env } } : {}),
+        logger: this.logger,
+      });
+    } catch (err) {
+      await this.controlAgentProbeFailed(
+        chatId,
+        threadId,
+        {
+          label: target.label,
+          command: target.command,
+          args: [...target.args],
+          cwd: binding.cwd,
+        },
+        formatBootstrapError(err),
+        messageId,
+      );
+      return;
+    }
+
+    const now = Date.now();
+    await this.controlSetAgent(
+      {
+        chatId,
+        threadId,
+        sessionId: `profile:${now}`,
+        profileOnly: true,
+        agentCommand: target.command,
+        agentArgs: [...target.args],
+        ...(target.env ? { agentEnv: { ...target.env } } : {}),
+        agentLabel: target.label,
+        cwd: binding.cwd,
+        createdAt: now,
+        updatedAt: now,
+      },
+      messageId,
+    );
+  }
+
+  private async handleProfileCommand(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    if (runtime) {
+      await this.presenter.replyNoticeCard(
+        messageId,
+        buildLiveProfileNotice(runtime.capabilities()),
+      );
+      return;
+    }
+    const latest = await this.sessionStore.getLatest(chatId, threadId);
+    if (latest) {
+      await this.presenter.replyNoticeCard(messageId, buildStoredProfileNotice(latest));
+      return;
+    }
+    const binding = await this.resolveBinding(chatId);
+    await this.presenter.replyNoticeCard(messageId, buildNoProfileNotice(binding));
   }
 
   /**
@@ -1712,7 +1838,7 @@ function displayControlConfigValue(value: NonNullable<SessionControls["config"]>
 function buildStoredControlUpdatedNotice(
   before: SessionRecord | null,
   after: SessionRecord,
-  changed: SessionControls,
+  changed: SessionControlPatch,
 ): NoticeCardSpec {
   const lines = [
     "当前 topic 的 session profile 已更新；runtime 未在运行，下一条消息会按新 profile 启动/恢复。",
@@ -1737,7 +1863,7 @@ function buildStoredControlUpdatedNotice(
 function buildPendingControlQueuedNotice(
   before: SessionRecord | null,
   after: SessionRecord,
-  changed: SessionControls,
+  changed: SessionControlPatch,
 ): NoticeCardSpec {
   const pending = after.pendingControls;
   const lines = [
@@ -1763,15 +1889,15 @@ function buildPendingControlQueuedNotice(
 }
 
 function storedControlChangeLines(
-  before: SessionControls | undefined,
-  after: SessionControls | undefined,
-  changed: SessionControls,
+  before: SessionControlPatch | undefined,
+  after: SessionControlPatch | undefined,
+  changed: SessionControlPatch,
 ): string[] {
   const lines: string[] = [];
   if (changed.modeId !== undefined) {
     lines.push(`• Mode：${displayControlMode(before)} → ${displayControlMode(after)}`);
   }
-  if (changed.modelId !== undefined) {
+  if (changed.clearModelId === true || changed.modelId !== undefined) {
     lines.push(`• Model：${displayControlModel(before)} → ${displayControlModel(after)}`);
   }
   if (changed.bridgePermissionMode !== undefined) {
@@ -1865,6 +1991,148 @@ function buildSessionBindRejectedNotice(record: SessionRecord): NoticeCardSpec {
     body: lines.join("\n"),
     template: "orange",
   };
+}
+
+function modelCommandToPatch(model: string | "auto"): SessionControlPatch {
+  return model === "auto" ? { clearModelId: true } : { modelId: model };
+}
+
+function buildProfileCommandUsageNotice(command: string): NoticeCardSpec {
+  return {
+    title: `ℹ️ 用法：/${command}`,
+    body: profileCommandUsage(command),
+    template: "blue",
+  };
+}
+
+function profileCommandUsage(command: string): string {
+  switch (command) {
+    case "agent":
+      return "切换当前 topic 的 Agent：\n/agent <agent>\n\n示例：/agent copilot";
+    case "model":
+      return "设置当前 topic 的 Model，或清除显式 model override：\n/model <model-id>\n/model auto";
+    case "mode":
+      return "设置当前 topic 的 Mode：\n/mode <mode-id>";
+    case "permission":
+      return "设置 Humming approval 策略：\n/permission alwaysAsk\n/permission alwaysAllow\n/permission alwaysDeny";
+    default:
+      return "可用命令：/agent <agent>、/model <model-id|auto>、/mode <mode-id>、/permission <mode>、/profile";
+  }
+}
+
+function buildProfileCommandFailureNotice(title: string, body: string): NoticeCardSpec {
+  return { title, body, template: "red" };
+}
+
+function buildLiveProfileNotice(snapshot: SessionCapabilitiesSnapshot): NoticeCardSpec {
+  return {
+    title: "📋 当前 Session profile",
+    body: [
+      "当前 topic 有正在运行的 Agent runtime。",
+      "",
+      "**当前 profile**",
+      `• Agent：${displaySnapshotAgent(snapshot)}`,
+      `• Repo：${snapshot.agent.cwd}`,
+      `• Mode：${displaySnapshotMode(snapshot)}`,
+      `• Model：${displaySnapshotModel(snapshot)}`,
+      `• Permission：${displaySnapshotPermission(snapshot)}`,
+      `• Controls：${displaySnapshotControls(snapshot)}`,
+      `• 状态：live`,
+    ].join("\n"),
+    template: "blue",
+  };
+}
+
+function buildStoredProfileNotice(record: SessionRecord): NoticeCardSpec {
+  return {
+    title: "📋 当前 Session profile",
+    body: [
+      record.profileOnly
+        ? "当前 topic 保存的是 profile-only 记录；下一条消息会创建新的 ACP session。"
+        : "当前 topic 有已保存的 ACP session；下一条消息会尝试恢复。",
+      "",
+      "**当前 profile**",
+      `• Agent：${record.agentLabel ?? record.agentCommand}`,
+      `• Repo：${record.cwd}`,
+      `• Mode：${displayControlMode(record.controls)}`,
+      `• Model：${displayControlModel(record.controls)}`,
+      `• Permission：${displayControlPermission(record.controls)}`,
+      `• Controls：${displayControlConfig(record.controls)}`,
+      `• Pending：${displayControlPatch(record.pendingControls)}`,
+      `• 状态：${record.profileOnly ? "profile-only" : "stored"}`,
+    ].join("\n"),
+    template: "blue",
+  };
+}
+
+function buildNoProfileNotice(binding: EffectiveBinding | null): NoticeCardSpec {
+  return {
+    title: "📋 当前 Session profile",
+    body: [
+      "当前 topic 还没有 session profile。",
+      "",
+      "**默认启动信息**",
+      `• Agent：${binding?.label ?? "—"}`,
+      `• Repo：${binding?.cwd ?? "—"}`,
+      "• Mode：—",
+      "• Model：—",
+      `• Permission：—`,
+      "• Controls：—",
+      "• 状态：no session",
+    ].join("\n"),
+    template: "blue",
+  };
+}
+
+function displaySnapshotAgent(snapshot: SessionCapabilitiesSnapshot): string {
+  return snapshot.agent.label ?? snapshot.agent.command;
+}
+
+function displaySnapshotMode(snapshot: SessionCapabilitiesSnapshot): string {
+  const modeId = snapshot.modes?.currentModeId;
+  if (!modeId) return "—";
+  return snapshot.modes?.availableModes.find((mode) => mode.id === modeId)?.name ?? modeId;
+}
+
+function displaySnapshotModel(snapshot: SessionCapabilitiesSnapshot): string {
+  const modelId = snapshot.models?.currentModelId;
+  if (!modelId) return "—";
+  return (
+    snapshot.models?.availableModels.find((model) => model.modelId === modelId)?.name ?? modelId
+  );
+}
+
+function displaySnapshotPermission(snapshot: SessionCapabilitiesSnapshot): string {
+  return displayControlPermission({ bridgePermissionMode: snapshot.bridgePermissionMode });
+}
+
+function displaySnapshotControls(snapshot: SessionCapabilitiesSnapshot): string {
+  const options = snapshot.configOptions ?? [];
+  if (options.length === 0) return "—";
+  return options
+    .map((option) => `${option.name}: ${displaySnapshotConfigValue(option)}`)
+    .join(" · ");
+}
+
+function displaySnapshotConfigValue(
+  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+): string {
+  if (option.type === "boolean") return option.currentValue ? "on" : "off";
+  return option.currentValue;
+}
+
+function displayControlPatch(controls: SessionControlPatch | undefined): string {
+  if (!controls) return "—";
+  const parts: string[] = [];
+  if (controls.clearModelId === true) parts.push("Model: auto/default");
+  if (controls.modelId !== undefined) parts.push(`Model: ${controls.modelId}`);
+  if (controls.modeId !== undefined) parts.push(`Mode: ${controls.modeId}`);
+  if (controls.bridgePermissionMode !== undefined) {
+    parts.push(`Permission: ${displayControlPermission(controls)}`);
+  }
+  const config = displayControlConfig(controls);
+  if (config !== "—") parts.push(`Controls: ${config}`);
+  return parts.length > 0 ? parts.join(" · ") : "—";
 }
 
 function bindingSnapshotOf(binding: ChatBinding): BindingSnapshot {

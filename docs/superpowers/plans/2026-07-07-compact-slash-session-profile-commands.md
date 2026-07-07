@@ -24,10 +24,12 @@
 ### Task 1: Parse compact slash commands
 
 **Files:**
+
 - Modify: `src/interpreter/lark-interpreter.ts`
 - Test: `src/interpreter/lark-interpreter.test.ts`
 
 **Interfaces:**
+
 - Produces `LarkCommand` variants:
   - `{ kind: "set-agent"; agent: string }`
   - `{ kind: "set-model"; model: string | "auto" }`
@@ -106,6 +108,7 @@ git push
 ### Task 2: Add control patch semantics for clearing model overrides
 
 **Files:**
+
 - Modify: `src/session-store/session-store.ts`
 - Modify: `src/session-store/file-session-store.ts`
 - Modify: `src/session-store/file-session-store.test.ts`
@@ -113,6 +116,7 @@ git push
 - Modify: `bin/humming.ts`
 
 **Interfaces:**
+
 - Add `SessionControlPatch` with `clearModelId?: true`.
 - `SessionRecord.pendingControls?: SessionControlPatch`.
 - `SessionStore.setControls()` and `setPendingControls()` consume `SessionControlPatch`.
@@ -223,10 +227,12 @@ git push
 ### Task 3: Apply model-clear patches in live runtime notices
 
 **Files:**
+
 - Modify: `src/bridge/chat-runtime.ts`
 - Test: `src/bridge/chat-runtime.test.ts`
 
 **Interfaces:**
+
 - `ChatRuntime.applyControls(controls: SessionControlPatch, noticeMessageId?: string): Promise<void>`.
 - `renderControlSuccessBody()` includes Model change lines for `clearModelId`.
 - Clearing model updates Humming's cached snapshot to no current model and persists controls without `modelId`.
@@ -324,10 +330,12 @@ git push
 ### Task 4: Bridge slash commands to shared control operations
 
 **Files:**
+
 - Modify: `src/bridge/bridge.ts`
 - Test: `tests/reception-hot-reload.test.ts`
 
 **Interfaces:**
+
 - Slash command handlers call `controlSetAgent()` and `controlSetControls()` instead of duplicating persistence/notice logic.
 - `controlSetControls(chatId, threadId, controls, noticeMessageId?)` anchors slash responses to the command message.
 - `/agent` probe failure calls `controlAgentProbeFailed()`.
@@ -365,7 +373,13 @@ it("handles /model auto through the shared setControls path and replies to the s
     updatedAt: 1,
   });
 
-  await b.routeMessage(textEvent("/model auto", "oc_x", "th_topic", "om_model_auto"), "ou_user", "om_model_auto", "oc_x", "th_topic");
+  await b.routeMessage(
+    textEvent("/model auto", "oc_x", "th_topic", "om_model_auto"),
+    "ou_user",
+    "om_model_auto",
+    "oc_x",
+    "th_topic",
+  );
 
   expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
     controls: { modeId: "default" },
@@ -421,10 +435,12 @@ git push
 ### Task 5: Update home docs and run full verification
 
 **Files:**
+
 - Modify: `templates/home/AGENTS.md`
 - Modify: `src/home-templates.test.ts`
 
 **Interfaces:**
+
 - Home guide documents that explicit slash commands are bridge-native and `/model auto` clears explicit model override.
 
 - [ ] **Step 1: Write failing home-template test**

@@ -305,10 +305,12 @@ function detectCommand(text: string): LarkCommand | null {
 
 function detectProfileCommand(text: string): LarkCommand | null {
   const agent = detectSingleArgCommand(text, AGENT_COMMAND_TOKEN, "agent");
-  if (agent) return agent.kind === "arg" ? { kind: "set-agent", agent: agent.value } : agent.command;
+  if (agent)
+    return agent.kind === "arg" ? { kind: "set-agent", agent: agent.value } : agent.command;
 
   const model = detectSingleArgCommand(text, MODEL_COMMAND_TOKEN, "model");
-  if (model) return model.kind === "arg" ? { kind: "set-model", model: model.value } : model.command;
+  if (model)
+    return model.kind === "arg" ? { kind: "set-model", model: model.value } : model.command;
 
   const mode = detectSingleArgCommand(text, MODE_COMMAND_TOKEN, "mode");
   if (mode) return mode.kind === "arg" ? { kind: "set-mode", mode: mode.value } : mode.command;
@@ -329,7 +331,13 @@ function detectProfileCommand(text: string): LarkCommand | null {
 
 type SingleArgCommandResult =
   | { readonly kind: "arg"; readonly value: string }
-  | { readonly kind: "usage"; readonly command: { readonly kind: "profile-command-usage"; readonly command: ProfileCommandName } };
+  | {
+      readonly kind: "usage";
+      readonly command: {
+        readonly kind: "profile-command-usage";
+        readonly command: ProfileCommandName;
+      };
+    };
 
 function detectSingleArgCommand(
   text: string,
@@ -338,7 +346,8 @@ function detectSingleArgCommand(
 ): SingleArgCommandResult | null {
   const rest = stripLeadingToken(text, token);
   if (rest === null) return null;
-  if (rest.length === 0) return { kind: "usage", command: { kind: "profile-command-usage", command } };
+  if (rest.length === 0)
+    return { kind: "usage", command: { kind: "profile-command-usage", command } };
   if (/\s/.test(rest)) return null;
   return { kind: "arg", value: rest };
 }

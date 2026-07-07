@@ -35,6 +35,9 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain("before/after details");
     expect(agents).toContain("humming commands");
     expect(agents).toContain("Chat bindings are repo-only");
+    expect(agents).toContain("/agent <agent>");
+    expect(agents).toContain("/model auto");
+    expect(agents).toContain("Humming handles that message in the bridge");
 
     expect(fs.existsSync(settingsPath)).toBe(false);
     expect(fs.existsSync(sessionsPath)).toBe(false);
