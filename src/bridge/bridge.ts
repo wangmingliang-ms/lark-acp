@@ -381,6 +381,14 @@ interface PendingAgentSwitch {
   readonly warningCardId?: string;
 }
 
+interface PendingPostTurnAgentSwitch {
+  readonly record: SessionRecord;
+  readonly noticeMessageId: string | null;
+}
+
+const POST_TURN_AGENT_SWITCH_TASK_HINT =
+  "[humming: this prompt is the task portion of an already-applied Agent handoff. Do not call Humming session-control commands again unless the user explicitly requests another Agent/Model/Mode/Permission/Config change.]";
+
 /**
  * Top-level bridge that connects a Lark bot to ACP agents.
  *
@@ -421,6 +429,7 @@ export class LarkBridge {
 
   private readonly chats = new Map<string, ChatRuntime>();
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
+  private readonly pendingPostTurnAgentSwitches = new Map<string, PendingPostTurnAgentSwitch>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private ws: LarkWsConnection | null = null;
   private controlServer: BridgeControlServer | null = null;
@@ -825,7 +834,10 @@ export class LarkBridge {
   private async controlSetAgent(
     record: SessionRecord,
     noticeMessageId?: string | null,
-  ): Promise<{ readonly switched: true; readonly agent: string }> {
+  ): Promise<
+    | { readonly switched: true; readonly agent: string }
+    | { readonly queued: true; readonly agent: string }
+  > {
     const key = runtimeKey(record.chatId, record.threadId);
     const runtime = this.chats.get(key);
     const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
@@ -836,15 +848,42 @@ export class LarkBridge {
       ? { ...record, controls: inherited.controls }
       : record;
 
+    if (runtime?.processing) {
+      this.pendingPostTurnAgentSwitches.set(key, { record: nextRecord, noticeMessageId: replyTo });
+      if (replyTo) {
+        await this.presenter
+          .replyNoticeCard(
+            replyTo,
+            buildPendingAgentSwitchQueuedNotice(nextRecord, previous, inherited),
+          )
+          .catch((err) => this.logger.warn({ err }, "pending agent switch notice failed"));
+      }
+      return { queued: true, agent: record.agentLabel ?? record.agentCommand };
+    }
+
+    await this.applyAgentSwitchNow(nextRecord, previous, inherited, replyTo);
+    return { switched: true, agent: record.agentLabel ?? record.agentCommand };
+  }
+
+  private async applyAgentSwitchNow(
+    record: SessionRecord,
+    previous: SessionRecord | null,
+    inherited: SessionRecord | null,
+    replyTo: string | null,
+    pendingTask?: PendingSessionTask,
+  ): Promise<void> {
+    const key = runtimeKey(record.chatId, record.threadId);
+    const runtime = this.chats.get(key);
+
     if (runtime) {
       await runtime.supersede();
       this.chats.delete(key);
     }
 
     await this.sessionStore.clearThread(record.chatId, record.threadId);
-    await this.sessionStore.save(nextRecord);
+    await this.sessionStore.save(record);
 
-    const notice = buildSessionAgentSwitchedNotice(nextRecord, previous, inherited);
+    const notice = buildSessionAgentSwitchedNotice(record, previous, inherited, pendingTask);
     if (replyTo) {
       await this.presenter
         .replyNoticeCard(replyTo, notice)
@@ -855,7 +894,53 @@ export class LarkBridge {
         .catch((err) => this.logger.warn({ err }, "session agent switch notice failed"));
     }
 
-    return { switched: true, agent: record.agentLabel ?? record.agentCommand };
+    if (pendingTask) await this.enqueueTaskForSwitchedAgent(record, pendingTask, replyTo);
+  }
+
+  private async handleRuntimeTurnComplete(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    const key = runtimeKey(chatId, threadId);
+    const pending = this.pendingPostTurnAgentSwitches.get(key);
+    if (!pending) return;
+    this.pendingPostTurnAgentSwitches.delete(key);
+
+    const previous = await this.sessionStore.getLatest(chatId, threadId);
+    const pendingTask = previous?.pendingTask;
+    await this.applyAgentSwitchNow(
+      pending.record,
+      previous,
+      pending.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
+      pending.noticeMessageId ?? messageId,
+      pendingTask,
+    );
+  }
+
+  private async enqueueTaskForSwitchedAgent(
+    record: SessionRecord,
+    task: PendingSessionTask,
+    messageId: string | null,
+  ): Promise<void> {
+    const runtime = await this.acquireRuntime(record.chatId, record.threadId, {
+      cwd: record.cwd,
+      command: record.agentCommand,
+      args: record.agentArgs,
+      ...(record.agentEnv ? { env: record.agentEnv } : {}),
+      label: record.agentLabel ?? record.agentCommand,
+      explicit: true,
+      reception: false,
+      ...(record.controls ? { inheritedControls: record.controls } : {}),
+    });
+    await runtime.enqueue({
+      prompt: [
+        { type: "text", text: task.prompt },
+        { type: "text", text: POST_TURN_AGENT_SWITCH_TASK_HINT },
+      ],
+      messageId: messageId ?? record.chatId,
+      chatId: record.chatId,
+    });
   }
 
   private async controlBindSession(
@@ -1878,6 +1963,7 @@ export class LarkBridge {
       agentLabel: effective.label,
       ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),
       ...(effective.inheritedControls ? { inheritedControls: effective.inheritedControls } : {}),
+      onTurnComplete: (messageId) => this.handleRuntimeTurnComplete(chatId, threadId, messageId),
       presenter: this.presenter,
       sessionStore: this.sessionStore,
       logger: this.logger,
@@ -2292,7 +2378,7 @@ function buildBridgeOnlyValidationSnapshot(
 }
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。其它请求忽略本提示。]`;
+  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话还包含真实任务，先登记 controls/agent handoff，再用 queue-task 登记任务，不要让用户重复。其它请求忽略本提示。]`;
 }
 
 function buildRouteFailureNotice(err: unknown): NoticeCardSpec {
@@ -2523,13 +2609,17 @@ function buildSessionAgentSwitchedNotice(
   record: SessionRecord,
   before?: SessionRecord | null,
   inherited?: SessionRecord | null,
+  pendingTask?: PendingSessionTask,
 ): NoticeCardSpec {
   const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
   const currentAgent = record.agentLabel ?? record.agentCommand;
+  const continuationLine = pendingTask
+    ? "已携带同一条用户请求中的任务内容，正在交给新 Agent 继续执行。"
+    : "请发送下一条消息开始新的任务。触发切换的纯控制消息不会作为任务发送给新 Agent。";
   const lines = [
-    `当前 topic 的 Agent 已切换为 **${currentAgent}**。旧 Agent 的内部对话历史不会自动迁移，内部 session context 没有迁移；下一条消息会用新 Agent 创建全新 ACP session。`,
+    `当前 topic 的 Agent 已切换为 **${currentAgent}**。旧 Agent 的内部对话历史不会自动迁移，内部 session context 没有迁移；后续消息会用新 Agent 创建全新 ACP session。`,
     "",
-    "请发送下一条消息开始新的任务。触发切换的那条消息只是控制消息，不会作为任务发送给新 Agent。",
+    continuationLine,
     "",
     "**切换结果**",
     `• Agent：${beforeAgent} → ${currentAgent}`,
@@ -2548,6 +2638,31 @@ function buildSessionAgentSwitchedNotice(
     title: "✅ Agent 已切换",
     body: lines.join("\n"),
     template: "green",
+  };
+}
+
+function buildPendingAgentSwitchQueuedNotice(
+  record: SessionRecord,
+  before?: SessionRecord | null,
+  inherited?: SessionRecord | null,
+): NoticeCardSpec {
+  const targetAgent = record.agentLabel ?? record.agentCommand;
+  const fromAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
+  const lines = [
+    `已排队切换到 **${targetAgent}**。当前 Agent 这一轮会先正常结束；结束后 Humming 会切换 Agent，再执行已登记的 pending task（如果有）。`,
+    "",
+    "**排队结果**",
+    `• Agent：${fromAgent} → ${targetAgent}`,
+    `• Repo：${record.cwd}`,
+    "• 时机：当前 turn 结束后立即生效",
+  ];
+  if (inherited?.controls) {
+    lines.push(`• Metadata：将从当前 chat 最近的 ${targetAgent} session 继承 controls`);
+  }
+  return {
+    title: "⏳ Agent 切换已排队",
+    body: lines.join("\n"),
+    template: "blue",
   };
 }
 

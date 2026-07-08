@@ -65,6 +65,7 @@ export interface ChatRuntimeOptions {
   presenter: LarkPresenter;
   sessionStore: SessionStore;
   logger: LarkLogger;
+  onTurnComplete?: (messageId: string) => Promise<void>;
 }
 
 const HANDOFF_TASK_HINT =
@@ -843,6 +844,7 @@ export class ChatRuntime {
     );
     if (pendingControlsApplied)
       await this.enqueuePendingTaskAfterControls(state, pending.messageId);
+    await this.opts.onTurnComplete?.(pending.messageId);
   }
 
   /**

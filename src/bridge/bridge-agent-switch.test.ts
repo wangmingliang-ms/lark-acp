@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { LarkBridge, type LarkCommand, type ResolvedAgentInvocation } from "./bridge.js";
-import type { ProbeAgentSessionCapabilitiesResult } from "../acp/agent-process.js";
+import type { AgentProcess, ProbeAgentSessionCapabilitiesResult } from "../acp/agent-process.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type {
@@ -22,12 +22,15 @@ import type {
 const probeAgentSessionCapabilitiesMock = vi.hoisted(() =>
   vi.fn<() => Promise<ProbeAgentSessionCapabilitiesResult>>(),
 );
+const spawnAgentMock = vi.hoisted(() => vi.fn<() => Promise<AgentProcess>>());
 
 vi.mock("../acp/agent-process.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../acp/agent-process.js")>();
   return {
     ...actual,
     probeAgentSessionCapabilities: probeAgentSessionCapabilitiesMock,
+    spawnAgent: spawnAgentMock,
+    killAgent: () => {},
   };
 });
 
@@ -174,6 +177,7 @@ interface PresenterEvents {
   readonly warningResolutions: AgentSwitchWarningResolution[];
   readonly notices: NoticeCardSpec[];
   readonly commandResults: CommandResultCardSpec[];
+  readonly unifiedCards: UnifiedCardState[];
 }
 
 function recordingPresenter(events: PresenterEvents): LarkPresenter {
@@ -200,8 +204,14 @@ function recordingPresenter(events: PresenterEvents): LarkPresenter {
     updateAgentSwitchWarningCard: async (_messageId, resolution) => {
       events.warningResolutions.push(resolution);
     },
-    sendUnifiedCard: async (_messageId, _state: UnifiedCardState) => "unified_card",
-    updateUnifiedCard: async () => true,
+    sendUnifiedCard: async (_messageId, state: UnifiedCardState) => {
+      events.unifiedCards.push(structuredClone(state));
+      return "unified_card";
+    },
+    updateUnifiedCard: async (_messageId, state: UnifiedCardState) => {
+      events.unifiedCards.push(structuredClone(state));
+      return true;
+    },
   };
 }
 
@@ -281,10 +291,50 @@ function existingClaudeSession(): SessionRecord {
   };
 }
 
+function codexProfileRecord(): SessionRecord {
+  return {
+    chatId: "oc_A",
+    threadId: "omt_1",
+    sessionId: "profile:3",
+    profileOnly: true,
+    agentCommand: "npx",
+    agentArgs: ["-y", "@zed-industries/codex-acp"],
+    agentLabel: "codex",
+    cwd: "/tmp",
+    createdAt: 3,
+    updatedAt: 3,
+  };
+}
+
+function fakeAgentProcess(sessionId: string): AgentProcess {
+  const proc = {
+    killed: false,
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+    on: () => proc,
+  };
+  return {
+    process: proc as unknown as AgentProcess["process"],
+    sessionId,
+    capabilities: {},
+    sessionCapabilities: {},
+    connection: {
+      prompt: async () => ({ stopReason: "end_turn" }),
+      cancel: async () => {},
+      get closed() {
+        return new Promise<void>(() => {});
+      },
+    } as AgentProcess["connection"],
+    getRecentStderr: () => [],
+  };
+}
+
 describe("LarkBridge destructive Agent switch confirmation", () => {
   beforeEach(() => {
     probeAgentSessionCapabilitiesMock.mockReset();
     probeAgentSessionCapabilitiesMock.mockResolvedValue({ sessionId: "probe", capabilities: {} });
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockResolvedValue(fakeAgentProcess("sess_codex"));
   });
 
   it("warns and does not probe or switch when /agent targets an already-started topic", async () => {
@@ -294,6 +344,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       warningResolutions: [],
       notices: [],
       commandResults: [],
+      unifiedCards: [],
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
@@ -323,6 +374,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       warningResolutions: [],
       notices: [],
       commandResults: [],
+      unifiedCards: [],
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
@@ -346,6 +398,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       warningResolutions: [],
       notices: [],
       commandResults: [],
+      unifiedCards: [],
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
@@ -370,6 +423,68 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(events.notices.at(-1)?.body).toContain("请发送下一条消息开始新的任务");
   });
 
+  it("queues in-flight natural-language agent handoff and runs the pending task after the turn", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+      controlSetPendingTask(
+        chatId: string,
+        threadId: string | null,
+        task: PendingSessionTask,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+      activeChatCount: number;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
+    await testable.controlSetPendingTask("oc_A", "omt_1", {
+      prompt: "查一下 pipeline 为什么失败",
+      createdAt: 10,
+    });
+
+    expect(fakeRuntime.supersede).not.toHaveBeenCalled();
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({ agentLabel: "claude" });
+    expect(events.notices.at(-1)).toMatchObject({ title: "⏳ Agent 切换已排队" });
+
+    fakeRuntime.processing = false;
+    await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
+
+    await vi.waitFor(async () => {
+      expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+        sessionId: "sess_codex",
+        agentLabel: "codex",
+      });
+      expect(testable.activeChatCount).toBe(1);
+    });
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTask).toBeUndefined();
+    expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+    expect(events.notices.at(-1)).toMatchObject({ title: "✅ Agent 已切换" });
+    expect(events.notices.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
+  });
+
   it("selects the target Agent immediately when the topic has no real session yet", async () => {
     const store = new MemorySessionStore();
     const events: PresenterEvents = {
@@ -377,6 +492,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       warningResolutions: [],
       notices: [],
       commandResults: [],
+      unifiedCards: [],
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 

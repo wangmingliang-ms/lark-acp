@@ -120,29 +120,43 @@ humming sessions queue-task -- "implement the extracted task"
 
 Switching Agent is a destructive topic/session boundary, not a `settings.json` edit. Do **not** change `runtime.agent` or write an agent into `bindings` to switch the current topic; those only affect cold starts / repo binding, not an already-bound topic session.
 
-Preferred Feishu UX: ask the user to send `/agent <agent>`. If the current topic already has a real session, Humming will show a warning card explaining that the current Agent's internal session context and the switch message's task content will be lost. Only after the user clicks **确认切换** does Humming probe the target Agent and perform the switch. If the user cancels, the old session stays active.
+There are two different UX paths:
 
-Do not silently run `humming sessions set-agent` from inside an Agent in response to a user's natural-language switch request for an already-started topic; that bypasses the warning/confirmation UI. Use the CLI only after explicit user confirmation or for admin/recovery workflows where the caller already understands the destructive semantics.
+1. Explicit slash command: `/agent <agent>` is handled by Humming before it reaches you. In an already-started topic, Humming shows the context-loss confirmation card first.
+2. Natural-language handoff: if the user says something like "用 Codex 做 X", "切到 Claude 继续查 Y", or "让澎湃 CI 看这个 pipeline", treat it as a real handoff request. Do **not** ask the user to send `/agent` and do **not** refuse just because the topic already has a session. Use `sessions set-agent`, then queue the extracted task with `sessions queue-task`.
 
-Use the CLI:
+For natural-language Agent handoff, first extract:
+
+- target Agent preset/id
+- residual task text, if any
+
+Then run:
 
 ```bash
-humming sessions set-agent --agent copilot
+humming sessions set-agent --agent <agent>
 ```
+
+If the same user message also contains a real task, store that task separately:
+
+```bash
+humming sessions queue-task --prompt-file /absolute/path/to/task.md
+# or short text:
+humming sessions queue-task -- "<residual task>"
+```
+
+Ordering is flexible as long as both calls happen in the same current turn. If the current topic is busy, Humming queues the Agent switch until this turn finishes; `queue-task` records the task on the old profile. At the post-turn boundary Humming switches to the target Agent, clears the old session binding, and immediately sends the queued task to the new Agent. This prevents the user from having to repeat the task.
 
 Semantics:
 
-- `/agent <agent>` in an already-started topic first sends a context-loss warning and does not probe or mutate state until the user confirms.
-- The switch command/control message is a control message, not a task message. Its task text, if any, is not forwarded to the new Agent; after switching, the user must send the next task message.
-- Humming stops the current topic runtime if it is running.
-- Humming drops the old topic session binding and writes a profile-only record for the new Agent.
-- Humming copies Model / Mode / Permission / Config controls from the most recent session in the current chat that used the target Agent. This is metadata-only inheritance; it does not copy history or sessionId.
-- The next message in this topic starts a fresh ACP session with the new Agent.
-- Old Agent conversation history is not migrated automatically.
+- Agent handoff always starts a fresh ACP session for the target Agent.
+- Old Agent internal session context, hidden state, and unread tool results are not migrated.
+- The visible Feishu topic remains the user intent container; only the executable Agent session changes.
 - Humming probes the target Agent before switching. If the target Agent cannot start or cannot create a session, the switch is aborted and the old topic session stays active.
-- Claude/Codex/Copilot/etc. model, mode, and config ids are Agent-specific. Do not carry old controls across the switch. Humming only inherits controls from the target Agent's own recent sessions; if the user asks for specific controls, query the new Agent's capabilities and then call `sessions set-control` with ids from the new response.
+- If `queue-task` was not called, switching only changes the profile; the next user message starts the new Agent session.
+- Model / Mode / Permission / Config controls are Agent-specific. After switching Agent, query the new Agent capabilities before setting those controls.
+- Slash `/agent <agent>` remains a pure control command with confirmation semantics; natural-language "use X to do Y" should be implemented with `set-agent` + optional `queue-task`.
 
-On success humming sends an `Agent 已切换` notice showing Agent / Repo / Mode / Model / Permission / Controls changes. It intentionally does not print full session/chat/thread ids.
+On success Humming sends an `Agent 已切换` notice showing Agent / Repo / Mode / Model / Permission / Controls changes. It intentionally does not print full session/chat/thread ids.
 
 ## Binding the current topic to an existing agent session
 
