@@ -5,6 +5,7 @@ import type {
   SessionControlPatch,
   SessionControlTarget,
   SessionControls,
+  PendingSessionTask,
   SessionRecord,
   SessionStore,
 } from "./session-store.js";
@@ -195,6 +196,35 @@ export class FileSessionStore implements SessionStore {
     };
     await this.save(updated);
     return { record: updated, pendingControls };
+  }
+
+  async setPendingTask(
+    target: SessionControlTarget,
+    task: PendingSessionTask,
+  ): Promise<SessionRecord> {
+    const record = await this.findControlTarget(target);
+    const updated: SessionRecord = {
+      ...record,
+      pendingTask: task,
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async consumePendingTask(
+    target: SessionControlTarget,
+  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }> {
+    const record = await this.findControlTarget(target);
+    const pendingTask = record.pendingTask;
+    if (pendingTask === undefined) return { record };
+    const updated: SessionRecord = {
+      ...record,
+      pendingTask: undefined,
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return { record: updated, pendingTask };
   }
 
   async clearThread(chatId: string, threadId: string | null): Promise<void> {

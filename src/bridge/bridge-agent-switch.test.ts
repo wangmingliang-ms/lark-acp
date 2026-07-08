@@ -12,6 +12,7 @@ import type {
   UnifiedCardState,
 } from "../presenter/presenter.js";
 import type {
+  PendingSessionTask,
   SessionControlPatch,
   SessionControlTarget,
   SessionRecord,
@@ -111,6 +112,27 @@ class MemorySessionStore implements SessionStore {
     return record.pendingControls
       ? { record, pendingControls: record.pendingControls }
       : { record };
+  }
+
+  async setPendingTask(
+    target: SessionControlTarget,
+    task: PendingSessionTask,
+  ): Promise<SessionRecord> {
+    const record = await this.requireLatest(target.chatId, target.threadId);
+    const updated: SessionRecord = {
+      ...record,
+      pendingTask: task,
+      updatedAt: record.updatedAt + 1,
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async consumePendingTask(
+    target: SessionControlTarget,
+  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }> {
+    const record = await this.requireLatest(target.chatId, target.threadId);
+    return record.pendingTask ? { record, pendingTask: record.pendingTask } : { record };
   }
 
   async clearThread(chatId: string, threadId: string | null): Promise<void> {

@@ -270,6 +270,31 @@ describe("FileSessionStore session controls", () => {
     });
   });
 
+  it("queues and consumes a pending task as one-shot continuation state", async () => {
+    await store.save(
+      record({
+        chatId: "oc_A",
+        threadId: "th_1",
+        sessionId: "s_t1",
+      }),
+    );
+
+    const queued = await store.setPendingTask(
+      { chatId: "oc_A", threadId: "th_1" },
+      { prompt: "continue after controls", createdAt: 123 },
+    );
+    expect(queued).toMatchObject({
+      pendingTask: { prompt: "continue after controls", createdAt: 123 },
+    });
+
+    const consumed = await store.consumePendingTask({ chatId: "oc_A", threadId: "th_1" });
+    expect(consumed.pendingTask).toEqual({ prompt: "continue after controls", createdAt: 123 });
+    expect(consumed.record.pendingTask).toBeUndefined();
+    expect(await store.getLatest("oc_A", "th_1")).toMatchObject({
+      pendingTask: undefined,
+    });
+  });
+
   it("throws when setControls targets a missing session", async () => {
     await expect(
       store.setControls({ chatId: "oc_missing", threadId: null }, { modeId: "agent" }),

@@ -153,6 +153,22 @@ function stubSessionStore(): SessionStore {
       },
       pendingControls: undefined,
     }),
+    setPendingTask: async () => {
+      throw new Error("setPendingTask not implemented in stub");
+    },
+    consumePendingTask: async () => ({
+      record: {
+        chatId: "oc_test",
+        threadId: null,
+        sessionId: "sess_fake",
+        agentCommand: "node",
+        agentArgs: [],
+        cwd: "/tmp",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      pendingTask: undefined,
+    }),
     clearThread: async () => {},
     delete: async () => {},
   };
@@ -759,6 +775,77 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(notices.at(-1)).toMatchObject({
       title: "✅ 排队的 Session profile 已生效",
       template: "green",
+    });
+  });
+
+  it("runs a pending task immediately after current-turn controls become live", async () => {
+    const fake = makeFakeAgent();
+    const setModel = vi.fn(async () => ({}));
+    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
+    fake.agent.connection = {
+      ...fake.agent.connection,
+      prompt,
+      unstable_setSessionModel: setModel,
+    } as AgentProcess["connection"];
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    let latest: SessionRecord | null = null;
+    const store: SessionStore = {
+      ...stubSessionStore(),
+      getLatest: async () => latest,
+      save: async (record) => {
+        latest = record;
+      },
+      consumePendingControls: async () => {
+        if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
+        const pendingControls = latest.pendingControls;
+        latest = { ...latest, pendingControls: undefined };
+        return { record: latest, pendingControls };
+      },
+      consumePendingTask: async () => {
+        if (!latest?.pendingTask) return { record: latest!, pendingTask: undefined };
+        const pendingTask = latest.pendingTask;
+        latest = { ...latest, pendingTask: undefined };
+        return { record: latest, pendingTask };
+      },
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: store,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "switch model then do work" }],
+      messageId: "om_pending_task",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    latest = {
+      ...latest!,
+      pendingControls: { modelId: "model-new" },
+      pendingTask: { prompt: "implement the pending task", createdAt: Date.now() },
+    };
+
+    fake.resolvePrompt("end_turn");
+
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
+    expect(prompt.mock.calls[1]?.[0].prompt).toEqual(
+      expect.arrayContaining([{ type: "text", text: "implement the pending task" }]),
+    );
+    expect(latest?.pendingTask).toBeUndefined();
+
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
     });
   });
 

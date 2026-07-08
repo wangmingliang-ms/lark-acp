@@ -106,6 +106,16 @@ If set-control succeeds while the current topic is idle, humming sends a `Sessio
 
 If set-control is requested while the current topic has an in-flight prompt, Humming saves the requested change as one-shot `pendingControls`. The current prompt continues with the old profile. Before the next prompt is sent to the ACP agent, Humming consumes `pendingControls`, applies them, merges them into `controls`, and removes `pendingControls`. If applying fails, Humming still removes `pendingControls`, sends an error notice, and continues the new prompt with the old profile.
 
+If the same user request also contains a real task to perform after the controls are live, queue that task separately after successfully queuing/validating controls:
+
+```bash
+humming sessions queue-task --prompt-file /absolute/path/to/task.md
+# or short text:
+humming sessions queue-task -- "implement the extracted task"
+```
+
+`queue-task` only records the task prompt. It does not modify controls. After the current prompt finishes, Humming applies any queued controls first; only if they apply successfully does it automatically enqueue the pending task into the now-effective session profile. If no task exists, do not call `queue-task`.
+
 ## Switching the current topic's Agent
 
 Switching Agent is a destructive topic/session boundary, not a `settings.json` edit. Do **not** change `runtime.agent` or write an agent into `bindings` to switch the current topic; those only affect cold starts / repo binding, not an already-bound topic session.

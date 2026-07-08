@@ -67,6 +67,9 @@ export interface ChatRuntimeOptions {
   logger: LarkLogger;
 }
 
+const HANDOFF_TASK_HINT =
+  "[humming: this prompt is the task portion of an already-applied pending task continuation. Do not call Humming session-control commands again unless the user explicitly requests another Agent/Model/Mode/Permission/Config change.]";
+
 interface ChatRuntimeState {
   client: HummingClient;
   agent: AgentProcess;
@@ -711,7 +714,7 @@ export class ChatRuntime {
   private async applyPendingControlsBeforePrompt(
     state: ChatRuntimeState,
     messageId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let consumed: Awaited<ReturnType<SessionStore["consumePendingControls"]>>;
     try {
       consumed = await this.opts.sessionStore.consumePendingControls({
@@ -721,10 +724,10 @@ export class ChatRuntime {
       });
     } catch (err) {
       this.logger.warn({ err }, "pending session controls lookup failed");
-      return;
+      return false;
     }
     const pendingControls = consumed.pendingControls;
-    if (pendingControls === undefined || !hasControls(pendingControls)) return;
+    if (pendingControls === undefined || !hasControls(pendingControls)) return false;
 
     const beforeSnapshot = cloneCapabilitiesSnapshot({
       ...state.sessionCapabilities,
@@ -748,10 +751,39 @@ export class ChatRuntime {
         },
         pendingControls,
       );
+      return true;
     } catch (err) {
       this.logger.warn({ err }, "pending session controls apply failed");
       await this.notifyPendingControlFailure(messageId, err);
+      return false;
     }
+  }
+
+  private async enqueuePendingTaskAfterControls(
+    state: ChatRuntimeState,
+    messageId: string,
+  ): Promise<void> {
+    let consumed: Awaited<ReturnType<SessionStore["consumePendingTask"]>>;
+    try {
+      consumed = await this.opts.sessionStore.consumePendingTask({
+        chatId: this.opts.chatId,
+        threadId: this.opts.threadId,
+        sessionId: state.agent.sessionId,
+      });
+    } catch (err) {
+      this.logger.warn({ err }, "pending task lookup failed");
+      return;
+    }
+    const promptText = consumed.pendingTask?.prompt.trim();
+    if (!promptText) return;
+    state.queue.unshift({
+      prompt: [
+        { type: "text", text: promptText },
+        { type: "text", text: HANDOFF_TASK_HINT },
+      ],
+      messageId,
+      chatId: this.opts.chatId,
+    });
   }
 
   private async notifyPendingControlFailure(messageId: string, err: unknown): Promise<void> {
@@ -805,7 +837,12 @@ export class ChatRuntime {
     this.logger.info({ stopReason: result.stopReason, usage: result.usage ?? null }, "prompt done");
     await state.client.finalize(stopReasonToStatus(result.stopReason));
     await this.persistSession(state.agent.sessionId);
-    await this.applyPendingControlsBeforePrompt(state, pending.messageId);
+    const pendingControlsApplied = await this.applyPendingControlsBeforePrompt(
+      state,
+      pending.messageId,
+    );
+    if (pendingControlsApplied)
+      await this.enqueuePendingTaskAfterControls(state, pending.messageId);
   }
 
   /**
@@ -931,6 +968,7 @@ export class ChatRuntime {
         ...(previous?.pendingControls !== undefined
           ? { pendingControls: previous.pendingControls }
           : {}),
+        ...(previous?.pendingTask !== undefined ? { pendingTask: previous.pendingTask } : {}),
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
       });

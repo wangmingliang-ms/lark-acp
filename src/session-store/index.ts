@@ -1,4 +1,5 @@
 export type {
+  PendingSessionTask,
   PermissionMode,
   SessionCapabilitiesSnapshot,
   SessionConfigControlValue,

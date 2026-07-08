@@ -43,6 +43,7 @@ import type {
   NoticeCardSpec,
 } from "../presenter/presenter.js";
 import type {
+  PendingSessionTask,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionControls,
@@ -582,6 +583,8 @@ export class LarkBridge {
         capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
         setControls: (chatId, threadId, controls) =>
           this.controlSetControls(chatId, threadId, controls),
+        setPendingTask: (chatId, threadId, task) =>
+          this.controlSetPendingTask(chatId, threadId, task),
         bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
         setAgent: (record, noticeMessageId) => this.controlSetAgent(record, noticeMessageId),
         agentProbeFailed: (chatId, threadId, agent, error, noticeMessageId) =>
@@ -777,6 +780,24 @@ export class LarkBridge {
         template: "red",
       })
       .catch((err) => this.logger.warn({ err }, "control validation failure notice failed"));
+  }
+
+  private async controlSetPendingTask(
+    chatId: string,
+    threadId: string | null,
+    task: PendingSessionTask,
+  ): Promise<{ readonly queued: true; readonly promptLength: number }> {
+    const prompt = task.prompt.trim();
+    if (!prompt) throw new Error("pending task prompt must not be empty");
+    const record = await this.sessionStore.setPendingTask(
+      { chatId, threadId },
+      { prompt, createdAt: task.createdAt },
+    );
+    this.logger.info(
+      { chatId, threadId, sessionId: record.sessionId, promptLength: prompt.length },
+      "pending task queued",
+    );
+    return { queued: true, promptLength: prompt.length };
   }
 
   private async controlAgentProbeFailed(

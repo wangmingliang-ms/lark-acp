@@ -265,6 +265,67 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(fromStdin.controlJson).toBeUndefined();
   });
 
+  it("parses queue-task prompt payload sources", () => {
+    const inline = parseArgs([
+      "sessions",
+      "queue-task",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--prompt",
+      "implement X",
+    ]);
+    expect(inline.command).toBe("sessions");
+    expect(inline.sessionsAction).toBe("queue-task");
+    expect(inline.targetChatId).toBe("oc_A");
+    expect(inline.targetThreadId).toBe("th_1");
+    expect(inline.promptText).toBe("implement X");
+
+    const trailing = parseArgs([
+      "sessions",
+      "queue-task",
+      "--chat-id",
+      "oc_A",
+      "--",
+      "implement",
+      "Y",
+    ]);
+    expect(trailing.sessionsAction).toBe("queue-task");
+    expect(trailing.promptText).toBe("implement Y");
+
+    const fromFile = parseArgs([
+      "sessions",
+      "queue-task",
+      "--chat-id",
+      "oc_A",
+      "--prompt-file",
+      "task.md",
+    ]);
+    expect(fromFile.promptFile).toBe("task.md");
+
+    const fromStdin = parseArgs(["sessions", "queue-task", "--chat-id", "oc_A", "--prompt-stdin"]);
+    expect(fromStdin.promptStdin).toBe(true);
+  });
+
+  it("rejects ambiguous or missing queue-task prompt payload sources", () => {
+    expect(() => parseArgs(["sessions", "queue-task", "--chat-id", "oc_A"])).toThrowError(
+      /exactly one of --prompt/,
+    );
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "queue-task",
+        "--chat-id",
+        "oc_A",
+        "--prompt",
+        "x",
+        "--prompt-file",
+        "task.md",
+      ]),
+    ).toThrowError(/exactly one of --prompt/);
+  });
+
   it("rejects ambiguous or missing set-control JSON payload sources", () => {
     expect(() => parseArgs(["sessions", "set-control", "--chat-id", "oc_A"])).toThrowError(
       /exactly one of --json/,

@@ -22,6 +22,7 @@
 ### Task 1: Add destructive switch confirmation UI contract
 
 **Files:**
+
 - Modify: `src/presenter/presenter.ts`
 - Modify: `src/presenter/lark-presenter.ts`
 - Modify: `src/index.ts`
@@ -29,6 +30,7 @@
 - Test: `src/presenter/lark-presenter.test.ts` (covered indirectly by bridge tests; presenter builds card via new methods)
 
 **Interfaces:**
+
 - Produces `AgentSwitchWarningCardSpec` with `switchId`, `chatId`, `threadId`, `fromAgent`, `toAgent`, `repo`, `body`.
 - Produces `AgentSwitchWarningResolution` with `status: confirmed|cancelled|expired|failed` and `text`.
 - Extends `LarkPresenter` with optional `replyAgentSwitchWarningCard()` and `updateAgentSwitchWarningCard()`.
@@ -41,11 +43,13 @@
 ### Task 2: Make `/agent` warning-first for started topics
 
 **Files:**
+
 - Modify: `src/bridge/bridge.ts`
 - Test: `src/bridge/bridge-agent-switch.test.ts`
 - Test: `tests/reception-hot-reload.test.ts`
 
 **Interfaces:**
+
 - `PendingAgentSwitch` stores `switchId`, target Agent invocation, topic identity, cwd, and warning card id.
 - Card callback payload uses `sw` for switch id and `swa` for `confirm|cancel`.
 
@@ -60,12 +64,14 @@
 ### Task 3: Update notices/docs and validate
 
 **Files:**
+
 - Modify: `src/interpreter/commands.ts`
 - Modify: `templates/home/AGENTS.md`
 - Modify: `CLAUDE.md`
 - Modify: `tests/reception-hot-reload.test.ts`
 
 **Interfaces:**
+
 - Help text says started topics warn before switching.
 - Home templates tell agents not to bypass the Feishu warning UI for natural-language switch requests.
 

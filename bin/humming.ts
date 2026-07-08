@@ -672,7 +672,7 @@ type ParsedArgs = {
   /** `logs -n <N>` — number of trailing lines. */
   readonly logsLines?: number;
   readonly controlAction?: "capabilities" | "agent-capabilities";
-  readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent";
+  readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -681,6 +681,9 @@ type ParsedArgs = {
   readonly controlJson?: string | boolean;
   readonly controlJsonFile?: string;
   readonly controlJsonStdin?: boolean;
+  readonly promptText?: string;
+  readonly promptFile?: string;
+  readonly promptStdin?: boolean;
   readonly setupTarget?: FeishuRegistrationDomain;
   readonly setupForce?: boolean;
 };
@@ -874,7 +877,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly logsFollow?: boolean;
       readonly logsLines?: number;
       readonly controlAction?: "capabilities" | "agent-capabilities";
-      readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent";
+      readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
       readonly targetChatId?: string;
       readonly targetThreadId?: string | null;
       readonly targetCwd?: string;
@@ -883,6 +886,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly controlJson?: string | boolean;
       readonly controlJsonFile?: string;
       readonly controlJsonStdin?: boolean;
+      readonly promptText?: string;
+      readonly promptFile?: string;
+      readonly promptStdin?: boolean;
       readonly setupTarget?: FeishuRegistrationDomain;
       readonly setupForce?: boolean;
     } = {},
@@ -918,6 +924,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(extra.controlJson !== undefined ? { controlJson: extra.controlJson } : {}),
       ...(extra.controlJsonFile !== undefined ? { controlJsonFile: extra.controlJsonFile } : {}),
       ...(extra.controlJsonStdin !== undefined ? { controlJsonStdin: extra.controlJsonStdin } : {}),
+      ...(extra.promptText !== undefined ? { promptText: extra.promptText } : {}),
+      ...(extra.promptFile !== undefined ? { promptFile: extra.promptFile } : {}),
+      ...(extra.promptStdin !== undefined ? { promptStdin: extra.promptStdin } : {}),
       ...(extra.setupTarget !== undefined ? { setupTarget: extra.setupTarget } : {}),
       ...(extra.setupForce !== undefined ? { setupForce: extra.setupForce } : {}),
     };
@@ -1026,7 +1035,7 @@ function parseSessionsFlags(
   argv: readonly string[],
   start: number,
 ): {
-  readonly sessionsAction: "set-control" | "list" | "bind" | "set-agent";
+  readonly sessionsAction: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -1035,15 +1044,21 @@ function parseSessionsFlags(
   readonly controlJson?: string | boolean;
   readonly controlJsonFile?: string;
   readonly controlJsonStdin?: boolean;
+  readonly promptText?: string;
+  readonly promptFile?: string;
+  readonly promptStdin?: boolean;
 } {
   const action = argv[start];
   if (
     action !== "set-control" &&
     action !== "list" &&
     action !== "bind" &&
-    action !== "set-agent"
+    action !== "set-agent" &&
+    action !== "queue-task"
   ) {
-    throw new CliError("sessions requires subcommand: set-control | set-agent | list | bind");
+    throw new CliError(
+      "sessions requires subcommand: set-control | set-agent | queue-task | list | bind",
+    );
   }
   const parsed = parseTargetFlags(argv, start + 1);
   if (action === "set-agent") {
@@ -1088,6 +1103,24 @@ function parseSessionsFlags(
       ...(parsed.jsonStdin !== undefined ? { controlJsonStdin: parsed.jsonStdin } : {}),
     };
   }
+  if (action === "queue-task") {
+    if (!parsed.chatId) throw new CliError("sessions queue-task requires --chat-id <id>");
+    const inputCount = countPromptInputs(parsed.prompt, parsed.promptFile, parsed.promptStdin);
+    if (inputCount !== 1) {
+      throw new CliError(
+        "sessions queue-task requires exactly one of --prompt <text>, --prompt-file <path>, --prompt-stdin, or trailing args after --",
+      );
+    }
+    return {
+      sessionsAction: "queue-task",
+      targetChatId: parsed.chatId,
+      ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+      ...(parsed.prompt !== undefined ? { promptText: parsed.prompt } : {}),
+      ...(parsed.promptFile !== undefined ? { promptFile: parsed.promptFile } : {}),
+      ...(parsed.promptStdin !== undefined ? { promptStdin: parsed.promptStdin } : {}),
+    };
+  }
+
   if (action === "list") {
     return {
       sessionsAction: "list",
@@ -1127,6 +1160,15 @@ function countControlJsonInputs(
     .length;
 }
 
+function countPromptInputs(
+  prompt: string | undefined,
+  promptFile: string | undefined,
+  promptStdin: boolean | undefined,
+): number {
+  return [prompt !== undefined, promptFile !== undefined, promptStdin === true].filter(Boolean)
+    .length;
+}
+
 function parseTargetFlags(
   argv: readonly string[],
   start: number,
@@ -1139,6 +1181,9 @@ function parseTargetFlags(
   readonly json?: string | boolean;
   readonly jsonFile?: string;
   readonly jsonStdin?: boolean;
+  readonly prompt?: string;
+  readonly promptFile?: string;
+  readonly promptStdin?: boolean;
 } {
   let chatId: string | undefined;
   let threadId: string | null | undefined;
@@ -1148,6 +1193,9 @@ function parseTargetFlags(
   let json: string | boolean | undefined;
   let jsonFile: string | undefined;
   let jsonStdin: boolean | undefined;
+  let prompt: string | undefined;
+  let promptFile: string | undefined;
+  let promptStdin: boolean | undefined;
   let i = start;
   while (i < argv.length) {
     const token = argv[i];
@@ -1205,6 +1253,35 @@ function parseTargetFlags(
       i += 1;
       continue;
     }
+    if (token === "--prompt") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--prompt requires a value");
+      }
+      prompt = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--prompt-file") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--prompt-file requires a value");
+      }
+      promptFile = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--prompt-stdin") {
+      promptStdin = true;
+      i += 1;
+      continue;
+    }
+    if (token === "--") {
+      prompt = argv
+        .slice(i + 1)
+        .join(" ")
+        .trim();
+      i = argv.length;
+      continue;
+    }
     throw new CliError(`unknown control option: ${token ?? "<none>"}`);
   }
   const envChatId = nonEmptyEnv(ENV_CHAT_ID);
@@ -1225,6 +1302,9 @@ function parseTargetFlags(
     ...(json !== undefined ? { json } : {}),
     ...(jsonFile !== undefined ? { jsonFile } : {}),
     ...(jsonStdin !== undefined ? { jsonStdin } : {}),
+    ...(prompt !== undefined ? { prompt } : {}),
+    ...(promptFile !== undefined ? { promptFile } : {}),
+    ...(promptStdin !== undefined ? { promptStdin } : {}),
   };
 }
 
@@ -1684,6 +1764,7 @@ function printHelp(): void {
     `  ${APP_NAME} sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>`,
     `  ${APP_NAME} sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
     `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
+    `  ${APP_NAME} sessions queue-task --chat-id <id> [--thread-id <id>] --prompt <text>`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
     `  ${APP_NAME} version`,
@@ -1762,6 +1843,9 @@ function printHelp(): void {
     `                         the live runtime when present. The controls JSON uses`,
     `                         ACP-shaped fields: modelId, modeId, config, plus`,
     `                         humming bridgePermissionMode.`,
+    `  sessions queue-task --chat-id <id> [--thread-id <id>] (--prompt <text> | --prompt-file <path> | --prompt-stdin | -- <task...>)`,
+    `                         Queue a one-shot task prompt to run after queued`,
+    `                         controls apply successfully at the post-turn boundary.`,
     `  sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
     `                         Switch the current topic's Agent profile. This drops`,
     `                         the old topic session binding; the next message starts`,
@@ -2262,6 +2346,26 @@ function readControlJsonInput(args: ParsedArgs): string {
   throw new CliError("sessions set-control requires a JSON controls payload");
 }
 
+function readPromptInput(args: ParsedArgs): string {
+  if (typeof args.promptText === "string") return args.promptText;
+  if (args.promptFile !== undefined) {
+    const filePath = path.resolve(expandTilde(args.promptFile));
+    try {
+      return fs.readFileSync(filePath, "utf-8");
+    } catch (err) {
+      throw new CliError(`failed to read --prompt-file ${filePath}: ${formatError(err)}`);
+    }
+  }
+  if (args.promptStdin === true) {
+    try {
+      return fs.readFileSync(0, "utf-8");
+    } catch (err) {
+      throw new CliError(`failed to read --prompt-stdin: ${formatError(err)}`);
+    }
+  }
+  throw new CliError("sessions queue-task requires a prompt payload");
+}
+
 async function runSessions(args: ParsedArgs): Promise<void> {
   if (args.sessionsAction === "list") {
     await runSessionList(args);
@@ -2275,8 +2379,28 @@ async function runSessions(args: ParsedArgs): Promise<void> {
     await runSessionSetAgent(args);
     return;
   }
+  if (args.sessionsAction === "queue-task") {
+    const chatId = args.targetChatId;
+    if (!chatId) throw new CliError("sessions queue-task requires --chat-id <id>");
+    const prompt = readPromptInput(args).trim();
+    if (!prompt) throw new CliError("sessions queue-task prompt must not be empty");
+    const homeDir = resolveHomeDir(args.home);
+    const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
+      method: "setPendingTask",
+      params: {
+        chatId,
+        threadId: args.targetThreadId ?? null,
+        task: { prompt, createdAt: Date.now() },
+      },
+    });
+    if (!response.ok) throw new CliError(response.error);
+    process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
+    return;
+  }
   if (args.sessionsAction !== "set-control") {
-    throw new CliError("sessions requires subcommand: set-control | set-agent | list | bind");
+    throw new CliError(
+      "sessions requires subcommand: set-control | set-agent | queue-task | list | bind",
+    );
   }
   const chatId = args.targetChatId;
   if (!chatId) throw new CliError("sessions set-control requires --chat-id <id>");
@@ -2952,6 +3076,7 @@ export {
   resolveHomeDir,
   parseControlJson,
   readControlJsonInput,
+  readPromptInput,
   runProxy,
   runInit,
   runSetup,

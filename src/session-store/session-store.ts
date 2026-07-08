@@ -41,8 +41,15 @@ export interface SessionRecord {
   controls?: SessionControls;
   /** One-shot next-turn control changes, consumed before the next ACP prompt. */
   pendingControls?: SessionControlPatch;
+  /** One-shot task prompt to run automatically after queued controls become live. */
+  pendingTask?: PendingSessionTask;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface PendingSessionTask {
+  readonly prompt: string;
+  readonly createdAt: number;
 }
 
 export interface SessionControls {
@@ -156,6 +163,14 @@ export interface SessionStore {
   consumePendingControls(
     target: SessionControlTarget,
   ): Promise<{ readonly record: SessionRecord; readonly pendingControls?: SessionControlPatch }>;
+
+  /** Store/replace the one-shot task prompt to run after queued controls apply. */
+  setPendingTask(target: SessionControlTarget, task: PendingSessionTask): Promise<SessionRecord>;
+
+  /** Consume the one-shot task prompt for one existing/current session. */
+  consumePendingTask(
+    target: SessionControlTarget,
+  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }>;
 
   /** Drop all persisted ACP sessions for one chat/thread. */
   clearThread(chatId: string, threadId: string | null): Promise<void>;

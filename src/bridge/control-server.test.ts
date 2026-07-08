@@ -42,6 +42,12 @@ describe("BridgeControlServer", () => {
           threadId,
           controls,
         }),
+        setPendingTask: async (chatId, threadId, task) => ({
+          queued: true,
+          chatId,
+          threadId,
+          task,
+        }),
         bindSession: async (record, noticeMessageId) => ({
           bound: true,
           record,
@@ -91,6 +97,24 @@ describe("BridgeControlServer", () => {
         chatId: "oc_A",
         threadId: null,
         controls: { modeId: "agent" },
+      },
+    });
+
+    const task = await sendControlRequest(socketPath, {
+      method: "setPendingTask",
+      params: {
+        chatId: "oc_A",
+        threadId: "th_1",
+        task: { prompt: "continue this task", createdAt: 123 },
+      },
+    });
+    expect(task).toMatchObject({
+      ok: true,
+      result: {
+        queued: true,
+        chatId: "oc_A",
+        threadId: "th_1",
+        task: { prompt: "continue this task", createdAt: 123 },
       },
     });
 
@@ -189,6 +213,7 @@ describe("BridgeControlServer", () => {
           bridgePermissionMode: "alwaysAsk",
         }),
         setControls: async () => ({ applied: true }),
+        setPendingTask: async () => ({ queued: true }),
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
@@ -256,6 +281,7 @@ describe("BridgeControlServer", () => {
           };
         },
         setControls: async () => ({ applied: true }),
+        setPendingTask: async () => ({ queued: true }),
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),

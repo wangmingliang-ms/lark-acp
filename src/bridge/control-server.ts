@@ -3,6 +3,7 @@ import net from "node:net";
 import path from "node:path";
 import type { LarkLogger } from "../logger/logger.js";
 import type {
+  PendingSessionTask,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionRecord,
@@ -28,6 +29,15 @@ export type ControlRequest =
         readonly chatId: string;
         readonly threadId?: string | null;
         readonly controls: SessionControlPatch;
+      };
+    }
+  | {
+      readonly id?: string | number;
+      readonly method: "setPendingTask";
+      readonly params: {
+        readonly chatId: string;
+        readonly threadId?: string | null;
+        readonly task: PendingSessionTask;
       };
     }
   | {
@@ -62,6 +72,11 @@ export interface BridgeControlHandlers {
     chatId: string,
     threadId: string | null,
     controls: SessionControlPatch,
+  ): Promise<unknown>;
+  setPendingTask(
+    chatId: string,
+    threadId: string | null,
+    task: PendingSessionTask,
   ): Promise<unknown>;
   bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   setAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
@@ -185,6 +200,16 @@ export class BridgeControlServer {
               parsed.params.controls,
             ),
           };
+        case "setPendingTask":
+          return {
+            ok: true,
+            id: parsed.id,
+            result: await this.handlers.setPendingTask(
+              parsed.params.chatId,
+              parsed.params.threadId ?? null,
+              parsed.params.task,
+            ),
+          };
         case "bindSession":
           return {
             ok: true,
@@ -285,6 +310,14 @@ function isControlRequest(value: unknown): value is ControlRequest {
     const params = value["params"];
     return isRecord(params) && typeof params["chatId"] === "string" && isRecord(params["controls"]);
   }
+  if (value["method"] === "setPendingTask") {
+    const params = value["params"];
+    return (
+      isRecord(params) &&
+      typeof params["chatId"] === "string" &&
+      isPendingSessionTask(params["task"])
+    );
+  }
   if (value["method"] === "bindSession") {
     const params = value["params"];
     return isRecord(params) && isSessionRecord(params["record"]);
@@ -303,6 +336,15 @@ function isControlRequest(value: unknown): value is ControlRequest {
     );
   }
   return false;
+}
+
+function isPendingSessionTask(value: unknown): value is PendingSessionTask {
+  return (
+    isRecord(value) &&
+    typeof value["prompt"] === "string" &&
+    value["prompt"].trim().length > 0 &&
+    typeof value["createdAt"] === "number"
+  );
 }
 
 function isWindowsNamedPipe(socketPath: string): boolean {

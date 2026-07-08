@@ -49,6 +49,7 @@ export { LarkCardPresenter } from "./presenter/lark-presenter.js";
 export type { LarkCardPresenterOptions } from "./presenter/lark-presenter.js";
 
 export type {
+  PendingSessionTask,
   PermissionMode as SessionPermissionMode,
   SessionCapabilitiesSnapshot,
   SessionConfigControlValue,
