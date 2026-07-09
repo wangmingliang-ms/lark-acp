@@ -6,6 +6,7 @@ import type {
   SessionControlTarget,
   SessionControls,
   PendingSessionTask,
+  PendingTargetProfile,
   SessionRecord,
   SessionStore,
 } from "./session-store.js";
@@ -206,6 +207,20 @@ export class FileSessionStore implements SessionStore {
     const updated: SessionRecord = {
       ...record,
       pendingTask: task,
+      updatedAt: Date.now(),
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async setPendingTargetProfile(
+    target: SessionControlTarget,
+    profile: PendingTargetProfile,
+  ): Promise<SessionRecord> {
+    const record = await this.findControlTarget(target);
+    const updated: SessionRecord = {
+      ...record,
+      pendingTargetProfile: profile,
       updatedAt: Date.now(),
     };
     await this.save(updated);

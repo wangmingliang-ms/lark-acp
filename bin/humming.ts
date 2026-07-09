@@ -50,6 +50,7 @@ import type {
   PermissionMode,
   SessionControls,
   SessionControlPatch,
+  PendingTargetProfile,
   AgentResolver,
   ResolvedAgentInvocation,
   SessionRecord,
@@ -672,7 +673,8 @@ type ParsedArgs = {
   /** `logs -n <N>` — number of trailing lines. */
   readonly logsLines?: number;
   readonly controlAction?: "capabilities" | "agent-capabilities";
-  readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
+  readonly sessionsAction?:
+    "set-control" | "list" | "bind" | "set-agent" | "queue-task" | "set-pending-target-profile";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -877,7 +879,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly logsFollow?: boolean;
       readonly logsLines?: number;
       readonly controlAction?: "capabilities" | "agent-capabilities";
-      readonly sessionsAction?: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
+      readonly sessionsAction?:
+        "set-control" | "list" | "bind" | "set-agent" | "queue-task" | "set-pending-target-profile";
       readonly targetChatId?: string;
       readonly targetThreadId?: string | null;
       readonly targetCwd?: string;
@@ -1035,7 +1038,8 @@ function parseSessionsFlags(
   argv: readonly string[],
   start: number,
 ): {
-  readonly sessionsAction: "set-control" | "list" | "bind" | "set-agent" | "queue-task";
+  readonly sessionsAction:
+    "set-control" | "list" | "bind" | "set-agent" | "queue-task" | "set-pending-target-profile";
   readonly targetChatId?: string;
   readonly targetThreadId?: string | null;
   readonly targetCwd?: string;
@@ -1054,13 +1058,46 @@ function parseSessionsFlags(
     action !== "list" &&
     action !== "bind" &&
     action !== "set-agent" &&
-    action !== "queue-task"
+    action !== "queue-task" &&
+    action !== "set-pending-target-profile"
   ) {
     throw new CliError(
       "sessions requires subcommand: set-control | set-agent | queue-task | list | bind",
     );
   }
   const parsed = parseTargetFlags(argv, start + 1);
+  if (action === "set-pending-target-profile") {
+    if (!parsed.chatId) {
+      throw new CliError("sessions set-pending-target-profile requires --chat-id <id>");
+    }
+    if (!parsed.agent) {
+      throw new CliError("sessions set-pending-target-profile requires --agent <preset>");
+    }
+    const controlInputs = countControlJsonInputs(parsed.json, parsed.jsonFile, parsed.jsonStdin);
+    if (controlInputs > 1) {
+      throw new CliError(
+        "sessions set-pending-target-profile accepts at most one of --json <json>, --json-file <path>, or --json-stdin",
+      );
+    }
+    const promptInputs = countPromptInputs(parsed.prompt, parsed.promptFile, parsed.promptStdin);
+    if (promptInputs > 1) {
+      throw new CliError(
+        "sessions set-pending-target-profile accepts at most one of --prompt <text>, --prompt-file <path>, --prompt-stdin, or trailing args after --",
+      );
+    }
+    return {
+      sessionsAction: "set-pending-target-profile",
+      targetChatId: parsed.chatId,
+      ...(parsed.threadId !== undefined ? { targetThreadId: parsed.threadId } : {}),
+      targetAgent: parsed.agent,
+      ...(typeof parsed.json === "string" ? { controlJson: parsed.json } : {}),
+      ...(parsed.jsonFile !== undefined ? { controlJsonFile: parsed.jsonFile } : {}),
+      ...(parsed.jsonStdin !== undefined ? { controlJsonStdin: parsed.jsonStdin } : {}),
+      ...(parsed.prompt !== undefined ? { promptText: parsed.prompt } : {}),
+      ...(parsed.promptFile !== undefined ? { promptFile: parsed.promptFile } : {}),
+      ...(parsed.promptStdin !== undefined ? { promptStdin: parsed.promptStdin } : {}),
+    };
+  }
   if (action === "set-agent") {
     if (!parsed.chatId) throw new CliError("sessions set-agent requires --chat-id <id>");
     if (!parsed.agent) throw new CliError("sessions set-agent requires --agent <preset>");
@@ -1764,6 +1801,7 @@ function printHelp(): void {
     `  ${APP_NAME} sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>`,
     `  ${APP_NAME} sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
     `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
+    `  ${APP_NAME} sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--json '<controls>'] [--prompt <text>]`,
     `  ${APP_NAME} sessions queue-task --chat-id <id> [--thread-id <id>] --prompt <text>`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
@@ -1843,6 +1881,9 @@ function printHelp(): void {
     `                         the live runtime when present. The controls JSON uses`,
     `                         ACP-shaped fields: modelId, modeId, config, plus`,
     `                         humming bridgePermissionMode.`,
+    `  sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--json '<controls>'] [--prompt <text>]`,
+    `                         Atomically queue Agent + controls + optional task`,
+    `                         as one pending target profile for post-turn handoff.`,
     `  sessions queue-task --chat-id <id> [--thread-id <id>] (--prompt <text> | --prompt-file <path> | --prompt-stdin | -- <task...>)`,
     `                         Queue a one-shot task prompt to run after queued`,
     `                         controls apply successfully at the post-turn boundary.`,
@@ -2366,6 +2407,76 @@ async function runSessionSetAgent(args: ParsedArgs): Promise<void> {
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
 }
 
+function hasControlInput(args: ParsedArgs): boolean {
+  return (
+    typeof args.controlJson === "string" ||
+    args.controlJsonFile !== undefined ||
+    args.controlJsonStdin === true
+  );
+}
+
+function hasPromptInput(args: ParsedArgs): boolean {
+  return (
+    args.promptText !== undefined || args.promptFile !== undefined || args.promptStdin === true
+  );
+}
+
+async function runSessionSetPendingTargetProfile(args: ParsedArgs): Promise<void> {
+  if (!args.targetChatId) {
+    throw new CliError("sessions set-pending-target-profile requires --chat-id <id>");
+  }
+  if (!args.targetAgent) {
+    throw new CliError("sessions set-pending-target-profile requires --agent <preset>");
+  }
+  const target = resolveSessionTargetContext(args);
+  if (!target.chatId) {
+    throw new CliError("sessions set-pending-target-profile requires --chat-id <id>");
+  }
+
+  try {
+    await probeAgentSessionCapabilities({
+      command: target.invocation.command,
+      args: [...target.invocation.args],
+      cwd: target.cwd,
+      env: target.invocation.env ? { ...target.invocation.env } : undefined,
+      logger: SILENT_LOGGER,
+    });
+  } catch (err) {
+    await notifyAgentProbeFailure(target, err);
+    throw new CliError(
+      `target agent probe failed; pending target profile was not queued: ${formatError(err)}`,
+    );
+  }
+
+  const controls = hasControlInput(args) ? parseControlJson(readControlJsonInput(args)) : undefined;
+  const prompt = hasPromptInput(args) ? readPromptInput(args).trim() : undefined;
+  if (prompt !== undefined && prompt.length === 0) {
+    throw new CliError("sessions set-pending-target-profile prompt must not be empty");
+  }
+
+  const now = Date.now();
+  const profile: PendingTargetProfile = {
+    sessionId: `profile:${now}`,
+    profileOnly: true,
+    agentCommand: target.invocation.command,
+    agentArgs: [...target.invocation.args],
+    ...(target.invocation.env ? { agentEnv: { ...target.invocation.env } } : {}),
+    agentLabel: target.invocation.label,
+    cwd: target.cwd,
+    ...(controls ? { controls } : {}),
+    ...(prompt ? { task: { prompt, createdAt: now } } : {}),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const response = await sendControlRequest(bridgeControlSocketPath(target.homeDir), {
+    method: "setPendingTargetProfile",
+    params: { chatId: target.chatId, threadId: target.threadId, profile },
+  });
+  if (!response.ok) throw new CliError(response.error);
+  process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
+}
+
 function readControlJsonInput(args: ParsedArgs): string {
   if (typeof args.controlJson === "string") return args.controlJson;
   if (args.controlJsonFile !== undefined) {
@@ -2417,6 +2528,10 @@ async function runSessions(args: ParsedArgs): Promise<void> {
   }
   if (args.sessionsAction === "set-agent") {
     await runSessionSetAgent(args);
+    return;
+  }
+  if (args.sessionsAction === "set-pending-target-profile") {
+    await runSessionSetPendingTargetProfile(args);
     return;
   }
   if (args.sessionsAction === "queue-task") {

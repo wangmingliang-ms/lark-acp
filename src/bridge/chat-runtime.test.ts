@@ -156,6 +156,9 @@ function stubSessionStore(): SessionStore {
     setPendingTask: async () => {
       throw new Error("setPendingTask not implemented in stub");
     },
+    setPendingTargetProfile: async () => {
+      throw new Error("setPendingTargetProfile not implemented in stub");
+    },
     consumePendingTask: async () => ({
       record: {
         chatId: "oc_test",

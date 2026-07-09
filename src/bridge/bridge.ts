@@ -44,6 +44,7 @@ import type {
 } from "../presenter/presenter.js";
 import type {
   PendingSessionTask,
+  PendingTargetProfile,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionControls,
@@ -594,6 +595,8 @@ export class LarkBridge {
           this.controlSetControls(chatId, threadId, controls),
         setPendingTask: (chatId, threadId, task) =>
           this.controlSetPendingTask(chatId, threadId, task),
+        setPendingTargetProfile: (chatId, threadId, profile, noticeMessageId) =>
+          this.controlSetPendingTargetProfile(chatId, threadId, profile, noticeMessageId),
         bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
         setAgent: (record, noticeMessageId) => this.controlSetAgent(record, noticeMessageId),
         agentProbeFailed: (chatId, threadId, agent, error, noticeMessageId) =>
@@ -849,6 +852,70 @@ export class LarkBridge {
     return { queued: true, promptLength: prompt.length };
   }
 
+  private async controlSetPendingTargetProfile(
+    chatId: string,
+    threadId: string | null,
+    profile: PendingTargetProfile,
+    noticeMessageId?: string | null,
+  ): Promise<{ readonly queued: true; readonly agent: string; readonly hasTask: boolean }> {
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    if (!runtime?.processing) {
+      const record = pendingTargetProfileToSessionRecord(chatId, threadId, profile);
+      const pendingTask = profile.task;
+      await this.applyAgentSwitchNow(
+        record,
+        await this.sessionStore.getLatest(chatId, threadId),
+        null,
+        noticeMessageId ?? null,
+        pendingTask,
+      );
+      return {
+        queued: true,
+        agent: record.agentLabel ?? record.agentCommand,
+        hasTask: pendingTask !== undefined,
+      };
+    }
+
+    const baseRecord = pendingTargetProfileToSessionRecord(chatId, threadId, profile);
+    const validation = profile.controls
+      ? await this.validateControlPatchForStoredProfile(
+          chatId,
+          threadId,
+          baseRecord,
+          profile.controls,
+          noticeMessageId ?? runtime.lastMessageId,
+        )
+      : { ok: true as const };
+    if (!validation.ok) throw new Error(validation.reason);
+
+    const previous = await this.sessionStore.getLatest(chatId, threadId);
+    const saved = await this.sessionStore.setPendingTargetProfile(
+      { chatId, threadId },
+      {
+        ...profile,
+        ...(profile.task ? { task: { ...profile.task, prompt: profile.task.prompt.trim() } } : {}),
+      },
+    );
+    this.pendingPostTurnAgentSwitches.set(runtimeKey(chatId, threadId), {
+      record: baseRecord,
+      noticeMessageId: noticeMessageId ?? runtime.lastMessageId ?? null,
+    });
+    const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
+    await this.presenter
+      .replyNoticeCard(
+        replyTo,
+        buildPendingTargetProfileQueuedNotice(previous, baseRecord, saved.pendingTargetProfile),
+      )
+      .catch((err) =>
+        this.logger.warn({ err, chatId, threadId }, "pending target profile notice failed"),
+      );
+    return {
+      queued: true,
+      agent: baseRecord.agentLabel ?? baseRecord.agentCommand,
+      hasTask: profile.task !== undefined,
+    };
+  }
+
   private async controlAgentProbeFailed(
     chatId: string,
     threadId: string | null,
@@ -944,16 +1011,19 @@ export class LarkBridge {
   ): Promise<void> {
     const key = runtimeKey(chatId, threadId);
     const pending = this.pendingPostTurnAgentSwitches.get(key);
-    if (!pending) return;
+    const previous = await this.sessionStore.getLatest(chatId, threadId);
+    const storedTarget = previous?.pendingTargetProfile;
+    if (!pending && !storedTarget) return;
     this.pendingPostTurnAgentSwitches.delete(key);
 
-    const previous = await this.sessionStore.getLatest(chatId, threadId);
-    const pendingTask = previous?.pendingTask;
+    const targetRecord =
+      pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, storedTarget!);
+    const pendingTask = storedTarget?.task ?? previous?.pendingTask;
     await this.applyAgentSwitchNow(
-      pending.record,
+      targetRecord,
       previous,
-      pending.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
-      pending.noticeMessageId ?? messageId,
+      pending?.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
+      pending?.noticeMessageId ?? messageId,
       pendingTask,
     );
   }
@@ -2418,6 +2488,27 @@ function mergeStoredConfig(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+function pendingTargetProfileToSessionRecord(
+  chatId: string,
+  threadId: string | null,
+  profile: PendingTargetProfile,
+): SessionRecord {
+  return {
+    chatId,
+    threadId,
+    sessionId: profile.sessionId,
+    ...(profile.profileOnly !== undefined ? { profileOnly: profile.profileOnly } : {}),
+    agentCommand: profile.agentCommand,
+    agentArgs: [...profile.agentArgs],
+    ...(profile.agentEnv ? { agentEnv: { ...profile.agentEnv } } : {}),
+    ...(profile.agentLabel !== undefined ? { agentLabel: profile.agentLabel } : {}),
+    cwd: profile.cwd,
+    ...(profile.controls ? { controls: profile.controls } : {}),
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt,
+  };
+}
+
 function buildBridgeOnlyValidationSnapshot(
   chatId: string,
   threadId: string | null,
@@ -2446,7 +2537,7 @@ function buildBridgeOnlyValidationSnapshot(
 }
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话还包含真实任务，先登记 controls/agent handoff，再用 queue-task 登记任务，不要让用户重复。其它请求忽略本提示。]`;
+  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含 Agent/Model/Mode/Permission/Config 控制和真实任务，优先一次性登记 pending target profile（Agent + controls + task），不要拆成 set-agent/set-control/queue-task 多张卡，也不要让用户重复。其它请求忽略本提示。]`;
 }
 
 function buildRouteFailureNotice(err: unknown): NoticeCardSpec {
@@ -2640,6 +2731,43 @@ function buildPendingAgentSwitchControlQueuedNotice(
   ];
   return {
     title: "⏳ 目标 Session profile 已更新",
+    body: lines.join("\n"),
+    template: "blue",
+  };
+}
+
+function buildPendingTargetProfileQueuedNotice(
+  before: SessionRecord | null,
+  target: SessionRecord,
+  stored: PendingTargetProfile | undefined,
+): NoticeCardSpec {
+  const taskLine = stored?.task ? "• Task：已保存，将在目标 profile 生效后执行" : "• Task：—";
+  const lines = [
+    "已保存同一句请求形成的 pending target profile。当前 Agent 这一轮会先正常结束；结束后 Humming 会先应用目标 profile，再把任务交给目标 Agent。",
+    "",
+    "**当前 profile**",
+    `• Agent：${before ? (before.agentLabel ?? before.agentCommand) : "未绑定"}`,
+    `• Mode：${displayControlMode(before?.controls)}`,
+    `• Model：${displayControlModel(before?.controls)}`,
+    `• Permission：${displayControlPermission(before?.controls)}`,
+    `• Controls：${displayControlConfig(before?.controls)}`,
+    "",
+    "**目标 profile**",
+    `• Agent：${target.agentLabel ?? target.agentCommand}`,
+    `• Repo：${target.cwd}`,
+    `• Mode：${displayControlMode(target.controls)}`,
+    `• Model：${displayControlModel(target.controls)}`,
+    `• Permission：${displayControlPermission(target.controls)}`,
+    `• Controls：${displayControlConfig(target.controls)}`,
+    taskLine,
+    "",
+    "**生效顺序**",
+    "1. 应用目标 profile",
+    "2. 启动 / 切换到目标 Agent",
+    "3. 执行已保存的 task",
+  ];
+  return {
+    title: "⏳ Pending target profile 已排队",
     body: lines.join("\n"),
     template: "blue",
   };

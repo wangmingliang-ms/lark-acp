@@ -43,6 +43,8 @@ export interface SessionRecord {
   pendingControls?: SessionControlPatch;
   /** One-shot task prompt to run automatically after queued controls become live. */
   pendingTask?: PendingSessionTask;
+  /** Atomic Agent + controls + optional task target to apply after the current turn. */
+  pendingTargetProfile?: PendingTargetProfile;
   createdAt: number;
   updatedAt: number;
 }
@@ -50,6 +52,20 @@ export interface SessionRecord {
 export interface PendingSessionTask {
   readonly prompt: string;
   readonly createdAt: number;
+}
+
+export interface PendingTargetProfile {
+  readonly sessionId: string;
+  readonly profileOnly?: boolean;
+  readonly agentCommand: string;
+  readonly agentArgs: string[];
+  readonly agentEnv?: Readonly<Record<string, string>>;
+  readonly agentLabel?: string;
+  readonly cwd: string;
+  readonly controls?: SessionControls;
+  readonly task?: PendingSessionTask;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 
 export interface SessionControls {
@@ -166,6 +182,12 @@ export interface SessionStore {
 
   /** Store/replace the one-shot task prompt to run after queued controls apply. */
   setPendingTask(target: SessionControlTarget, task: PendingSessionTask): Promise<SessionRecord>;
+
+  /** Store/replace an atomic Agent + controls + optional task target profile. */
+  setPendingTargetProfile(
+    target: SessionControlTarget,
+    profile: PendingTargetProfile,
+  ): Promise<SessionRecord>;
 
   /** Consume the one-shot task prompt for one existing/current session. */
   consumePendingTask(

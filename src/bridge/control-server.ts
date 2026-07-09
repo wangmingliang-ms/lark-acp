@@ -4,6 +4,7 @@ import path from "node:path";
 import type { LarkLogger } from "../logger/logger.js";
 import type {
   PendingSessionTask,
+  PendingTargetProfile,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionRecord,
@@ -38,6 +39,16 @@ export type ControlRequest =
         readonly chatId: string;
         readonly threadId?: string | null;
         readonly task: PendingSessionTask;
+      };
+    }
+  | {
+      readonly id?: string | number;
+      readonly method: "setPendingTargetProfile";
+      readonly params: {
+        readonly chatId: string;
+        readonly threadId?: string | null;
+        readonly profile: PendingTargetProfile;
+        readonly noticeMessageId?: string | null;
       };
     }
   | {
@@ -77,6 +88,12 @@ export interface BridgeControlHandlers {
     chatId: string,
     threadId: string | null,
     task: PendingSessionTask,
+  ): Promise<unknown>;
+  setPendingTargetProfile(
+    chatId: string,
+    threadId: string | null,
+    profile: PendingTargetProfile,
+    noticeMessageId?: string | null,
   ): Promise<unknown>;
   bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   setAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
@@ -210,6 +227,17 @@ export class BridgeControlServer {
               parsed.params.task,
             ),
           };
+        case "setPendingTargetProfile":
+          return {
+            ok: true,
+            id: parsed.id,
+            result: await this.handlers.setPendingTargetProfile(
+              parsed.params.chatId,
+              parsed.params.threadId ?? null,
+              parsed.params.profile,
+              parsed.params.noticeMessageId ?? null,
+            ),
+          };
         case "bindSession":
           return {
             ok: true,
@@ -318,6 +346,14 @@ function isControlRequest(value: unknown): value is ControlRequest {
       isPendingSessionTask(params["task"])
     );
   }
+  if (value["method"] === "setPendingTargetProfile") {
+    const params = value["params"];
+    return (
+      isRecord(params) &&
+      typeof params["chatId"] === "string" &&
+      isPendingTargetProfile(params["profile"])
+    );
+  }
   if (value["method"] === "bindSession") {
     const params = value["params"];
     return isRecord(params) && isSessionRecord(params["record"]);
@@ -344,6 +380,21 @@ function isPendingSessionTask(value: unknown): value is PendingSessionTask {
     typeof value["prompt"] === "string" &&
     value["prompt"].trim().length > 0 &&
     typeof value["createdAt"] === "number"
+  );
+}
+
+function isPendingTargetProfile(value: unknown): value is PendingTargetProfile {
+  return (
+    isRecord(value) &&
+    typeof value["sessionId"] === "string" &&
+    typeof value["agentCommand"] === "string" &&
+    Array.isArray(value["agentArgs"]) &&
+    value["agentArgs"].every((item) => typeof item === "string") &&
+    typeof value["cwd"] === "string" &&
+    (value["controls"] === undefined || isRecord(value["controls"])) &&
+    (value["task"] === undefined || isPendingSessionTask(value["task"])) &&
+    typeof value["createdAt"] === "number" &&
+    typeof value["updatedAt"] === "number"
   );
 }
 

@@ -247,6 +247,31 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(args.controlJson).toBe(json);
   });
 
+  it("parses atomic pending target profile inputs", () => {
+    const json = '{"modelId":"gpt-5.5"}';
+    const args = parseArgs([
+      "sessions",
+      "set-pending-target-profile",
+      "--chat-id",
+      "oc_A",
+      "--thread-id",
+      "th_1",
+      "--agent",
+      "copilot",
+      "--json",
+      json,
+      "--prompt",
+      "do the task",
+    ]);
+    expect(args.command).toBe("sessions");
+    expect(args.sessionsAction).toBe("set-pending-target-profile");
+    expect(args.targetChatId).toBe("oc_A");
+    expect(args.targetThreadId).toBe("th_1");
+    expect(args.targetAgent).toBe("copilot");
+    expect(args.controlJson).toBe(json);
+    expect(args.promptText).toBe("do the task");
+  });
+
   it("parses set-control JSON file and stdin payload sources", () => {
     const fromFile = parseArgs([
       "sessions",

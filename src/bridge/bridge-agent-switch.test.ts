@@ -13,6 +13,7 @@ import type {
 } from "../presenter/presenter.js";
 import type {
   PendingSessionTask,
+  PendingTargetProfile,
   SessionControlPatch,
   SessionControlTarget,
   SessionRecord,
@@ -125,6 +126,20 @@ class MemorySessionStore implements SessionStore {
     const updated: SessionRecord = {
       ...record,
       pendingTask: task,
+      updatedAt: record.updatedAt + 1,
+    };
+    await this.save(updated);
+    return updated;
+  }
+
+  async setPendingTargetProfile(
+    target: SessionControlTarget,
+    profile: PendingTargetProfile,
+  ): Promise<SessionRecord> {
+    const record = await this.requireLatest(target.chatId, target.threadId);
+    const updated: SessionRecord = {
+      ...record,
+      pendingTargetProfile: profile,
       updatedAt: record.updatedAt + 1,
     };
     await this.save(updated);
@@ -306,7 +321,10 @@ function codexProfileRecord(): SessionRecord {
   };
 }
 
-function fakeAgentProcess(sessionId: string): AgentProcess {
+function fakeAgentProcess(
+  sessionId: string,
+  sessionCapabilities: AgentProcess["sessionCapabilities"] = {},
+): AgentProcess {
   const proc = {
     killed: false,
     exitCode: null as number | null,
@@ -317,10 +335,15 @@ function fakeAgentProcess(sessionId: string): AgentProcess {
     process: proc as unknown as AgentProcess["process"],
     sessionId,
     capabilities: {},
-    sessionCapabilities: {},
+    sessionCapabilities,
     connection: {
       prompt: async () => ({ stopReason: "end_turn" }),
       cancel: async () => {},
+      unstable_setSessionModel: async () => {},
+      setSessionMode: async () => {},
+      setSessionConfigOption: async () => ({
+        configOptions: sessionCapabilities.configOptions ?? [],
+      }),
       get closed() {
         return new Promise<void>(() => {});
       },
@@ -334,7 +357,17 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     probeAgentSessionCapabilitiesMock.mockReset();
     probeAgentSessionCapabilitiesMock.mockResolvedValue({ sessionId: "probe", capabilities: {} });
     spawnAgentMock.mockReset();
-    spawnAgentMock.mockResolvedValue(fakeAgentProcess("sess_codex"));
+    spawnAgentMock.mockResolvedValue(
+      fakeAgentProcess("sess_codex", {
+        models: {
+          currentModelId: "auto",
+          availableModels: [
+            { modelId: "auto", name: "Auto" },
+            { modelId: "gpt-5.5", name: "GPT-5.5" },
+          ],
+        },
+      }),
+    );
   });
 
   it("warns and does not probe or switch when /agent targets an already-started topic", async () => {
@@ -483,6 +516,100 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
     expect(events.notices.at(-1)).toMatchObject({ title: "✅ Agent 已切换" });
     expect(events.notices.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
+  });
+
+  it("queues an atomic pending target profile with Agent, controls, and task in one notice", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetPendingTargetProfile(
+        chatId: string,
+        threadId: string | null,
+        profile: PendingTargetProfile,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+      activeChatCount: number;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
+      sessionId: "probe_codex",
+      capabilities: {
+        models: {
+          currentModelId: "auto",
+          availableModels: [
+            { modelId: "auto", name: "Auto" },
+            { modelId: "gpt-5.5", name: "GPT-5.5" },
+          ],
+        },
+      },
+    });
+
+    await testable.controlSetPendingTargetProfile(
+      "oc_A",
+      "omt_1",
+      {
+        sessionId: "profile:atomic",
+        profileOnly: true,
+        agentCommand: "npx",
+        agentArgs: ["-y", "@zed-industries/codex-acp"],
+        agentLabel: "codex",
+        cwd: "/tmp",
+        controls: { modelId: "gpt-5.5" },
+        task: { prompt: "查一下 pipeline 为什么失败", createdAt: 10 },
+        createdAt: 10,
+        updatedAt: 10,
+      },
+      "om_handoff",
+    );
+
+    expect(events.notices).toHaveLength(1);
+    expect(events.notices[0]).toMatchObject({ title: "⏳ Pending target profile 已排队" });
+    expect(events.notices[0]?.body).toContain("• Agent：codex");
+    expect(events.notices[0]?.body).toContain("• Model：gpt-5.5");
+    expect(events.notices[0]?.body).toContain("• Task：已保存");
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+      agentLabel: "claude",
+      pendingTargetProfile: {
+        agentLabel: "codex",
+        controls: { modelId: "gpt-5.5" },
+        task: { prompt: "查一下 pipeline 为什么失败" },
+      },
+    });
+
+    fakeRuntime.processing = false;
+    await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
+
+    await vi.waitFor(async () => {
+      expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+        agentLabel: "codex",
+        controls: { modelId: "gpt-5.5" },
+      });
+      expect(testable.activeChatCount).toBe(1);
+    });
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTargetProfile).toBeUndefined();
+    expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it("validates queued model changes against the pending target Agent, not the live Agent", async () => {

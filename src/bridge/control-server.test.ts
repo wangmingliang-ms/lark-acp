@@ -48,6 +48,13 @@ describe("BridgeControlServer", () => {
           threadId,
           task,
         }),
+        setPendingTargetProfile: async (chatId, threadId, profile, noticeMessageId) => ({
+          queued: true,
+          chatId,
+          threadId,
+          profile,
+          noticeMessageId,
+        }),
         bindSession: async (record, noticeMessageId) => ({
           bound: true,
           record,
@@ -115,6 +122,37 @@ describe("BridgeControlServer", () => {
         chatId: "oc_A",
         threadId: "th_1",
         task: { prompt: "continue this task", createdAt: 123 },
+      },
+    });
+
+    const target = await sendControlRequest(socketPath, {
+      method: "setPendingTargetProfile",
+      params: {
+        chatId: "oc_A",
+        threadId: "th_1",
+        profile: {
+          sessionId: "profile:1",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/copilot-acp"],
+          agentLabel: "copilot",
+          cwd: "/repo",
+          controls: { modelId: "gpt-5.5" },
+          task: { prompt: "continue with copilot", createdAt: 123 },
+          createdAt: 123,
+          updatedAt: 123,
+        },
+        noticeMessageId: "om_notice",
+      },
+    });
+    expect(target).toMatchObject({
+      ok: true,
+      result: {
+        queued: true,
+        chatId: "oc_A",
+        threadId: "th_1",
+        noticeMessageId: "om_notice",
+        profile: { agentLabel: "copilot", controls: { modelId: "gpt-5.5" } },
       },
     });
 
@@ -214,6 +252,7 @@ describe("BridgeControlServer", () => {
         }),
         setControls: async () => ({ applied: true }),
         setPendingTask: async () => ({ queued: true }),
+        setPendingTargetProfile: async () => ({ queued: true }),
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
@@ -282,6 +321,7 @@ describe("BridgeControlServer", () => {
         },
         setControls: async () => ({ applied: true }),
         setPendingTask: async () => ({ queued: true }),
+        setPendingTargetProfile: async () => ({ queued: true }),
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),

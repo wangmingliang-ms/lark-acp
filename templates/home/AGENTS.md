@@ -123,30 +123,39 @@ Switching Agent is a destructive topic/session boundary, not a `settings.json` e
 There are two different UX paths:
 
 1. Explicit slash command: `/agent <agent>` is handled by Humming before it reaches you. In an already-started topic, Humming shows the context-loss confirmation card first.
-2. Natural-language handoff: if the user says something like "用 Codex 做 X", "切到 Claude 继续查 Y", or "让澎湃 CI 看这个 pipeline", treat it as a real handoff request. Do **not** ask the user to send `/agent` and do **not** refuse just because the topic already has a session. Use `sessions set-agent`, then queue the extracted task with `sessions queue-task`.
+2. Natural-language handoff: if the user says something like "用 Codex 做 X", "切到 Claude 继续查 Y", or "让澎湃 CI 看这个 pipeline", treat it as a real handoff request. Do **not** ask the user to send `/agent` and do **not** refuse just because the topic already has a session. Prefer `sessions set-pending-target-profile` for one-message Agent/control/task handoffs; use `sessions set-agent` only for a pure Agent switch.
 
-For natural-language Agent handoff, first extract:
+For natural-language Agent handoff where the same user message also contains requested model/mode/config/permission controls and/or a real task, submit the whole target state atomically. Extract:
 
 - target Agent preset/id
+- requested controls (modelId / modeId / config / bridgePermissionMode), if any
 - residual task text, if any
 
-Then run:
+Then run one command:
+
+```bash
+humming sessions set-pending-target-profile --agent <agent> \
+  --json-file /absolute/path/to/controls.json \
+  --prompt-file /absolute/path/to/task.md
+```
+
+If there are no controls, omit `--json-file`; if there is no task, omit `--prompt-file`. For short text, inline forms are allowed:
+
+```bash
+humming sessions set-pending-target-profile --agent <agent> --json '{"modelId":"gpt-5.5"}' -- "<residual task>"
+```
+
+This command is the preferred path for "use Agent/Model to do task" because it produces one Pending target profile card instead of separate Agent / Model / Task cards. It saves the full pending target profile on the current session record. At the post-turn boundary Humming applies the target profile first, then hands the saved task to the target Agent.
+
+For natural-language Agent handoff with no additional controls and no task, run:
 
 ```bash
 humming sessions set-agent --agent <agent>
 ```
 
-Do not add `--cwd` for `set-agent`. In bound chats, Humming resolves the repo from the chat binding. In reception/unbound chats, it resolves the cwd from the current topic session or `runtime.unboundCwd`.
+Do not add `--cwd` for `set-agent` or `set-pending-target-profile`. In bound chats, Humming resolves the repo from the chat binding. In reception/unbound chats, it resolves the cwd from the current topic session or `runtime.unboundCwd`.
 
-If the same user message also contains a real task, store that task separately:
-
-```bash
-humming sessions queue-task --prompt-file /absolute/path/to/task.md
-# or short text:
-humming sessions queue-task -- "<residual task>"
-```
-
-Ordering is flexible as long as both calls happen in the same current turn. If the current topic is busy, Humming queues the Agent switch until this turn finishes; `queue-task` records the task on the old profile. At the post-turn boundary Humming switches to the target Agent, clears the old session binding, and immediately sends the queued task to the new Agent. This prevents the user from having to repeat the task.
+Legacy fallback: if an older Humming build does not support `set-pending-target-profile`, use `sessions set-agent`, then `sessions set-control`, then `sessions queue-task`. On current builds, do not split one user handoff request into those separate commands.
 
 Semantics:
 
@@ -155,8 +164,8 @@ Semantics:
 - The visible Feishu topic remains the user intent container; only the executable Agent session changes.
 - Humming probes the target Agent before switching. If the target Agent cannot start or cannot create a session, the switch is aborted and the old topic session stays active.
 - If `queue-task` was not called, switching only changes the profile; the next user message starts the new Agent session.
-- Model / Mode / Permission / Config controls are Agent-specific. After switching Agent, query the new Agent capabilities before setting those controls.
-- Slash `/agent <agent>` remains a pure control command with confirmation semantics; natural-language "use X to do Y" should be implemented with `set-agent` + optional `queue-task`.
+- Model / Mode / Permission / Config controls are Agent-specific. For one-message handoffs, validate and queue them through `set-pending-target-profile` so they are checked against the target Agent. For separate follow-up control changes after a switch, query the target Agent capabilities first.
+- Slash `/agent <agent>` remains a pure control command with confirmation semantics; natural-language "use X to do Y" should be implemented with `set-pending-target-profile` when it includes a task or controls.
 
 On success Humming sends an `Agent 已切换` notice showing Agent / Repo / Mode / Model / Permission / Controls changes. It intentionally does not print full session/chat/thread ids.
 

@@ -295,6 +295,40 @@ describe("FileSessionStore session controls", () => {
     });
   });
 
+  it("stores an atomic pending target profile", async () => {
+    await store.save(
+      record({
+        chatId: "oc_A",
+        threadId: "th_1",
+        sessionId: "s_t1",
+      }),
+    );
+
+    const queued = await store.setPendingTargetProfile(
+      { chatId: "oc_A", threadId: "th_1" },
+      {
+        sessionId: "profile:1",
+        profileOnly: true,
+        agentCommand: "npx",
+        agentArgs: ["-y", "@github/copilot", "--acp"],
+        agentLabel: "copilot",
+        cwd: "/tmp",
+        controls: { modelId: "gpt-5.5" },
+        task: { prompt: "continue with target", createdAt: 123 },
+        createdAt: 123,
+        updatedAt: 123,
+      },
+    );
+
+    expect(queued).toMatchObject({
+      pendingTargetProfile: {
+        agentLabel: "copilot",
+        controls: { modelId: "gpt-5.5" },
+        task: { prompt: "continue with target", createdAt: 123 },
+      },
+    });
+  });
+
   it("throws when setControls targets a missing session", async () => {
     await expect(
       store.setControls({ chatId: "oc_missing", threadId: null }, { modeId: "agent" }),
