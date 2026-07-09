@@ -971,6 +971,9 @@ export class ChatRuntime {
           ? { pendingControls: previous.pendingControls }
           : {}),
         ...(previous?.pendingTask !== undefined ? { pendingTask: previous.pendingTask } : {}),
+        ...(previous?.pendingTargetProfile !== undefined
+          ? { pendingTargetProfile: previous.pendingTargetProfile }
+          : {}),
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
       });

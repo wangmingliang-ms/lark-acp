@@ -612,6 +612,72 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the atomic pending task even if the finishing old runtime persists its session", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetPendingTargetProfile(
+        chatId: string,
+        threadId: string | null,
+        profile: PendingTargetProfile,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+      activeChatCount: number;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlSetPendingTargetProfile(
+      "oc_A",
+      "omt_1",
+      {
+        sessionId: "profile:atomic",
+        profileOnly: true,
+        agentCommand: "npx",
+        agentArgs: ["-y", "@zed-industries/codex-acp"],
+        agentLabel: "codex",
+        cwd: "/tmp",
+        task: { prompt: "继续执行用户任务", createdAt: 10 },
+        createdAt: 10,
+        updatedAt: 10,
+      },
+      "om_handoff",
+    );
+
+    // Reproduces the real race: when the old runtime finishes, ChatRuntime.persistSession()
+    // rewrites the old session record. The in-memory pending target profile must still
+    // carry its task through the post-turn Agent switch.
+    await store.save({ ...existingClaudeSession(), updatedAt: 99 });
+
+    fakeRuntime.processing = false;
+    await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
+
+    await vi.waitFor(() => expect(testable.activeChatCount).toBe(1));
+    expect(events.notices.at(-1)).toMatchObject({ title: "✅ Pending target profile 已生效" });
+    expect(events.notices.at(-1)?.body).toContain("正在交给目标 Agent 执行 pending task");
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+  });
+
   it("validates queued model changes against the pending target Agent, not the live Agent", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {

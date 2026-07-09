@@ -385,6 +385,7 @@ interface PendingAgentSwitch {
 interface PendingPostTurnAgentSwitch {
   readonly record: SessionRecord;
   readonly noticeMessageId: string | null;
+  readonly targetProfile?: PendingTargetProfile;
 }
 
 const POST_TURN_AGENT_SWITCH_TASK_HINT =
@@ -899,6 +900,7 @@ export class LarkBridge {
     this.pendingPostTurnAgentSwitches.set(runtimeKey(chatId, threadId), {
       record: baseRecord,
       noticeMessageId: noticeMessageId ?? runtime.lastMessageId ?? null,
+      targetProfile: profile,
     });
     const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
     await this.presenter
@@ -978,6 +980,7 @@ export class LarkBridge {
     inherited: SessionRecord | null,
     replyTo: string | null,
     pendingTask?: PendingSessionTask,
+    noticeKind: "agent-switch" | "pending-target-profile" = "agent-switch",
   ): Promise<void> {
     const key = runtimeKey(record.chatId, record.threadId);
     const runtime = this.chats.get(key);
@@ -990,7 +993,10 @@ export class LarkBridge {
     await this.sessionStore.clearThread(record.chatId, record.threadId);
     await this.sessionStore.save(record);
 
-    const notice = buildSessionAgentSwitchedNotice(record, previous, inherited, pendingTask);
+    const notice =
+      noticeKind === "pending-target-profile"
+        ? buildPendingTargetProfileAppliedNotice(record, previous, pendingTask)
+        : buildSessionAgentSwitchedNotice(record, previous, inherited, pendingTask);
     if (replyTo) {
       await this.presenter
         .replyNoticeCard(replyTo, notice)
@@ -1016,15 +1022,17 @@ export class LarkBridge {
     if (!pending && !storedTarget) return;
     this.pendingPostTurnAgentSwitches.delete(key);
 
+    const targetProfile = pending?.targetProfile ?? storedTarget;
     const targetRecord =
-      pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, storedTarget!);
-    const pendingTask = storedTarget?.task ?? previous?.pendingTask;
+      pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, targetProfile!);
+    const pendingTask = targetProfile?.task ?? previous?.pendingTask;
     await this.applyAgentSwitchNow(
       targetRecord,
       previous,
       pending?.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
       pending?.noticeMessageId ?? messageId,
       pendingTask,
+      targetProfile ? "pending-target-profile" : "agent-switch",
     );
   }
 
@@ -2859,6 +2867,35 @@ function buildSessionAgentSwitchedNotice(
   }
   return {
     title: "✅ Agent 已切换",
+    body: lines.join("\n"),
+    template: "green",
+  };
+}
+
+function buildPendingTargetProfileAppliedNotice(
+  record: SessionRecord,
+  before: SessionRecord | null,
+  pendingTask?: PendingSessionTask,
+): NoticeCardSpec {
+  const currentAgent = record.agentLabel ?? record.agentCommand;
+  const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
+  const lines = [
+    "Pending target profile 已应用。",
+    "",
+    pendingTask
+      ? "正在交给目标 Agent 执行 pending task。"
+      : "没有 pending task；下一条消息会使用目标 profile。",
+    "",
+    "**Profile 更新**",
+    `• Agent：${beforeAgent} → ${currentAgent}`,
+    `• Repo：${record.cwd}`,
+    `• Mode：${displayControlMode(record.controls)}`,
+    `• Model：${displayControlModel(record.controls)}`,
+    `• Permission：${displayControlPermission(record.controls)}`,
+    `• Controls：${displayControlConfig(record.controls)}`,
+  ];
+  return {
+    title: "✅ Pending target profile 已生效",
     body: lines.join("\n"),
     template: "green",
   };
