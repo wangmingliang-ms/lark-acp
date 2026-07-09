@@ -624,9 +624,49 @@ export class LarkBridge {
     readonly recordSessionId?: string;
     readonly reason?: string;
   }> {
-    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    const key = runtimeKey(chatId, threadId);
+    const runtime = this.chats.get(key);
     if (runtime) {
       if (runtime.processing) {
+        const pendingAgentSwitch = this.pendingPostTurnAgentSwitches.get(key);
+        if (pendingAgentSwitch) {
+          const validation = await this.validateControlPatchForStoredProfile(
+            chatId,
+            threadId,
+            pendingAgentSwitch.record,
+            controls,
+            noticeMessageId ?? runtime.lastMessageId,
+          );
+          if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
+
+          const updatedRecord: SessionRecord = {
+            ...pendingAgentSwitch.record,
+            controls: mergeStoredControls(pendingAgentSwitch.record.controls, controls),
+            updatedAt: Date.now(),
+          };
+          this.pendingPostTurnAgentSwitches.set(key, {
+            ...pendingAgentSwitch,
+            record: updatedRecord,
+          });
+          const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
+          await this.presenter
+            .replyNoticeCard(
+              replyTo,
+              buildPendingAgentSwitchControlQueuedNotice(
+                pendingAgentSwitch.record,
+                updatedRecord,
+                controls,
+              ),
+            )
+            .catch((err) =>
+              this.logger.warn(
+                { err, chatId, threadId },
+                "pending target control queue notice failed",
+              ),
+            );
+          return { applied: false, queued: true, recordSessionId: updatedRecord.sessionId };
+        }
+
         const before = await this.sessionStore.getLatest(chatId, threadId);
         const snapshot = runtime.capabilities();
         const validation = await this.validateControlPatchForSnapshot(
@@ -2350,6 +2390,34 @@ function controlPatchNeedsAgentCapabilities(controls: SessionControlPatch): bool
   );
 }
 
+function mergeStoredControls(
+  existing: SessionControls | undefined,
+  patch: SessionControlPatch,
+): SessionControls {
+  const out: SessionControls = { ...(existing ?? {}) };
+  if (patch.clearModelId === true) delete out.modelId;
+  if (patch.modelId !== undefined) out.modelId = patch.modelId;
+  if (patch.modeId !== undefined) out.modeId = patch.modeId;
+  if (patch.bridgePermissionMode !== undefined) {
+    out.bridgePermissionMode = patch.bridgePermissionMode;
+  }
+  const config = mergeStoredConfig(existing?.config, patch.config);
+  if (config) out.config = config;
+  else delete out.config;
+  return out;
+}
+
+function mergeStoredConfig(
+  existing: SessionControls["config"] | undefined,
+  patch: SessionControls["config"] | undefined,
+): Record<string, NonNullable<SessionControls["config"]>[string]> | undefined {
+  const merged: Record<string, NonNullable<SessionControls["config"]>[string]> = {
+    ...(existing ?? {}),
+    ...(patch ?? {}),
+  };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 function buildBridgeOnlyValidationSnapshot(
   chatId: string,
   threadId: string | null,
@@ -2545,6 +2613,33 @@ function buildPendingControlQueuedNotice(
   ];
   return {
     title: "⏳ Session profile 已排队",
+    body: lines.join("\n"),
+    template: "blue",
+  };
+}
+
+function buildPendingAgentSwitchControlQueuedNotice(
+  before: SessionRecord,
+  after: SessionRecord,
+  changed: SessionControlPatch,
+): NoticeCardSpec {
+  const lines = [
+    "检测到当前 topic 已有待生效 Agent 切换；新的 session control 已合并到目标 profile，并基于目标 Agent capabilities 校验。",
+    "",
+    "当前任务会继续使用旧 profile；当前 turn 结束后，Humming 会切换 Agent 并应用这些目标 profile 设置。",
+    "",
+    "**排队修改**",
+    ...storedControlChangeLines(before.controls, after.controls, changed),
+    "",
+    "**目标 profile**",
+    `• Agent：${after.agentLabel ?? after.agentCommand}`,
+    `• Mode：${displayControlMode(after.controls)}`,
+    `• Model：${displayControlModel(after.controls)}`,
+    `• Permission：${displayControlPermission(after.controls)}`,
+    `• Controls：${displayControlConfig(after.controls)}`,
+  ];
+  return {
+    title: "⏳ 目标 Session profile 已更新",
     body: lines.join("\n"),
     template: "blue",
   };

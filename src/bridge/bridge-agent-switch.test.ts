@@ -485,6 +485,81 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(events.notices.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
   });
 
+  it("validates queued model changes against the pending target Agent, not the live Agent", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+      controlSetControls(
+        chatId: string,
+        threadId: string | null,
+        controls: SessionControlPatch,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+      capabilities: () => ({
+        session: { chatId: "oc_A", threadId: "omt_1", sessionId: "sess_claude" },
+        agent: {
+          label: "claude",
+          command: "npx",
+          args: ["-y", "@zed-industries/claude-code-acp"],
+          cwd: "/tmp",
+        },
+        models: {
+          currentModelId: "claude-sonnet-4.5",
+          availableModels: [{ modelId: "claude-sonnet-4.5", name: "Claude Sonnet 4.5" }],
+        },
+        bridgePermissionModes: ["alwaysAllow", "alwaysDeny", "alwaysAsk"],
+        bridgePermissionMode: "alwaysAsk",
+      }),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
+      sessionId: "probe_codex",
+      capabilities: {
+        models: {
+          currentModelId: "auto",
+          availableModels: [
+            { modelId: "auto", name: "Auto" },
+            { modelId: "gpt-5.5", name: "GPT-5.5" },
+          ],
+        },
+      },
+    });
+
+    await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
+    await testable.controlSetControls("oc_A", "omt_1", { modelId: "gpt-5.5" }, "om_model");
+
+    fakeRuntime.processing = false;
+    await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
+
+    expect(events.notices.some((notice) => notice.title === "⚠️ Session 设置失败")).toBe(false);
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+      agentLabel: "codex",
+      controls: { modelId: "gpt-5.5" },
+    });
+  });
+
   it("selects the target Agent immediately when the topic has no real session yet", async () => {
     const store = new MemorySessionStore();
     const events: PresenterEvents = {
