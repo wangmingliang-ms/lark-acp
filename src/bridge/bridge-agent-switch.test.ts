@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { LarkBridge, type LarkCommand, type ResolvedAgentInvocation } from "./bridge.js";
 import type { AgentProcess, ProbeAgentSessionCapabilitiesResult } from "../acp/agent-process.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
@@ -15,6 +18,7 @@ import type {
   PendingSessionTask,
   PendingTargetProfile,
   SessionControlPatch,
+  SessionControls,
   SessionControlTarget,
   SessionRecord,
   SessionStore,
@@ -247,13 +251,22 @@ function resolver(selection: string): ResolvedAgentInvocation {
   return { command: "npx", args: ["-y", "@zed-industries/claude-code-acp"], label: "claude" };
 }
 
-function makeBridge(sessionStore: SessionStore, presenter: LarkPresenter): LarkBridge {
+function makeBridge(
+  sessionStore: SessionStore,
+  presenter: LarkPresenter,
+  opts: {
+    readonly settingsPath?: string;
+    readonly globalDefaultControlChatIds?: readonly string[];
+    readonly defaultControls?: SessionControls;
+  } = {},
+): LarkBridge {
   return new LarkBridge({
     lark: { appId: "cli_a", appSecret: "secret" },
     agent: {
       resolver,
       defaultAgent: resolver("claude"),
       defaultCwd: "/tmp",
+      ...(opts.defaultControls !== undefined ? { defaultControls: opts.defaultControls } : {}),
     },
     bindingStore: new MemoryBindingStore({
       chatId: "oc_A",
@@ -264,6 +277,10 @@ function makeBridge(sessionStore: SessionStore, presenter: LarkPresenter): LarkB
     sessionStore,
     presenter,
     logger,
+    ...(opts.settingsPath !== undefined ? { settingsPath: opts.settingsPath } : {}),
+    ...(opts.globalDefaultControlChatIds !== undefined
+      ? { globalDefaultControlChatIds: opts.globalDefaultControlChatIds }
+      : {}),
   });
 }
 
@@ -271,6 +288,11 @@ async function dispatchCommand(
   bridge: LarkBridge,
   command: LarkCommand,
   messageId = "om_switch",
+  opts: {
+    readonly chatId?: string;
+    readonly threadId?: string | null;
+    readonly isDirectMessage?: boolean;
+  } = {},
 ): Promise<void> {
   const testable = bridge as unknown as {
     handleCommand(
@@ -278,9 +300,18 @@ async function dispatchCommand(
       chatId: string,
       threadId: string | null,
       messageId: string,
+      context?: { readonly isDirectMessage?: boolean },
     ): Promise<void>;
   };
-  await testable.handleCommand(command, "oc_A", "omt_1", messageId);
+  await testable.handleCommand(
+    command,
+    opts.chatId ?? "oc_A",
+    Object.hasOwn(opts, "threadId") ? opts.threadId! : "omt_1",
+    messageId,
+    {
+      isDirectMessage: opts.isDirectMessage ?? false,
+    },
+  );
 }
 
 async function handleCardAction(
@@ -796,6 +827,183 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       profileOnly: true,
       agentLabel: "codex",
+    });
+  });
+});
+
+describe("LarkBridge global defaults from direct-message control chat", () => {
+  beforeEach(() => {
+    probeAgentSessionCapabilitiesMock.mockReset();
+    probeAgentSessionCapabilitiesMock.mockResolvedValue({ sessionId: "probe", capabilities: {} });
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockResolvedValue(fakeAgentProcess("sess_default"));
+  });
+
+  it("persists an Agent change from the configured direct-message control chat into settings.json", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-global-default-agent-"));
+    try {
+      const settingsPath = path.join(dir, "settings.json");
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ runtime: { agent: "claude", globalControlChatIds: ["oc_DM"] } }),
+      );
+      const store = new MemorySessionStore();
+      const events: PresenterEvents = {
+        warnings: [],
+        warningResolutions: [],
+        notices: [],
+        commandResults: [],
+        unifiedCards: [],
+        noticeUpdates: [],
+      };
+      const bridge = makeBridge(store, recordingPresenter(events), {
+        settingsPath,
+        globalDefaultControlChatIds: ["oc_DM"],
+      });
+
+      await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" }, "om_dm_agent", {
+        chatId: "oc_DM",
+        threadId: null,
+        isDirectMessage: true,
+      });
+
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
+        runtime?: { agent?: string };
+      };
+      expect(settings.runtime?.agent).toBe("codex");
+      expect(events.notices.at(-1)?.body).toContain("全局默认");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not persist an Agent change from the same configured chat when the message is not a direct message", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-global-default-agent-group-"));
+    try {
+      const settingsPath = path.join(dir, "settings.json");
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ runtime: { agent: "claude", globalControlChatIds: ["oc_DM"] } }),
+      );
+      const store = new MemorySessionStore();
+      const events: PresenterEvents = {
+        warnings: [],
+        warningResolutions: [],
+        notices: [],
+        commandResults: [],
+        unifiedCards: [],
+        noticeUpdates: [],
+      };
+      const bridge = makeBridge(store, recordingPresenter(events), {
+        settingsPath,
+        globalDefaultControlChatIds: ["oc_DM"],
+      });
+
+      await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" }, "om_group_agent", {
+        chatId: "oc_DM",
+        threadId: null,
+        isDirectMessage: false,
+      });
+
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
+        runtime?: { agent?: string };
+      };
+      expect(settings.runtime?.agent).toBe("claude");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists session controls from the configured direct-message control chat into runtime.defaultControls", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-global-default-controls-"));
+    try {
+      const settingsPath = path.join(dir, "settings.json");
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ runtime: { globalControlChatIds: ["oc_DM"] } }),
+      );
+      const store = new MemorySessionStore([
+        {
+          chatId: "oc_DM",
+          threadId: null,
+          sessionId: "profile:dm",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/claude-code-acp"],
+          agentLabel: "claude",
+          cwd: "/tmp",
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]);
+      const events: PresenterEvents = {
+        warnings: [],
+        warningResolutions: [],
+        notices: [],
+        commandResults: [],
+        unifiedCards: [],
+        noticeUpdates: [],
+      };
+      const bridge = makeBridge(store, recordingPresenter(events), {
+        settingsPath,
+        globalDefaultControlChatIds: ["oc_DM"],
+      });
+
+      await dispatchCommand(
+        bridge,
+        { kind: "set-permission", permissionMode: "alwaysAllow" },
+        "om_dm_permission",
+        { chatId: "oc_DM", threadId: null, isDirectMessage: true },
+      );
+
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
+        runtime?: { permissionMode?: string; defaultControls?: SessionControls };
+      };
+      expect(settings.runtime?.permissionMode).toBe("alwaysAllow");
+      expect(settings.runtime?.defaultControls).toMatchObject({
+        bridgePermissionMode: "alwaysAllow",
+      });
+      expect(events.notices.at(-1)?.body).toContain("全局默认");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses configured global default controls for a new topic with no pinned or inherited profile", async () => {
+    const store = new MemorySessionStore();
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events), {
+      defaultControls: { bridgePermissionMode: "alwaysAllow" },
+    });
+    const testable = bridge as unknown as {
+      acquireRuntime(
+        chatId: string,
+        threadId: string | null,
+        binding: unknown,
+      ): Promise<{
+        enqueue(message: { prompt: []; messageId: string; chatId: string }): Promise<void>;
+      }>;
+    };
+
+    const runtime = await testable.acquireRuntime("oc_A", "omt_new", {
+      cwd: "/tmp",
+      command: "npx",
+      args: ["-y", "@zed-industries/claude-code-acp"],
+      label: "claude",
+      explicit: true,
+      reception: false,
+    });
+    await runtime.enqueue({ prompt: [], messageId: "om_new", chatId: "oc_A" });
+
+    expect(await store.getLatest("oc_A", "omt_new")).toMatchObject({
+      controls: { bridgePermissionMode: "alwaysAllow" },
     });
   });
 });

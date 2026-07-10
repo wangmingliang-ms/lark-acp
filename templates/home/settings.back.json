@@ -11,7 +11,9 @@
     "hideTools": false,
     "hideCancelButton": false,
     "permissionMode": "alwaysAsk",
-    "lifecycleNotifyChatIds": []
+    "defaultControls": {},
+    "lifecycleNotifyChatIds": [],
+    "globalControlChatIds": []
   },
   "agents": {
     "my-agent": {

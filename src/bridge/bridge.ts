@@ -255,6 +255,8 @@ export interface LarkBridgeAgentOptions {
    * `"alwaysAllow"` / `"alwaysDeny"` auto-resolve without involving the user.
    */
   permissionMode?: PermissionMode;
+  /** Session controls applied to brand-new topics when no repo/session profile can be inherited. */
+  defaultControls?: SessionControls;
 }
 
 export interface LarkBridgeSessionOptions {
@@ -312,6 +314,9 @@ export interface LarkBridgeOptions {
 
   /** Unix-domain socket for local `humming control …` requests. */
   controlSocketPath?: string | null;
+
+  /** Direct-message chat ids whose Agent/Model/Mode/Permission changes update settings.json defaults. */
+  globalDefaultControlChatIds?: readonly string[];
 
   sessionStore: SessionStore;
   /** Persistent per-chat repo binding (one bot → many repos). */
@@ -380,6 +385,11 @@ interface PendingAgentSwitch {
   readonly target: ResolvedAgentInvocation;
   readonly cwd: string;
   readonly warningCardId?: string;
+  readonly persistGlobalDefault?: boolean;
+}
+
+interface CommandContext {
+  readonly isDirectMessage: boolean;
 }
 
 interface PendingPostTurnAgentSwitch {
@@ -417,6 +427,7 @@ export class LarkBridge {
   private readonly availableAgents: readonly AgentListItem[];
   private readonly defaultAgent: ResolvedAgentInvocation | null;
   private readonly defaultCwd: string | null;
+  private readonly defaultControls: SessionControls | undefined;
   private readonly display: DisplayOptions;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrentChats: number;
@@ -424,6 +435,7 @@ export class LarkBridge {
   private readonly unboundCwd: string | null;
   private readonly settingsPath: string | null;
   private readonly controlSocketPath: string | null;
+  private readonly globalDefaultControlChatIds: readonly string[];
   private readonly lark: LarkBridgeLarkOptions;
   private readonly lifecycleNotificationChatIds: readonly string[];
   private readonly restartMarkerPath: string | null;
@@ -462,6 +474,7 @@ export class LarkBridge {
     this.availableAgents = opts.agent.availableAgents ?? [];
     this.defaultAgent = opts.agent.defaultAgent ?? null;
     this.defaultCwd = opts.agent.defaultCwd ?? null;
+    this.defaultControls = opts.agent.defaultControls;
     this.display = {
       showThoughts: opts.agent.showThoughts ?? DEFAULT_SHOW_THOUGHTS,
       showTools: opts.agent.showTools ?? DEFAULT_SHOW_TOOLS,
@@ -477,6 +490,7 @@ export class LarkBridge {
     this.unboundCwd = opts.unboundCwd ?? null;
     this.settingsPath = opts.settingsPath ?? null;
     this.controlSocketPath = opts.controlSocketPath ?? null;
+    this.globalDefaultControlChatIds = opts.globalDefaultControlChatIds ?? [];
     this.lifecycleNotificationChatIds = opts.lifecycle?.notificationChatIds ?? [];
     this.restartMarkerPath = opts.lifecycle?.restartMarkerPath ?? null;
     this.lifecycleCodeRevision = opts.lifecycle?.codeRevision;
@@ -593,14 +607,25 @@ export class LarkBridge {
       logger: this.logger,
       handlers: {
         capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
-        setControls: (chatId, threadId, controls) =>
-          this.controlSetControls(chatId, threadId, controls),
+        setControls: async (chatId, threadId, controls) => {
+          const result = await this.controlSetControls(chatId, threadId, controls);
+          if (!result.rejected && this.globalDefaultControlChatIds.includes(chatId)) {
+            await this.persistGlobalDefaultControls(controls, null);
+          }
+          return result;
+        },
         setPendingTask: (chatId, threadId, task) =>
           this.controlSetPendingTask(chatId, threadId, task),
         setPendingTargetProfile: (chatId, threadId, profile, noticeMessageId) =>
           this.controlSetPendingTargetProfile(chatId, threadId, profile, noticeMessageId),
         bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
-        setAgent: (record, noticeMessageId) => this.controlSetAgent(record, noticeMessageId),
+        setAgent: async (record, noticeMessageId) => {
+          const result = await this.controlSetAgent(record, noticeMessageId);
+          if (this.globalDefaultControlChatIds.includes(record.chatId)) {
+            await this.persistGlobalDefaultAgent(record.agentLabel ?? record.agentCommand, null);
+          }
+          return result;
+        },
         agentProbeFailed: (chatId, threadId, agent, error, noticeMessageId) =>
           this.controlAgentProbeFailed(chatId, threadId, agent, error, noticeMessageId),
       },
@@ -1176,6 +1201,7 @@ export class LarkBridge {
   ): Promise<void> {
     const { message } = event;
     const isGroup = message.chat_type === CHAT_TYPE_GROUP;
+    const commandContext: CommandContext = { isDirectMessage: !isGroup };
 
     let botOpenId: string | undefined;
     if (isGroup) {
@@ -1203,7 +1229,10 @@ export class LarkBridge {
     // Inbound middleware pipeline. Each middleware can fully handle the message
     // and short-circuit routing; only messages that fall through are forwarded
     // to the Agent as prompts.
-    if (await this.runSlashCommandMiddleware(interpreted, chatId, threadId, messageId)) return;
+    if (
+      await this.runSlashCommandMiddleware(interpreted, chatId, threadId, messageId, commandContext)
+    )
+      return;
 
     switch (interpreted.kind) {
       case "empty":
@@ -1230,9 +1259,10 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     messageId: string,
+    context: CommandContext = { isDirectMessage: false },
   ): Promise<boolean> {
     if (interpreted.kind !== "command") return false;
-    await this.dispatchSlashCommand(interpreted.command, chatId, threadId, messageId);
+    await this.dispatchSlashCommand(interpreted.command, chatId, threadId, messageId, context);
     return true;
   }
 
@@ -1242,8 +1272,9 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     messageId: string,
+    context: CommandContext = { isDirectMessage: false },
   ): Promise<void> {
-    await this.dispatchSlashCommand(command, chatId, threadId, messageId);
+    await this.dispatchSlashCommand(command, chatId, threadId, messageId, context);
   }
 
   private async dispatchSlashCommand(
@@ -1251,6 +1282,7 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     messageId: string,
+    context: CommandContext,
   ): Promise<void> {
     switch (command.kind) {
       case "cancel": {
@@ -1292,7 +1324,7 @@ export class LarkBridge {
         await this.handleWhere(chatId, messageId);
         return;
       case "set-agent":
-        await this.handleSetAgentCommand(command.agent, chatId, threadId, messageId);
+        await this.handleSetAgentCommand(command.agent, chatId, threadId, messageId, context);
         return;
       case "list-agents":
         await this.presenter.replyCommandResultCard(
@@ -1306,13 +1338,20 @@ export class LarkBridge {
           chatId,
           threadId,
           messageId,
+          context,
         );
         return;
       case "list-models":
         await this.handleListModelsCommand(chatId, threadId, messageId);
         return;
       case "set-mode":
-        await this.handleSetControlsCommand({ modeId: command.mode }, chatId, threadId, messageId);
+        await this.handleSetControlsCommand(
+          { modeId: command.mode },
+          chatId,
+          threadId,
+          messageId,
+          context,
+        );
         return;
       case "list-modes":
         await this.handleListModesCommand(chatId, threadId, messageId);
@@ -1323,6 +1362,7 @@ export class LarkBridge {
           chatId,
           threadId,
           messageId,
+          context,
         );
         return;
       case "list-permissions":
@@ -1432,8 +1472,12 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     messageId: string,
+    context: CommandContext = { isDirectMessage: false },
   ): Promise<void> {
-    await this.controlSetControls(chatId, threadId, controls, messageId);
+    const result = await this.controlSetControls(chatId, threadId, controls, messageId);
+    if (!result.rejected && this.shouldPersistGlobalDefaults(chatId, context)) {
+      await this.persistGlobalDefaultControls(controls, messageId);
+    }
   }
 
   private async handleListModelsCommand(
@@ -1587,6 +1631,7 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     messageId: string,
+    context: CommandContext = { isDirectMessage: false },
   ): Promise<void> {
     const binding = await this.resolveBinding(chatId);
     if (!binding) {
@@ -1612,6 +1657,7 @@ export class LarkBridge {
       );
       return;
     }
+    const persistGlobalDefault = this.shouldPersistGlobalDefaults(chatId, context);
     const previous = await this.sessionStore.getLatest(chatId, threadId);
     if (previous && !previous.profileOnly) {
       await this.requestDestructiveAgentSwitchConfirmation(
@@ -1621,10 +1667,18 @@ export class LarkBridge {
         binding,
         target,
         previous,
+        persistGlobalDefault,
       );
       return;
     }
-    await this.switchAgentAfterProbe(chatId, threadId, messageId, binding.cwd, target);
+    await this.switchAgentAfterProbe(
+      chatId,
+      threadId,
+      messageId,
+      binding.cwd,
+      target,
+      persistGlobalDefault,
+    );
   }
 
   private async requestDestructiveAgentSwitchConfirmation(
@@ -1634,6 +1688,7 @@ export class LarkBridge {
     binding: EffectiveBinding,
     target: ResolvedAgentInvocation,
     previous: SessionRecord,
+    persistGlobalDefault: boolean,
   ): Promise<void> {
     const switchId = randomUUID();
     const warning = buildAgentSwitchWarning(
@@ -1662,6 +1717,7 @@ export class LarkBridge {
       target,
       cwd: binding.cwd,
       warningCardId,
+      persistGlobalDefault,
     });
   }
 
@@ -1671,6 +1727,7 @@ export class LarkBridge {
     noticeMessageId: string | null,
     cwd: string,
     target: ResolvedAgentInvocation,
+    persistGlobalDefault = false,
   ): Promise<void> {
     try {
       await probeAgentSessionCapabilities({
@@ -1713,6 +1770,9 @@ export class LarkBridge {
       },
       noticeMessageId,
     );
+    if (persistGlobalDefault) {
+      await this.persistGlobalDefaultAgent(target, noticeMessageId);
+    }
   }
 
   private handleAgentSwitchWarningAction(
@@ -1769,6 +1829,7 @@ export class LarkBridge {
       updateCardId ?? null,
       pending.cwd,
       pending.target,
+      pending.persistGlobalDefault === true,
     );
   }
 
@@ -2069,7 +2130,9 @@ export class LarkBridge {
             reception: false,
             ...(inherited.controls ? { inheritedControls: inherited.controls } : {}),
           }
-        : binding;
+        : this.defaultControls
+          ? { ...binding, inheritedControls: this.defaultControls }
+          : binding;
 
     if (inherited) {
       this.logger.info(
@@ -2108,6 +2171,9 @@ export class LarkBridge {
       agentLabel: effective.label,
       ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),
       ...(effective.inheritedControls ? { inheritedControls: effective.inheritedControls } : {}),
+      ...(effective.inheritedControls === this.defaultControls
+        ? { persistInheritedControls: true }
+        : {}),
       onTurnComplete: (messageId) => this.handleRuntimeTurnComplete(chatId, threadId, messageId),
       presenter: this.presenter,
       sessionStore: this.sessionStore,
@@ -2194,6 +2260,76 @@ export class LarkBridge {
       });
     } catch (err) {
       this.logger.warn({ err, homeDir }, "failed to install humming home templates");
+    }
+  }
+
+  private shouldPersistGlobalDefaults(chatId: string, context: CommandContext): boolean {
+    return (
+      context.isDirectMessage &&
+      this.settingsPath !== null &&
+      this.globalDefaultControlChatIds.includes(chatId)
+    );
+  }
+
+  private async persistGlobalDefaultAgent(
+    target: ResolvedAgentInvocation | string,
+    messageId: string | null,
+  ): Promise<void> {
+    const label = typeof target === "string" ? target : target.label;
+    await this.mutateSettingsRuntime(
+      (runtime) => {
+        runtime["agent"] = label;
+      },
+      messageId,
+      "Agent",
+    );
+  }
+
+  private async persistGlobalDefaultControls(
+    controls: SessionControlPatch,
+    messageId: string | null,
+  ): Promise<void> {
+    await this.mutateSettingsRuntime(
+      (runtime) => {
+        const existingControls = readSettingsControls(runtime["defaultControls"]);
+        const nextControls = mergeGlobalDefaultControls(existingControls, controls);
+        runtime["defaultControls"] = nextControls;
+        if (controls.bridgePermissionMode !== undefined) {
+          runtime["permissionMode"] = controls.bridgePermissionMode;
+        }
+      },
+      messageId,
+      "Session profile",
+    );
+  }
+
+  private async mutateSettingsRuntime(
+    mutate: (runtime: Record<string, unknown>) => void,
+    messageId: string | null,
+    label: string,
+  ): Promise<void> {
+    if (!this.settingsPath) return;
+    try {
+      const root = readJsonObjectForSettingsWrite(this.settingsPath);
+      const runtime = readObjectFieldForSettingsWrite(root, "runtime");
+      mutate(runtime);
+      atomicWritePrivateJson(this.settingsPath, { ...root, runtime });
+      if (messageId) {
+        await this.presenter.replyNoticeCard(messageId, {
+          title: "✅ 全局默认已更新",
+          body: `${label} 已保存到 settings.json。此变更只因为当前消息来自已配置的 DM 控制台；群聊消息不会写入全局默认。`,
+          template: "green",
+        });
+      }
+    } catch (err) {
+      this.logger.warn({ err }, "global default settings update failed");
+      if (messageId) {
+        await this.presenter.replyNoticeCard(messageId, {
+          title: "⚠️ 全局默认未更新",
+          body: `当前 session 已处理，但写入 settings.json 失败：${formatBootstrapError(err)}`,
+          template: "orange",
+        });
+      }
     }
   }
 
@@ -2572,7 +2708,7 @@ function buildBridgeOnlyValidationSnapshot(
 }
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含 Agent/Model/Mode/Permission/Config 控制和真实任务，优先一次性登记 pending target profile（Agent + controls + task），不要拆成 set-agent/set-control/queue-task 多张卡，也不要让用户重复。其它请求忽略本提示。]`;
+  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含 Agent/Model/Mode/Permission/Config 控制和真实任务，优先一次性登记 pending target profile（Agent + controls + task），不要拆成 set-agent/set-control/queue-task 多张卡，也不要让用户重复。注意：只有 Humming 配置里的 DM 控制台直聊会把这些 profile 控制写入 settings.json 全局默认；群聊/topic 中的控制只改当前 session。其它请求忽略本提示。]`;
 }
 
 function buildRouteFailureNotice(err: unknown): NoticeCardSpec {
@@ -3218,6 +3354,78 @@ function buildProbeCapabilitiesSnapshot(
 
 function modelCommandToPatch(model: string | "auto"): SessionControlPatch {
   return model === "auto" ? { clearModelId: true } : { modelId: model };
+}
+
+const SETTINGS_FILE_MODE = 0o600;
+
+function readJsonObjectForSettingsWrite(settingsPath: string): Record<string, unknown> {
+  if (!fs.existsSync(settingsPath)) return {};
+  const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("settings file must contain a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function readObjectFieldForSettingsWrite(
+  root: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const value = root[key];
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`settings file ${key} must be a JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function atomicWritePrivateJson(filePath: string, value: Readonly<Record<string, unknown>>): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf-8",
+    mode: SETTINGS_FILE_MODE,
+  });
+  fs.renameSync(tmp, filePath);
+}
+
+function readSettingsControls(value: unknown): SessionControls | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("settings file runtime.defaultControls must be a JSON object");
+  }
+  const raw = value as Record<string, unknown>;
+  const out: SessionControls = {};
+  if (typeof raw["modelId"] === "string") out.modelId = raw["modelId"];
+  if (typeof raw["modeId"] === "string") out.modeId = raw["modeId"];
+  if (isPermissionMode(raw["bridgePermissionMode"])) {
+    out.bridgePermissionMode = raw["bridgePermissionMode"];
+  }
+  if (raw["config"] && typeof raw["config"] === "object" && !Array.isArray(raw["config"])) {
+    out.config = raw["config"] as SessionControls["config"];
+  }
+  return out;
+}
+
+function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "alwaysAllow" || value === "alwaysDeny" || value === "alwaysAsk";
+}
+
+function mergeGlobalDefaultControls(
+  existing: SessionControls | undefined,
+  patch: SessionControlPatch,
+): SessionControls {
+  const out: SessionControls = { ...(existing ?? {}) };
+  if (patch.clearModelId === true) delete out.modelId;
+  if (patch.modelId !== undefined) out.modelId = patch.modelId;
+  if (patch.modeId !== undefined) out.modeId = patch.modeId;
+  if (patch.bridgePermissionMode !== undefined)
+    out.bridgePermissionMode = patch.bridgePermissionMode;
+  const config = { ...(existing?.config ?? {}), ...(patch.config ?? {}) };
+  if (Object.keys(config).length > 0) out.config = config;
+  else delete out.config;
+  return out;
 }
 
 function buildProfileCommandUsageNotice(command: string): NoticeCardSpec {

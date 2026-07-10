@@ -332,9 +332,11 @@ type FileRuntime = {
   readonly hideTools?: boolean;
   readonly hideCancelButton?: boolean;
   readonly permissionMode?: PermissionMode;
+  readonly defaultControls?: SessionControls;
   readonly groupRequireMention?: boolean;
   readonly unboundCwd?: string;
   readonly lifecycleNotifyChatIds?: readonly string[];
+  readonly globalControlChatIds?: readonly string[];
   /** Default idle gap before sending a reusable status card (10s). */
   readonly idleStatusCardMs?: number;
 };
@@ -485,12 +487,14 @@ function readConfigFile(filePath: string): FileConfig {
     ...optBoolField("runtime.groupRequireMention", runtimeObj["groupRequireMention"]),
     ...optStringField("runtime.unboundCwd", runtimeObj["unboundCwd"]),
     ...optStringArrayField("runtime.lifecycleNotifyChatIds", runtimeObj["lifecycleNotifyChatIds"]),
+    ...optStringArrayField("runtime.globalControlChatIds", runtimeObj["globalControlChatIds"]),
     ...optNumberField(
       "runtime.idleStatusCardMs",
       asNonNegIntOpt("runtime.idleStatusCardMs", runtimeObj["idleStatusCardMs"]),
       "idleStatusCardMs",
     ),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
+    ...parseDefaultControlsField(runtimeObj["defaultControls"]),
   };
 
   const dataDir = asStringOpt("dataDir", root["dataDir"]);
@@ -505,6 +509,11 @@ function readConfigFile(filePath: string): FileConfig {
     agents,
     bindings,
   };
+}
+
+function parseDefaultControlsField(value: unknown): { readonly defaultControls?: SessionControls } {
+  if (value === undefined) return {};
+  return { defaultControls: validateSessionControls(value) };
 }
 
 /** Parse the `bindings` block: chatId -> { cwd }. Invalid entries throw. */
@@ -1369,9 +1378,11 @@ type EffectiveConfig = {
   readonly showTools: boolean;
   readonly showCancelButton: boolean;
   readonly permissionMode: PermissionMode;
+  readonly defaultControls: SessionControls | undefined;
   readonly idleStatusCardMs: number;
   readonly groupRequireMention: boolean;
   readonly lifecycleNotifyChatIds: readonly string[];
+  readonly globalControlChatIds: readonly string[];
   /** Reception-area cwd for unbound chats (default = home dir; null disables). */
   readonly unboundCwd: string | null;
 };
@@ -1447,6 +1458,7 @@ function resolveConfig(
   const hideCancelButton = args.hideCancelButton ?? file.runtime.hideCancelButton ?? false;
   const groupRequireMention = args.groupRequireMention ?? file.runtime.groupRequireMention ?? false;
   const lifecycleNotifyChatIds = file.runtime.lifecycleNotifyChatIds ?? [];
+  const globalControlChatIds = file.runtime.globalControlChatIds ?? lifecycleNotifyChatIds;
   const idleStatusCardMs = file.runtime.idleStatusCardMs ?? DEFAULT_IDLE_STATUS_CARD_MS;
 
   // Reception area: default ON, cwd = home dir. Precedence: --unbound-cwd flag
@@ -1484,9 +1496,11 @@ function resolveConfig(
     showTools: !hideTools,
     showCancelButton: !hideCancelButton,
     permissionMode,
+    defaultControls: file.runtime.defaultControls,
     idleStatusCardMs,
     groupRequireMention,
     lifecycleNotifyChatIds,
+    globalControlChatIds,
     unboundCwd,
   };
 }
@@ -1913,7 +1927,9 @@ function printHelp(): void {
     `      "hideTools": false,`,
     `      "hideCancelButton": false,`,
     `      "permissionMode": "${DEFAULT_PERMISSION_MODE}",`,
-    `      "lifecycleNotifyChatIds": ["oc_..."]`,
+    `      "defaultControls": { "modelId": "gpt-5.5" },`,
+    `      "lifecycleNotifyChatIds": ["oc_..."],`,
+    `      "globalControlChatIds": ["oc_..."]`,
     `    },`,
     `    "agents": {`,
     `      "my-claude": {`,
@@ -2788,6 +2804,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
       showTools: cfg.showTools,
       showCancelButton: cfg.showCancelButton,
       permissionMode: cfg.permissionMode,
+      ...(cfg.defaultControls !== undefined ? { defaultControls: cfg.defaultControls } : {}),
       idleStatusCardMs: cfg.idleStatusCardMs,
     },
     session: {
@@ -2798,6 +2815,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     unboundCwd: cfg.unboundCwd,
     settingsPath: configPath,
     controlSocketPath: bridgeControlSocketPath(homeDir),
+    globalDefaultControlChatIds: cfg.globalControlChatIds,
     lifecycle: {
       notificationChatIds: cfg.lifecycleNotifyChatIds,
       restartMarkerPath: bridgeRestartMarkerPath(homeDir),

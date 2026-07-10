@@ -49,12 +49,13 @@ export interface ChatRuntimeOptions {
   idleStatusCardMs: number;
   permissionMode: PermissionMode;
   agentLabel?: string;
-  /**
-   * Controls copied from the most recent session profile in the same chat +
+  /** Controls copied from the most recent session profile in the same chat +
    * repo. Used only when this runtime creates a brand-new ACP session; existing
    * topic sessions keep their own persisted controls.
    */
   inheritedControls?: SessionControls;
+  /** Persist inherited/default controls even when every field is bridge-side only. */
+  persistInheritedControls?: boolean;
   /**
    * Start a new ACP session even if sessions.json has a saved session for this
    * chat/thread. Used when a repo binding is unavailable and the bridge falls
@@ -421,6 +422,8 @@ export class ChatRuntime {
             reason: formatAgentError(err),
           });
         }
+      } else if (this.opts.persistInheritedControls) {
+        await this.persistSession(agent.sessionId, controls);
       }
       if (ignored.length > 0) {
         await this.notifyInheritedControlsIgnored(firstMessage.messageId, ignored);

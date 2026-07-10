@@ -48,6 +48,8 @@ When the user asks to list/show an agent's "settings", "session settings", avail
 
 Humming injects the current target into every agent subprocess as `HUMMING_CHAT_ID` and `HUMMING_THREAD_ID`. The CLI falls back to those env vars, so commands run from inside a Humming agent should usually omit `--chat-id` / `--thread-id`. This is shell-neutral and works on Windows PowerShell/cmd as well as bash. Only pass explicit ids when you intentionally target a different chat/topic.
 
+If the current chat is configured as the DM global-control chat (`runtime.globalControlChatIds`; if absent, Humming falls back to `runtime.lifecycleNotifyChatIds`), Agent / Model / Mode / Permission changes made from that direct-message chat are also persisted to `settings.json` as global defaults. This applies only to the configured DM control chat; group/topic chats do not update global defaults.
+
 - Built-in/user agent presets: `humming agents`
 - Current live session settings/capabilities: `humming control capabilities --json`
 - Capabilities for a specific Agent without changing this topic: `humming control agent-capabilities --agent <agent> --json`
