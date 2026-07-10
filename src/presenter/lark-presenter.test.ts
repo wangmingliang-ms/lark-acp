@@ -127,7 +127,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[4]?.header?.title?.content).toBe("⏳ 待确认");
   });
 
-  it("renders sealed conversation cards as neutral fragments with content summaries", async () => {
+  it("renders sealed conversation fragments without a status-colored header", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -139,12 +139,11 @@ describe("LarkCardPresenter card summary", () => {
       threadId: null,
     });
 
-    expect(cards[0]?.header?.title?.content).toBe("💬 对话片段");
-    expect(cards[0]?.header?.template).toBe("grey");
+    expect(cards[0]?.header).toBeUndefined();
     expect(cards[0]?.config?.summary?.content).toBe("before approve");
   });
 
-  it("renders completed conversation cards as neutral replies with summaries from the first entry", async () => {
+  it("renders completed conversation cards as ended while keeping summaries from the first entry", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -165,8 +164,8 @@ describe("LarkCardPresenter card summary", () => {
     });
 
     const summary = cards[0]?.config?.summary?.content ?? "";
-    expect(cards[0]?.header?.title?.content).toBe("💬 回复");
-    expect(cards[0]?.header?.template).toBe("grey");
+    expect(cards[0]?.header?.title?.content).toBe("✅ 已结束");
+    expect(cards[0]?.header?.template).toBe("blue");
     expect(summary).toContain("第一条消息");
     expect(summary).not.toContain("**");
     expect(summary).not.toContain("second message");

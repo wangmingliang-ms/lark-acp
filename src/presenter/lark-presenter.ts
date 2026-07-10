@@ -26,8 +26,8 @@ const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> 
   waiting: { content: "⏳ 等待中...", template: "wathet" },
   calling_tool: { content: "🔄 处理中...", template: "blue" },
   responding: { content: "✍️ 回复中...", template: "blue" },
-  sealed: { content: "💬 对话片段", template: "grey" },
-  complete: { content: "💬 回复", template: "grey" },
+  sealed: { content: "对话片段", template: "wathet" },
+  complete: { content: "✅ 已结束", template: "blue" },
   cancelled: { content: "⛔ 已取消", template: "grey" },
   failed: { content: "⚠️ 出错", template: "red" },
 };
@@ -57,18 +57,22 @@ const COMMAND_RESULT_TRUNCATION_SUFFIX =
   "\n\n…\n\n_结果内容超过 4096 字符，已截断；完整细节请查看 bridge.log 或本地日志。_";
 
 function buildV2Card(
-  headerContent: string,
-  headerTemplate: string,
+  headerContent: string | null,
+  headerTemplate: string | null,
   elements: readonly object[],
   summaryContent: string,
 ): object {
   return {
     schema: CARD_SCHEMA_V2,
     config: { ...CARD_CONFIG_V2, summary: { content: summaryContent } },
-    header: {
-      title: { tag: "plain_text" as const, content: headerContent },
-      template: headerTemplate,
-    },
+    ...(headerContent !== null && headerTemplate !== null
+      ? {
+          header: {
+            title: { tag: "plain_text" as const, content: headerContent },
+            template: headerTemplate,
+          },
+        }
+      : {}),
     body: { elements },
   };
 }
@@ -501,9 +505,10 @@ function buildUnifiedCard(state: UnifiedCardState): object {
   }
 
   const header = emptyTerminal ? EMPTY_OUTPUT_HEADER : STATUS_HEADER[state.status];
+  const showHeader = state.status !== "sealed" || emptyTerminal;
   return buildV2Card(
-    header.content,
-    header.template,
+    showHeader ? header.content : null,
+    showHeader ? header.template : null,
     elements,
     unifiedCardSummary(state, header.content),
   );
