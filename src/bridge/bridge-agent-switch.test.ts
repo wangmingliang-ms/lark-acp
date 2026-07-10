@@ -663,6 +663,72 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects pending target profiles that put core profile fields under config controls", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetPendingTargetProfile(
+        chatId: string,
+        threadId: string | null,
+        profile: PendingTargetProfile,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
+      sessionId: "probe_codex",
+      capabilities: {
+        configOptions: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "claude-opus-4.8",
+            options: [{ name: "GPT-5.6 Sol", value: "gpt-5.6-sol" }],
+          },
+        ],
+      },
+    });
+
+    await expect(
+      testable.controlSetPendingTargetProfile(
+        "oc_A",
+        "omt_1",
+        {
+          sessionId: "profile:bad-config",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+          controls: { config: { model: { value: "gpt-5.6-sol" } } },
+          createdAt: 10,
+          updatedAt: 10,
+        },
+        "om_handoff",
+      ),
+    ).rejects.toThrow(/Config model[\s\S]*controls\.modelId[\s\S]*controls\.config/);
+
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTargetProfile).toBeUndefined();
+  });
+
   it("keeps the atomic pending task even if the finishing old runtime persists its session", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {

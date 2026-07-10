@@ -1082,28 +1082,6 @@ function isPermissionLikeConfig(
   );
 }
 
-function isCoreProfileConfig(
-  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
-): boolean {
-  const id = normalizeProfileConfigKey(option.id);
-  const name = normalizeProfileConfigKey(option.name);
-  return (
-    id === "agent" ||
-    id === "mode" ||
-    id === "model" ||
-    name === "agent" ||
-    name === "mode" ||
-    name === "model"
-  );
-}
-
-function normalizeProfileConfigKey(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, " ");
-}
-
 function displayConfigCurrentValue(
   option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
 ): string {
@@ -1161,7 +1139,7 @@ function renderControlSuccessBody(
     `• Mode：${displayMode(after)}`,
     `• Model：${displayModel(after)}`,
     `• Permission：${displayPermission(after)}`,
-    `• Controls：${displayControls(after)}`,
+    `• Controls：${displayControls(after, controls)}`,
   ].join("\n");
 }
 
@@ -1190,14 +1168,27 @@ function controlChangeLines(
   return lines.length > 0 ? lines : ["• 无实际变化"];
 }
 
-function displayControls(snapshot: SessionCapabilitiesSnapshot): string {
-  const options = (snapshot.configOptions ?? []).filter(
-    (option) => !isCoreProfileConfig(option) && !isPermissionLikeConfig(option),
-  );
-  if (options.length === 0) return "—";
-  return options
-    .map((option) => `${option.name}: ${displayConfigCurrentValue(option)}`)
+function displayControls(
+  snapshot: SessionCapabilitiesSnapshot,
+  changed: SessionControlPatch,
+): string {
+  const configIds = Object.keys(changed.config ?? {});
+  if (configIds.length === 0) return "—";
+  return configIds
+    .map((configId) => {
+      const option = snapshot.configOptions?.find((candidate) => candidate.id === configId);
+      return option
+        ? `${option.name}: ${displayConfigCurrentValue(option)}`
+        : `${configId}: ${displayStoredControlConfigValue(changed.config![configId]!)}`;
+    })
     .join(" · ");
+}
+
+function displayStoredControlConfigValue(
+  value: NonNullable<SessionControls["config"]>[string],
+): string {
+  if ("type" in value && value.type === "boolean") return value.value ? "on" : "off";
+  return String(value.value);
 }
 
 function displayConfigName(snapshot: SessionCapabilitiesSnapshot, configId: string): string {
@@ -1241,6 +1232,13 @@ export function validateSessionControls(
   }
 
   for (const [configId, value] of Object.entries(controls.config ?? {})) {
+    if (isCoreProfileConfigId(configId)) {
+      throw new ControlApplyError(
+        "Config",
+        configId,
+        `core profile field must be set with ${coreProfileConfigFieldHint(configId)}, not controls.config`,
+      );
+    }
     const option = snapshot.configOptions?.find((candidate) => candidate.id === configId);
     if (!option) {
       throw new ControlApplyError("Config", configId, "configId is not in configOptions");
@@ -1371,6 +1369,14 @@ function filterSessionControls(
 
   const validConfig: Record<string, SessionConfigControlValue> = {};
   for (const [configId, value] of Object.entries(controls.config ?? {})) {
+    if (isCoreProfileConfigId(configId)) {
+      ignored.push({
+        kind: "Config",
+        target: configId,
+        reason: `core profile field must be set with ${coreProfileConfigFieldHint(configId)}, not controls.config`,
+      });
+      continue;
+    }
     const option = snapshot.configOptions?.find((candidate) => candidate.id === configId);
     if (!option) {
       ignored.push({
@@ -1417,6 +1423,31 @@ function filterSessionControls(
   }
 
   return { controls: out, ignored };
+}
+
+function isCoreProfileConfigId(configId: string): boolean {
+  const normalized = normalizeCoreProfileConfigId(configId);
+  return normalized === "agent" || normalized === "mode" || normalized === "model";
+}
+
+function coreProfileConfigFieldHint(configId: string): string {
+  switch (normalizeCoreProfileConfigId(configId)) {
+    case "agent":
+      return "PendingTargetProfile.agentLabel/agentCommand";
+    case "mode":
+      return "controls.modeId";
+    case "model":
+      return "controls.modelId";
+    default:
+      return "the matching top-level profile/control field";
+  }
+}
+
+function normalizeCoreProfileConfigId(configId: string): string {
+  return configId
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
 }
 
 function selectOptionValues(

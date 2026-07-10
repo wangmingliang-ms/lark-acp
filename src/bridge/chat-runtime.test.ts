@@ -819,7 +819,8 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     });
     expect(noticeUpdates.at(-1)?.body).toContain("Agent：copilot");
     expect(noticeUpdates.at(-1)?.body).toContain("Model：Old → New");
-    expect(noticeUpdates.at(-1)?.body).toContain("Reasoning Effort: high");
+    expect(noticeUpdates.at(-1)?.body).toContain("Controls：—");
+    expect(noticeUpdates.at(-1)?.body).not.toContain("Reasoning Effort: high");
     expect(noticeUpdates.at(-1)?.body).not.toContain("Controls：Agent:");
     expect(noticeUpdates.at(-1)?.body).not.toContain("Mode: agent");
     expect(noticeUpdates.at(-1)?.body).not.toContain("Model: model-old");
@@ -1164,7 +1165,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(notice?.body).toContain("Control Auto Edit：off → on");
     expect(notice?.body).toContain("Control Approval Mode：Ask → Auto");
     expect(notice?.body).toContain("Permission：Auto Edit: on · Approval Mode: Auto");
-    expect(notice?.body).toContain("Controls：—");
+    expect(notice?.body).toContain("Controls：Auto Edit: on · Approval Mode: Auto");
   });
 
   it("rejects invalid controls without mutating runtime or persisted session", async () => {
