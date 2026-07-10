@@ -100,10 +100,14 @@ export class ChatRuntime {
   private aborted = false;
   /** True after the user pressed Stop or sent /cancel for the in-flight prompt. */
   private cancelRequested = false;
+  /** True after a busy follow-up requested a soft cancel of the current prompt. */
+  private followupInterruptRequested = false;
   /** Suppress the prompt-error notice when this runtime is intentionally replaced. */
   private suppressPromptErrorNotice = false;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
   private promptInFlight = false;
+  /** Follow-up messages preserved across a respawn after an interrupt closed the agent. */
+  private readonly queuedAfterRespawn: PendingMessage[] = [];
   /**
    * Set while the first message is bootstrapping the agent (spawn +
    * initialize + newSession/resume), a window that can take many seconds.
@@ -156,6 +160,7 @@ export class ChatRuntime {
       // message should spawn a fresh agent, not inherit the old aborted flag.
       this.aborted = false;
       this.cancelRequested = false;
+      this.followupInterruptRequested = false;
       this.booting = true;
       try {
         this.state = await this.bootstrap(message);
@@ -170,9 +175,42 @@ export class ChatRuntime {
     this.state.lastActivity = Date.now();
     this.state.queue.push(message);
 
-    if (!this.state.processing) {
-      this.state.processing = true;
-      this.processQueue().catch((err) => this.logger.error({ err }, "queue processor crashed"));
+    if (this.state.processing || this.promptInFlight) {
+      await this.interruptCurrentPromptForFollowup(this.state, message);
+      return;
+    }
+
+    this.state.processing = true;
+    this.processQueue().catch((err) => this.logger.error({ err }, "queue processor crashed"));
+  }
+
+  /**
+   * Soft-interrupt the in-flight prompt so a queued user follow-up can run next.
+   * The queue is intentionally preserved; unlike `/cancel`, the new message is
+   * the work the user wants next, not something to discard.
+   */
+  private async interruptCurrentPromptForFollowup(
+    state: ChatRuntimeState,
+    message: PendingMessage,
+  ): Promise<void> {
+    if (this.followupInterruptRequested) return;
+    this.followupInterruptRequested = true;
+    state.client.cancelPendingPermission();
+    const depth = state.queue.length;
+    await this.opts.presenter
+      .replyNoticeCard(message.messageId, {
+        title: "⚡ 正在中断当前任务",
+        body:
+          depth > 1
+            ? `已收到新消息，正在中断当前任务；后面还有 ${depth} 条消息排队。`
+            : "已收到新消息，正在中断当前任务；稍后会优先处理这条消息。",
+        template: "blue",
+      })
+      .catch((err) => this.logger.warn({ err }, "busy follow-up interrupt notice failed"));
+    try {
+      await state.agent.connection.cancel({ sessionId: state.agent.sessionId });
+    } catch (err) {
+      this.logger.warn({ err }, "busy follow-up cancel notification rejected");
     }
   }
 
@@ -689,7 +727,11 @@ export class ChatRuntime {
     if (!state) return;
 
     try {
-      while (state.queue.length > 0 && !this.aborted) {
+      while (!this.aborted) {
+        if (state.queue.length === 0) {
+          if (this.queuedAfterRespawn.length === 0) break;
+          state.queue.push(...this.queuedAfterRespawn.splice(0));
+        }
         const pending = state.queue.shift()!;
         state.lastMessageId = pending.messageId;
 
@@ -708,10 +750,15 @@ export class ChatRuntime {
         } finally {
           this.promptInFlight = false;
           this.cancelRequested = false;
+          this.followupInterruptRequested = false;
         }
       }
     } finally {
       if (this.state) this.state.processing = false;
+      if (!this.state && this.queuedAfterRespawn.length > 0 && !this.aborted) {
+        const next = this.queuedAfterRespawn.shift()!;
+        await this.enqueue(next);
+      }
     }
   }
 
@@ -904,12 +951,15 @@ export class ChatRuntime {
     const disconnected = err instanceof AgentDisconnectedError;
     const procDead = state.agent.process.killed || state.agent.process.exitCode !== null;
     const cancelRequested = this.cancelRequested;
+    const followupInterruptRequested = this.followupInterruptRequested;
     const suppressNotice = this.suppressPromptErrorNotice;
     const exitCode = state.agent.process.exitCode;
     const signal = state.agent.process.signalCode;
     const stderrTail = procDead ? state.agent.getRecentStderr() : [];
     const terminalStatus: AgentStatus =
-      (cancelRequested || suppressNotice) && !isAuthError ? "cancelled" : "failed";
+      (cancelRequested || followupInterruptRequested || suppressNotice) && !isAuthError
+        ? "cancelled"
+        : "failed";
 
     // Always finalize the unified card so the in-progress state doesn't get
     // stuck. Best-effort — if presenter rejects we still surface the error via
@@ -920,6 +970,20 @@ export class ChatRuntime {
 
     if (suppressNotice) {
       this.suppressPromptErrorNotice = false;
+      return;
+    }
+
+    // A follow-up interrupt may close the ACP connection instead of returning a
+    // clean cancelled prompt. Preserve queued follow-ups, respawn the runtime on
+    // the next queue iteration, and avoid surfacing a scary crash notice: the
+    // user already saw the "interrupting" acknowledgement for this transition.
+    if (followupInterruptRequested && !isAuthError && (procDead || disconnected)) {
+      this.logger.info({ err, disconnected }, "agent closed after busy follow-up interrupt");
+      const queuedFollowups = state.queue.splice(0);
+      this.queuedAfterRespawn.push(...queuedFollowups);
+      this.state = null;
+      this.followupInterruptRequested = false;
+      this.cancelRequested = false;
       return;
     }
 

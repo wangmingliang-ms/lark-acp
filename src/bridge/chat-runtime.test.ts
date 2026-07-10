@@ -191,6 +191,10 @@ interface FakeAgentHandle {
   exitProcess: (code: number | null, signal?: NodeJS.Signals | null) => void;
   /** Simulate the agent process's stdout/stream closing (process died). */
   closeConnection: () => void;
+  /** Number of ACP cancel notifications sent to this fake agent. */
+  cancelCalls: () => number;
+  /** Prompt texts delivered to ACP in order. */
+  prompts: () => readonly string[];
 }
 
 /**
@@ -209,6 +213,8 @@ function makeFakeAgent(): FakeAgentHandle {
 
   const promptResolvers: Array<(r: acp.PromptResponse) => void> = [];
   const queuedPromptResponses: acp.PromptResponse[] = [];
+  const promptTexts: string[] = [];
+  let cancelCallCount = 0;
 
   let exitHandler: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = null;
   const proc = {
@@ -224,16 +230,20 @@ function makeFakeAgent(): FakeAgentHandle {
   const connection = {
     // Stays pending until `resolvePrompt` is called — the crux of the bug is
     // that the SDK never rejects this when the stream closes.
-    prompt: () =>
-      new Promise<acp.PromptResponse>((resolve) => {
+    prompt: (params: acp.PromptRequest) => {
+      promptTexts.push(promptToText(params.prompt));
+      return new Promise<acp.PromptResponse>((resolve) => {
         const queued = queuedPromptResponses.shift();
         if (queued) {
           resolve(queued);
           return;
         }
         promptResolvers.push(resolve);
-      }),
-    cancel: async () => {},
+      });
+    },
+    cancel: async () => {
+      cancelCallCount += 1;
+    },
     unstable_setSessionModel: async () => ({}),
     setSessionMode: async () => ({}),
     setSessionConfigOption: async () => ({ configOptions: [] }),
@@ -300,7 +310,13 @@ function makeFakeAgent(): FakeAgentHandle {
       abort.abort();
       resolveClosed();
     },
+    cancelCalls: () => cancelCallCount,
+    prompts: () => [...promptTexts],
   };
+}
+
+function promptToText(prompt: readonly acp.ContentBlock[]): string {
+  return prompt.map((block) => (block.type === "text" ? block.text : `[${block.type}]`)).join("\n");
 }
 
 async function waitForCardFlush(): Promise<void> {
@@ -395,6 +411,88 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       timeout: 1_000,
       interval: 20,
     });
+  });
+
+  it("interrupts an in-flight prompt when a follow-up user message is queued", async () => {
+    const states: UnifiedCardState[] = [];
+    const notices: Array<{ title: string; body: string; template: string }> = [];
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states, notices),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first long task" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1), {
+      timeout: 1_000,
+      interval: 20,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "urgent follow-up" }],
+      messageId: "om_followup",
+      chatId: "oc_test",
+    });
+
+    expect(fake.cancelCalls()).toBe(1);
+    expect(notices.at(-1)).toMatchObject({ title: "⚡ 正在中断当前任务", template: "blue" });
+
+    fake.resolvePrompt("cancelled");
+
+    await vi.waitFor(
+      () => {
+        expect(fake.prompts()).toHaveLength(2);
+        expect(fake.prompts()[1]).toContain("urgent follow-up");
+      },
+      { timeout: 1_000, interval: 20 },
+    );
+  });
+
+  it("respawns and preserves the queued follow-up if interrupt closes the agent", async () => {
+    const states: UnifiedCardState[] = [];
+    const notices: Array<{ title: string; body: string; template: string }> = [];
+    const first = makeFakeAgent();
+    const second = makeFakeAgent();
+    spawnAgentMock.mockResolvedValueOnce(first.agent).mockResolvedValueOnce(second.agent);
+
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states, notices),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first long task" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(first.prompts()).toHaveLength(1), {
+      timeout: 1_000,
+      interval: 20,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "urgent follow-up after crash" }],
+      messageId: "om_followup",
+      chatId: "oc_test",
+    });
+    first.closeConnection();
+
+    await vi.waitFor(
+      () => {
+        expect(second.prompts()).toHaveLength(1);
+        expect(second.prompts()[0]).toContain("urgent follow-up after crash");
+      },
+      { timeout: 1_000, interval: 20 },
+    );
+    expect(notices.some((notice) => notice.title === "⚠️ Agent 异常退出")).toBe(false);
   });
 
   it("marks the card cancelled when a requested cancellation closes the agent connection", async () => {
