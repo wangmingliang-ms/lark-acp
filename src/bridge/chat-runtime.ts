@@ -1074,10 +1074,34 @@ function isPermissionLikeConfig(
     haystack.includes("approval") ||
     haystack.includes("approve") ||
     haystack.includes("bypass") ||
+    haystack.includes("allow all") ||
+    haystack.includes("allow_all") ||
     haystack.includes("edit automatically") ||
     haystack.includes("auto edit") ||
     haystack.includes("auto-edit")
   );
+}
+
+function isCoreProfileConfig(
+  option: NonNullable<SessionCapabilitiesSnapshot["configOptions"]>[number],
+): boolean {
+  const id = normalizeProfileConfigKey(option.id);
+  const name = normalizeProfileConfigKey(option.name);
+  return (
+    id === "agent" ||
+    id === "mode" ||
+    id === "model" ||
+    name === "agent" ||
+    name === "mode" ||
+    name === "model"
+  );
+}
+
+function normalizeProfileConfigKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
 }
 
 function displayConfigCurrentValue(
@@ -1167,7 +1191,9 @@ function controlChangeLines(
 }
 
 function displayControls(snapshot: SessionCapabilitiesSnapshot): string {
-  const options = snapshot.configOptions ?? [];
+  const options = (snapshot.configOptions ?? []).filter(
+    (option) => !isCoreProfileConfig(option) && !isPermissionLikeConfig(option),
+  );
   if (options.length === 0) return "—";
   return options
     .map((option) => `${option.name}: ${displayConfigCurrentValue(option)}`)

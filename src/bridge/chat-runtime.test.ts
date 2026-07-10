@@ -726,6 +726,28 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
   it("applies controls queued during an in-flight turn as soon as that turn finishes", async () => {
     const fake = makeFakeAgent();
+    fake.agent.sessionCapabilities = {
+      ...fake.agent.sessionCapabilities,
+      configOptions: [
+        { id: "agent", name: "Agent", type: "select", currentValue: "copilot", options: [] },
+        { id: "mode", name: "Mode", type: "select", currentValue: "agent", options: [] },
+        {
+          id: "model",
+          name: "Model",
+          type: "select",
+          currentValue: "model-old",
+          options: [],
+        },
+        {
+          id: "reasoning",
+          name: "Reasoning Effort",
+          type: "select",
+          currentValue: "high",
+          options: [],
+        },
+        { id: "allow_all", name: "Allow All", type: "boolean", currentValue: false },
+      ],
+    } as AgentProcess["sessionCapabilities"];
     const setModel = vi.fn(async () => ({}));
     const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
     fake.agent.connection = {
@@ -760,6 +782,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       ...opts(),
       presenter: recordingPresenter([], notices, noticeUpdates),
       sessionStore: store,
+      agentLabel: "copilot",
     });
 
     await runtime.enqueue({
@@ -794,6 +817,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       title: "✅ 排队的 Session profile 已生效",
       template: "green",
     });
+    expect(noticeUpdates.at(-1)?.body).toContain("Agent：copilot");
+    expect(noticeUpdates.at(-1)?.body).toContain("Model：Old → New");
+    expect(noticeUpdates.at(-1)?.body).toContain("Reasoning Effort: high");
+    expect(noticeUpdates.at(-1)?.body).not.toContain("Controls：Agent:");
+    expect(noticeUpdates.at(-1)?.body).not.toContain("Mode: agent");
+    expect(noticeUpdates.at(-1)?.body).not.toContain("Model: model-old");
+    expect(noticeUpdates.at(-1)?.body).not.toContain("Controls：Allow All:");
   });
 
   it("runs a pending task immediately after current-turn controls become live", async () => {
@@ -1133,7 +1163,8 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(notice?.body).toContain("Permission：Auto approve → Ask approvals");
     expect(notice?.body).toContain("Control Auto Edit：off → on");
     expect(notice?.body).toContain("Control Approval Mode：Ask → Auto");
-    expect(notice?.body).toContain("Controls：Auto Edit: on · Approval Mode: Auto");
+    expect(notice?.body).toContain("Permission：Auto Edit: on · Approval Mode: Auto");
+    expect(notice?.body).toContain("Controls：—");
   });
 
   it("rejects invalid controls without mutating runtime or persisted session", async () => {
