@@ -692,6 +692,12 @@ type ParsedArgs = {
   readonly controlJson?: string | boolean;
   readonly controlJsonFile?: string;
   readonly controlJsonStdin?: boolean;
+  readonly controlModelId?: string;
+  readonly controlClearModelId?: boolean;
+  readonly controlModeId?: string;
+  readonly controlPermissionMode?: PermissionMode;
+  readonly controlConfig?: readonly string[];
+  readonly controlBoolConfig?: readonly string[];
   readonly promptText?: string;
   readonly promptFile?: string;
   readonly promptStdin?: boolean;
@@ -898,6 +904,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       readonly controlJson?: string | boolean;
       readonly controlJsonFile?: string;
       readonly controlJsonStdin?: boolean;
+      readonly controlModelId?: string;
+      readonly controlClearModelId?: boolean;
+      readonly controlModeId?: string;
+      readonly controlPermissionMode?: PermissionMode;
+      readonly controlConfig?: readonly string[];
+      readonly controlBoolConfig?: readonly string[];
       readonly promptText?: string;
       readonly promptFile?: string;
       readonly promptStdin?: boolean;
@@ -936,6 +948,18 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       ...(extra.controlJson !== undefined ? { controlJson: extra.controlJson } : {}),
       ...(extra.controlJsonFile !== undefined ? { controlJsonFile: extra.controlJsonFile } : {}),
       ...(extra.controlJsonStdin !== undefined ? { controlJsonStdin: extra.controlJsonStdin } : {}),
+      ...(extra.controlModelId !== undefined ? { controlModelId: extra.controlModelId } : {}),
+      ...(extra.controlClearModelId !== undefined
+        ? { controlClearModelId: extra.controlClearModelId }
+        : {}),
+      ...(extra.controlModeId !== undefined ? { controlModeId: extra.controlModeId } : {}),
+      ...(extra.controlPermissionMode !== undefined
+        ? { controlPermissionMode: extra.controlPermissionMode }
+        : {}),
+      ...(extra.controlConfig !== undefined ? { controlConfig: extra.controlConfig } : {}),
+      ...(extra.controlBoolConfig !== undefined
+        ? { controlBoolConfig: extra.controlBoolConfig }
+        : {}),
       ...(extra.promptText !== undefined ? { promptText: extra.promptText } : {}),
       ...(extra.promptFile !== undefined ? { promptFile: extra.promptFile } : {}),
       ...(extra.promptStdin !== undefined ? { promptStdin: extra.promptStdin } : {}),
@@ -1057,6 +1081,12 @@ function parseSessionsFlags(
   readonly controlJson?: string | boolean;
   readonly controlJsonFile?: string;
   readonly controlJsonStdin?: boolean;
+  readonly controlModelId?: string;
+  readonly controlClearModelId?: boolean;
+  readonly controlModeId?: string;
+  readonly controlPermissionMode?: PermissionMode;
+  readonly controlConfig?: readonly string[];
+  readonly controlBoolConfig?: readonly string[];
   readonly promptText?: string;
   readonly promptFile?: string;
   readonly promptStdin?: boolean;
@@ -1082,10 +1112,10 @@ function parseSessionsFlags(
     if (!parsed.agent) {
       throw new CliError("sessions set-pending-target-profile requires --agent <preset>");
     }
-    const controlInputs = countControlJsonInputs(parsed.json, parsed.jsonFile, parsed.jsonStdin);
+    const controlInputs = countControlInputs(parsed);
     if (controlInputs > 1) {
       throw new CliError(
-        "sessions set-pending-target-profile accepts at most one of --json <json>, --json-file <path>, or --json-stdin",
+        "sessions set-pending-target-profile accepts at most one controls source: --json/--json-file/--json-stdin or split flags",
       );
     }
     const promptInputs = countPromptInputs(parsed.prompt, parsed.promptFile, parsed.promptStdin);
@@ -1102,6 +1132,7 @@ function parseSessionsFlags(
       ...(typeof parsed.json === "string" ? { controlJson: parsed.json } : {}),
       ...(parsed.jsonFile !== undefined ? { controlJsonFile: parsed.jsonFile } : {}),
       ...(parsed.jsonStdin !== undefined ? { controlJsonStdin: parsed.jsonStdin } : {}),
+      ...includeSplitControlFlags(parsed),
       ...(parsed.prompt !== undefined ? { promptText: parsed.prompt } : {}),
       ...(parsed.promptFile !== undefined ? { promptFile: parsed.promptFile } : {}),
       ...(parsed.promptStdin !== undefined ? { promptStdin: parsed.promptStdin } : {}),
@@ -1134,10 +1165,10 @@ function parseSessionsFlags(
   }
   if (action === "set-control") {
     if (!parsed.chatId) throw new CliError("sessions set-control requires --chat-id <id>");
-    const inputCount = countControlJsonInputs(parsed.json, parsed.jsonFile, parsed.jsonStdin);
+    const inputCount = countControlInputs(parsed);
     if (inputCount !== 1) {
       throw new CliError(
-        "sessions set-control requires exactly one of --json <json>, --json-file <path>, or --json-stdin",
+        "sessions set-control requires exactly one controls source: --json/--json-file/--json-stdin or split flags",
       );
     }
     return {
@@ -1147,6 +1178,7 @@ function parseSessionsFlags(
       ...(typeof parsed.json === "string" ? { controlJson: parsed.json } : {}),
       ...(parsed.jsonFile !== undefined ? { controlJsonFile: parsed.jsonFile } : {}),
       ...(parsed.jsonStdin !== undefined ? { controlJsonStdin: parsed.jsonStdin } : {}),
+      ...includeSplitControlFlags(parsed),
     };
   }
   if (action === "queue-task") {
@@ -1206,6 +1238,61 @@ function countControlJsonInputs(
     .length;
 }
 
+function hasSplitControlFlags(parsed: {
+  readonly modelId?: string;
+  readonly clearModelId?: boolean;
+  readonly modeId?: string;
+  readonly bridgePermissionMode?: PermissionMode;
+  readonly config?: readonly string[];
+  readonly boolConfig?: readonly string[];
+}): boolean {
+  return (
+    parsed.modelId !== undefined ||
+    parsed.clearModelId === true ||
+    parsed.modeId !== undefined ||
+    parsed.bridgePermissionMode !== undefined ||
+    (parsed.config?.length ?? 0) > 0 ||
+    (parsed.boolConfig?.length ?? 0) > 0
+  );
+}
+
+function countControlInputs(parsed: {
+  readonly json?: string | boolean;
+  readonly jsonFile?: string;
+  readonly jsonStdin?: boolean;
+  readonly modelId?: string;
+  readonly clearModelId?: boolean;
+  readonly modeId?: string;
+  readonly bridgePermissionMode?: PermissionMode;
+  readonly config?: readonly string[];
+  readonly boolConfig?: readonly string[];
+}): number {
+  return (
+    countControlJsonInputs(parsed.json, parsed.jsonFile, parsed.jsonStdin) +
+    (hasSplitControlFlags(parsed) ? 1 : 0)
+  );
+}
+
+function includeSplitControlFlags(parsed: {
+  readonly modelId?: string;
+  readonly clearModelId?: boolean;
+  readonly modeId?: string;
+  readonly bridgePermissionMode?: PermissionMode;
+  readonly config?: readonly string[];
+  readonly boolConfig?: readonly string[];
+}): Partial<ParsedArgs> {
+  return {
+    ...(parsed.modelId !== undefined ? { controlModelId: parsed.modelId } : {}),
+    ...(parsed.clearModelId !== undefined ? { controlClearModelId: parsed.clearModelId } : {}),
+    ...(parsed.modeId !== undefined ? { controlModeId: parsed.modeId } : {}),
+    ...(parsed.bridgePermissionMode !== undefined
+      ? { controlPermissionMode: parsed.bridgePermissionMode }
+      : {}),
+    ...(parsed.config !== undefined ? { controlConfig: parsed.config } : {}),
+    ...(parsed.boolConfig !== undefined ? { controlBoolConfig: parsed.boolConfig } : {}),
+  };
+}
+
 function countPromptInputs(
   prompt: string | undefined,
   promptFile: string | undefined,
@@ -1227,6 +1314,12 @@ function parseTargetFlags(
   readonly json?: string | boolean;
   readonly jsonFile?: string;
   readonly jsonStdin?: boolean;
+  readonly modelId?: string;
+  readonly clearModelId?: boolean;
+  readonly modeId?: string;
+  readonly bridgePermissionMode?: PermissionMode;
+  readonly config?: readonly string[];
+  readonly boolConfig?: readonly string[];
   readonly prompt?: string;
   readonly promptFile?: string;
   readonly promptStdin?: boolean;
@@ -1239,6 +1332,12 @@ function parseTargetFlags(
   let json: string | boolean | undefined;
   let jsonFile: string | undefined;
   let jsonStdin: boolean | undefined;
+  let modelId: string | undefined;
+  let clearModelId: boolean | undefined;
+  let modeId: string | undefined;
+  let bridgePermissionMode: PermissionMode | undefined;
+  const config: string[] = [];
+  const boolConfig: string[] = [];
   let prompt: string | undefined;
   let promptFile: string | undefined;
   let promptStdin: boolean | undefined;
@@ -1299,6 +1398,50 @@ function parseTargetFlags(
       i += 1;
       continue;
     }
+    if (token === "--model") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--model requires a value");
+      }
+      if (value === "auto") clearModelId = true;
+      else modelId = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--mode") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--mode requires a value");
+      }
+      modeId = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--permission") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--permission requires a value");
+      }
+      if (!isPermissionMode(value)) {
+        throw new CliError(`--permission must be one of: ${PERMISSION_MODES.join(" | ")}`);
+      }
+      bridgePermissionMode = value;
+      i += 2;
+      continue;
+    }
+    if (token === "--config") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--config requires <configId=value>");
+      }
+      config.push(value);
+      i += 2;
+      continue;
+    }
+    if (token === "--bool-config") {
+      if (value === undefined || value.startsWith("--")) {
+        throw new CliError("--bool-config requires <configId=true|false>");
+      }
+      boolConfig.push(value);
+      i += 2;
+      continue;
+    }
     if (token === "--prompt") {
       if (value === undefined || value.startsWith("--")) {
         throw new CliError("--prompt requires a value");
@@ -1348,6 +1491,12 @@ function parseTargetFlags(
     ...(json !== undefined ? { json } : {}),
     ...(jsonFile !== undefined ? { jsonFile } : {}),
     ...(jsonStdin !== undefined ? { jsonStdin } : {}),
+    ...(modelId !== undefined ? { modelId } : {}),
+    ...(clearModelId !== undefined ? { clearModelId } : {}),
+    ...(modeId !== undefined ? { modeId } : {}),
+    ...(bridgePermissionMode !== undefined ? { bridgePermissionMode } : {}),
+    ...(config.length > 0 ? { config } : {}),
+    ...(boolConfig.length > 0 ? { boolConfig } : {}),
     ...(prompt !== undefined ? { prompt } : {}),
     ...(promptFile !== undefined ? { promptFile } : {}),
     ...(promptStdin !== undefined ? { promptStdin } : {}),
@@ -1814,8 +1963,8 @@ function printHelp(): void {
     `  ${APP_NAME} sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]`,
     `  ${APP_NAME} sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>`,
     `  ${APP_NAME} sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>`,
-    `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'`,
-    `  ${APP_NAME} sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--json '<controls>'] [--prompt <text>]`,
+    `  ${APP_NAME} sessions set-control --chat-id <id> [--thread-id <id>] (--model <id|auto> | --mode <id> | --permission <mode> | --json '<controls>')`,
+    `  ${APP_NAME} sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--model <id|auto>] [--prompt <text>]`,
     `  ${APP_NAME} sessions queue-task --chat-id <id> [--thread-id <id>] --prompt <text>`,
     `  ${APP_NAME} agents`,
     `  ${APP_NAME} help`,
@@ -1890,12 +2039,13 @@ function printHelp(): void {
     `                         Start a short-lived probe session for the selected`,
     `                         agent and print its model/mode/config capabilities`,
     `                         without changing the current topic session.`,
-    `  sessions set-control --chat-id <id> [--thread-id <id>] (--json '<controls>' | --json-file <path> | --json-stdin)`,
+    `  sessions set-control --chat-id <id> [--thread-id <id>] (--model <id|auto> | --mode <id> | --permission <mode> | --config <id=value> | --bool-config <id=true|false> | --json '<controls>' | --json-file <path> | --json-stdin)`,
     `                         Persist controls to sessions.json and apply them to`,
-    `                         the live runtime when present. The controls JSON uses`,
+    `                         the live runtime when present. Split flags avoid`,
+    `                         shell JSON quoting issues; JSON payloads still use`,
     `                         ACP-shaped fields: modelId, modeId, config, plus`,
     `                         humming bridgePermissionMode.`,
-    `  sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--json '<controls>'] [--prompt <text>]`,
+    `  sessions set-pending-target-profile --chat-id <id> [--thread-id <id>] --agent <preset> [--model <id|auto>] [--mode <id>] [--permission <mode>] [--prompt <text>]`,
     `                         Atomically queue Agent + controls + optional task`,
     `                         as one pending target profile for post-turn handoff.`,
     `  sessions queue-task --chat-id <id> [--thread-id <id>] (--prompt <text> | --prompt-file <path> | --prompt-stdin | -- <task...>)`,
@@ -2001,6 +2151,81 @@ function printAgents(registry: Registry): void {
   process.stdout.write(lines.join("\n"));
 }
 
+function readControlPatchInput(
+  args: ParsedArgs,
+  opts: { readonly required: boolean },
+): SessionControlPatch | undefined {
+  if (hasInlineControlInput(args)) return parseControlJson(readControlJsonInput(args));
+  if (!hasSplitControlInput(args)) {
+    if (opts.required) throw new CliError("sessions set-control requires a controls payload");
+    return undefined;
+  }
+  const raw: Record<string, unknown> = {};
+  if (args.controlModelId !== undefined) raw["modelId"] = args.controlModelId;
+  if (args.controlClearModelId === true) raw["clearModelId"] = true;
+  if (args.controlModeId !== undefined) raw["modeId"] = args.controlModeId;
+  if (args.controlPermissionMode !== undefined) {
+    raw["bridgePermissionMode"] = args.controlPermissionMode;
+  }
+  const config: Record<
+    string,
+    { readonly value: string } | { readonly type: "boolean"; readonly value: boolean }
+  > = {};
+  for (const assignment of args.controlConfig ?? []) {
+    const [configId, value] = parseConfigAssignment(assignment, "--config");
+    config[configId] = { value };
+  }
+  for (const assignment of args.controlBoolConfig ?? []) {
+    const [configId, value] = parseConfigAssignment(assignment, "--bool-config");
+    if (value !== "true" && value !== "false") {
+      throw new CliError(`--bool-config ${configId} value must be true or false`);
+    }
+    config[configId] = { type: "boolean", value: value === "true" };
+  }
+  if (Object.keys(config).length > 0) raw["config"] = config;
+  return validateSessionControls(raw);
+}
+
+function hasInlineControlInput(args: ParsedArgs): boolean {
+  return (
+    typeof args.controlJson === "string" ||
+    args.controlJsonFile !== undefined ||
+    args.controlJsonStdin === true
+  );
+}
+
+function hasSplitControlInput(args: ParsedArgs): boolean {
+  return (
+    args.controlModelId !== undefined ||
+    args.controlClearModelId === true ||
+    args.controlModeId !== undefined ||
+    args.controlPermissionMode !== undefined ||
+    (args.controlConfig?.length ?? 0) > 0 ||
+    (args.controlBoolConfig?.length ?? 0) > 0
+  );
+}
+
+function parseConfigAssignment(assignment: string, flag: string): readonly [string, string] {
+  const eq = assignment.indexOf("=");
+  if (eq <= 0 || eq === assignment.length - 1) {
+    throw new CliError(`${flag} requires <configId=value>`);
+  }
+  return [assignment.slice(0, eq), assignment.slice(eq + 1)];
+}
+
+const RESERVED_CONFIG_CONTROL_FIELDS = new Map<string, string>([
+  ["agent", "agent"],
+  ["mode", "modeId"],
+  ["model", "modelId"],
+]);
+
+function normalizeReservedControlField(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
 function parseControlJson(raw: string): SessionControlPatch {
   let parsed: unknown;
   try {
@@ -2070,6 +2295,12 @@ function validateSessionControls(value: unknown): SessionControlPatch {
       { readonly type: "boolean"; readonly value: boolean } | { readonly value: string }
     > = {};
     for (const [configId, rawValue] of Object.entries(config)) {
+      const reserved = RESERVED_CONFIG_CONTROL_FIELDS.get(normalizeReservedControlField(configId));
+      if (reserved !== undefined) {
+        throw new CliError(
+          `controls.config.${configId} is reserved for ${reserved}; set ${reserved} as a top-level control instead`,
+        );
+      }
       if (!isRecord(rawValue)) throw new CliError(`controls.config.${configId} must be an object`);
       const type = rawValue["type"];
       const optionValue = rawValue["value"];
@@ -2423,14 +2654,6 @@ async function runSessionSetAgent(args: ParsedArgs): Promise<void> {
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
 }
 
-function hasControlInput(args: ParsedArgs): boolean {
-  return (
-    typeof args.controlJson === "string" ||
-    args.controlJsonFile !== undefined ||
-    args.controlJsonStdin === true
-  );
-}
-
 function hasPromptInput(args: ParsedArgs): boolean {
   return (
     args.promptText !== undefined || args.promptFile !== undefined || args.promptStdin === true
@@ -2464,7 +2687,7 @@ async function runSessionSetPendingTargetProfile(args: ParsedArgs): Promise<void
     );
   }
 
-  const controls = hasControlInput(args) ? parseControlJson(readControlJsonInput(args)) : undefined;
+  const controls = readControlPatchInput(args, { required: false });
   const prompt = hasPromptInput(args) ? readPromptInput(args).trim() : undefined;
   if (prompt !== undefined && prompt.length === 0) {
     throw new CliError("sessions set-pending-target-profile prompt must not be empty");
@@ -2576,11 +2799,11 @@ async function runSessions(args: ParsedArgs): Promise<void> {
   const chatId = args.targetChatId;
   if (!chatId) throw new CliError("sessions set-control requires --chat-id <id>");
 
-  const controls = parseControlJson(readControlJsonInput(args));
+  const controls = readControlPatchInput(args, { required: true });
   const homeDir = resolveHomeDir(args.home);
   const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
     method: "setControls",
-    params: { chatId, threadId: args.targetThreadId ?? null, controls },
+    params: { chatId, threadId: args.targetThreadId ?? null, controls: controls! },
   });
   if (!response.ok) throw new CliError(response.error);
   process.stdout.write(`${JSON.stringify(response.result, null, 2)}\n`);
@@ -3248,6 +3471,7 @@ export {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  readControlPatchInput,
   readControlJsonInput,
   readPromptInput,
   resolveSessionTargetContext,

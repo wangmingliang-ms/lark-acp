@@ -23,6 +23,7 @@ import {
   migrateLegacyIfNeeded,
   resolveHomeDir,
   parseControlJson,
+  readControlPatchInput,
   readControlJsonInput,
   resolveSessionTargetContext,
   runInit,
@@ -272,6 +273,68 @@ describe("parseArgs — control and session-control subcommands", () => {
     expect(args.promptText).toBe("do the task");
   });
 
+  it("rejects reserved core profile fields inside config JSON", () => {
+    expect(() => parseControlJson('{"config":{"model":{"value":"gpt-5.6-sol"}}}')).toThrowError(
+      /controls\.config\.model.*modelId.*top-level/,
+    );
+    expect(() => parseControlJson('{"config":{"Agent":{"value":"copilot"}}}')).toThrowError(
+      /controls\.config\.Agent.*agent.*top-level/,
+    );
+  });
+
+  it("parses split session control flags without requiring JSON", () => {
+    const args = parseArgs([
+      "sessions",
+      "set-control",
+      "--chat-id",
+      "oc_A",
+      "--model",
+      "gpt-5.5",
+      "--mode",
+      "agent",
+      "--permission",
+      "alwaysAllow",
+    ]);
+    expect(args.sessionsAction).toBe("set-control");
+    expect(args.controlJson).toBeUndefined();
+    expect(readControlPatchInput(args, { required: true })).toEqual({
+      modelId: "gpt-5.5",
+      modeId: "agent",
+      bridgePermissionMode: "alwaysAllow",
+    });
+  });
+
+  it("parses split pending target profile control flags only when an agent is named", () => {
+    const args = parseArgs([
+      "sessions",
+      "set-pending-target-profile",
+      "--chat-id",
+      "oc_A",
+      "--agent",
+      "copilot",
+      "--model",
+      "gpt-5.5",
+      "--prompt",
+      "do the task",
+    ]);
+    expect(args.sessionsAction).toBe("set-pending-target-profile");
+    expect(args.targetAgent).toBe("copilot");
+    expect(readControlPatchInput(args, { required: false })).toEqual({ modelId: "gpt-5.5" });
+
+    expect(() =>
+      parseArgs([
+        "sessions",
+        "set-pending-target-profile",
+        "--chat-id",
+        "oc_A",
+        "--model",
+        "gpt-5.5",
+        "--prompt",
+        "do the task",
+      ]),
+    ).toThrowError(/requires --agent/);
+  });
+
   it("parses set-control JSON file and stdin payload sources", () => {
     const fromFile = parseArgs([
       "sessions",
@@ -352,9 +415,9 @@ describe("parseArgs — control and session-control subcommands", () => {
     ).toThrowError(/exactly one of --prompt/);
   });
 
-  it("rejects ambiguous or missing set-control JSON payload sources", () => {
+  it("rejects ambiguous or missing set-control payload sources", () => {
     expect(() => parseArgs(["sessions", "set-control", "--chat-id", "oc_A"])).toThrowError(
-      /exactly one of --json/,
+      /exactly one controls source/,
     );
     expect(() =>
       parseArgs([
@@ -367,7 +430,7 @@ describe("parseArgs — control and session-control subcommands", () => {
         "--json-file",
         "controls.json",
       ]),
-    ).toThrowError(/exactly one of --json/);
+    ).toThrowError(/exactly one controls source/);
   });
 
   it("parses session list with optional cwd and agent", () => {
@@ -564,6 +627,12 @@ describe("parseControlJson", () => {
   it("rejects invalid permission modes", () => {
     expect(() => parseControlJson('{"bridgePermissionMode":"bypass"}')).toThrowError(
       /bridgePermissionMode/,
+    );
+  });
+
+  it("rejects core profile fields under config controls", () => {
+    expect(() => parseControlJson('{"config":{"model":{"value":"gpt-5.5"}}}')).toThrowError(
+      /controls\.config\.model.*modelId/,
     );
   });
 });

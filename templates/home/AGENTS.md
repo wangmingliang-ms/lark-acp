@@ -78,7 +78,24 @@ humming control agent-capabilities --agent copilot --json
 
 If the probe fails and a chat id is available, humming sends a `目标 Agent 不可用` notification to the user. Treat that as a hard blocker: do not switch Agent or write controls until the target Agent is installed/authenticated and the probe succeeds.
 
-Set controls with one JSON payload. Prefer `--json-file` or `--json-stdin` on Windows to avoid PowerShell 5.1 / npm shim quote rewriting:
+Set controls with split flags whenever possible. This avoids shell quoting issues and works on Windows PowerShell/cmd as well as bash:
+
+```bash
+humming sessions set-control --model <one models.availableModels[].modelId>
+humming sessions set-control --model auto
+humming sessions set-control --mode <one modes.availableModes[].id>
+humming sessions set-control --permission alwaysAsk
+humming sessions set-control --config <select-config-id>=<value-id>
+humming sessions set-control --bool-config <boolean-config-id>=true
+```
+
+Combine split flags in one command when the user asks to change several controls:
+
+```bash
+humming sessions set-control --model <model-id> --mode <mode-id> --permission alwaysAsk
+```
+
+JSON payloads are still supported for complex/bulk updates. Prefer `--json-file` or `--json-stdin` on Windows to avoid PowerShell 5.1 / npm shim quote rewriting:
 
 ```bash
 humming sessions set-control --json-file /absolute/path/to/controls.json
@@ -133,20 +150,20 @@ For natural-language Agent handoff, extract only these fields:
 - requested controls: `modelId`, `modeId`, `config`, `bridgePermissionMode`
 - residual task text
 
-Use exactly one command when the user message contains an Agent switch plus any controls or task:
+Use exactly one `set-pending-target-profile` command when the user message contains an Agent switch plus any controls or task:
 
 ```bash
 humming sessions set-pending-target-profile --agent <agent> \
-  --json-file /absolute/path/to/controls.json \
+  --model <model-id> \
   --prompt-file /absolute/path/to/task.md
 ```
 
-Omit `--json-file` when there are no controls. Omit `--prompt-file` when there is no task.
+Omit split control flags when there are no controls. Omit `--prompt-file` when there is no task. `set-pending-target-profile` requires `--agent`; for a Model/Mode/Permission/Config-only change with no Agent switch, always use `humming sessions set-control`, even if a previous Agent switch is already pending. Humming will merge `set-control` into the pending target profile when appropriate.
 
 Short inline form:
 
 ```bash
-humming sessions set-pending-target-profile --agent <agent> --json '{"modelId":"gpt-5.5"}' -- "<residual task>"
+humming sessions set-pending-target-profile --agent <agent> --model gpt-5.5 -- "<residual task>"
 ```
 
 For a pure Agent switch with no controls and no task, run:
