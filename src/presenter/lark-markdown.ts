@@ -18,11 +18,12 @@
  */
 
 import { marked, type Token, type Tokens } from "marked";
+import { splitUtf8 } from "./card-text-budget.js";
 
-/** Soft cap on a single chunk's markdown source length. Lark's post body
+/** Soft cap on a single chunk's UTF-8 byte size. Lark's post body
  *  itself can be large; this keeps any single reply within IM limits and
  *  avoids one runaway code block blocking the whole reply. */
-const MAX_MARKDOWN_CHUNK = 4000;
+const MAX_MARKDOWN_CHUNK_BYTES = 4000;
 
 /** Lark's `md` tag refuses to render fenced blocks that omit a language.
  *  Default to `plaintext` so a bare ``` fence still ends up as a code box. */
@@ -51,27 +52,15 @@ export function markdownToPost(text: string): PostPayload {
 }
 
 /**
- * Split a markdown blob into chunks no longer than `limit` characters,
+ * Split a markdown blob into chunks no larger than `limit` UTF-8 bytes,
  * preferring to break on paragraph boundaries (`\n\n`) and falling back
  * to single newlines. Code-fence boundaries are preferred when they sit
  * close to the limit so we don't split a fenced block in half.
  */
-export function splitMarkdown(text: string, limit = MAX_MARKDOWN_CHUNK): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > limit) {
-    let splitAt = remaining.lastIndexOf("\n```\n", limit);
-    if (splitAt <= 0) splitAt = remaining.lastIndexOf("\n\n", limit);
-    if (splitAt <= 0) splitAt = remaining.lastIndexOf("\n", limit);
-    if (splitAt <= 0) splitAt = limit;
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt).replace(/^\n+/, "");
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+export function splitMarkdown(text: string, limit = MAX_MARKDOWN_CHUNK_BYTES): string[] {
+  return splitUtf8(text, limit, ["\n```\n", "\n\n", "\n"]).map((chunk) =>
+    chunk.replace(/^\n+/, ""),
+  );
 }
 
 // ---- Block-level renderer ---------------------------------------------------

@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { Buffer } from "node:buffer";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
 import type {
@@ -11,16 +10,13 @@ import type {
   ToolStatus,
   SessionCardMeta,
 } from "../presenter/presenter.js";
+import {
+  CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
+  CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
+  utf8PartsByteLength,
+} from "../presenter/card-text-budget.js";
 
 const CARD_FLUSH_DEBOUNCE_MS = 100;
-// Feishu's own SDK documents the per markdown element ceiling as 30,000
-// characters for streaming card content; above that card updates fail with
-// code 230099 / ErrCode 11310 "element exceeds the limit".
-export const CARD_MARKDOWN_ELEMENT_CHAR_LIMIT = 30_000;
-// Prefer readability over maximum density. Once a card reaches this soft
-// threshold, wait for a safe structural boundary (the next tool call) and fold
-// earlier prose instead of cutting markdown in the middle.
-export const CARD_MARKDOWN_SOFT_CHAR_LIMIT = 4_096;
 
 const CARD_COMPACTION_NOTICE_PREFIX = "_前面内容较长，已在安全边界折叠_";
 
@@ -75,13 +71,13 @@ function entryTextSize(entry: TimelineEntry): number {
   switch (entry.kind) {
     case "text":
     case "thought":
-      return Buffer.byteLength(entry.text, "utf8");
+      return utf8PartsByteLength([entry.text]);
     case "tool":
-      return (
-        Buffer.byteLength(entry.title, "utf8") +
-        Buffer.byteLength(entry.toolKind, "utf8") +
-        (entry.detail ? Buffer.byteLength(entry.detail, "utf8") : 0)
-      );
+      return utf8PartsByteLength([
+        entry.title,
+        entry.toolKind,
+        ...(entry.detail ? [entry.detail] : []),
+      ]);
     default:
       return assertNeverEntry(entry);
   }
@@ -104,10 +100,10 @@ function compactionNoticeReason(reason: CardCompactionReason): string {
   }
 }
 
-function compactedEntry(removedChars: number, reason: CardCompactionReason): TimelineEntry {
+function compactedEntry(removedBytes: number, reason: CardCompactionReason): TimelineEntry {
   return {
     kind: "text",
-    text: `${CARD_COMPACTION_NOTICE_PREFIX}：${compactionNoticeReason(reason)}折叠约 ${removedChars.toLocaleString("en-US")} 个字符。完整内容请查看 Agent 本地会话记录或日志。`,
+    text: `${CARD_COMPACTION_NOTICE_PREFIX}：${compactionNoticeReason(reason)}折叠约 ${removedBytes.toLocaleString("en-US")} UTF-8 bytes。完整内容请查看 Agent 本地会话记录或日志。`,
   };
 }
 
@@ -521,6 +517,7 @@ export class HummingClient implements acp.Client {
     this.timeline = [];
     this.cardId = null;
     this.cardCreating = null;
+    this.needsBoundaryCompaction = false;
     this.status = "thinking";
   }
 
@@ -615,7 +612,7 @@ export class HummingClient implements acp.Client {
 
       case "tool_call": {
         if (!this.acceptingRenderableUpdates) return;
-        this.compactTimelineAtBoundary("tool");
+        await this.rotateConversationCardAtBoundary();
         if (!this.showTools) {
           this.scheduleFlush();
           return;
@@ -767,39 +764,35 @@ export class HummingClient implements acp.Client {
 
   private markCompactionNeededIfOverSoftLimit(): void {
     if (this.needsBoundaryCompaction) return;
-    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_SOFT_CHAR_LIMIT) {
+    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_ROTATION_BYTE_LIMIT) {
       this.needsBoundaryCompaction = true;
     }
   }
 
-  private compactTimelineAtBoundary(reason: CardCompactionReason): void {
+  private async rotateConversationCardAtBoundary(): Promise<void> {
     if (
       !this.needsBoundaryCompaction &&
-      timelineTextSize(this.timeline) < CARD_MARKDOWN_SOFT_CHAR_LIMIT
+      timelineTextSize(this.timeline) < CARD_MARKDOWN_ROTATION_BYTE_LIMIT
     ) {
       return;
     }
-    this.timeline = this.compactEntriesKeepingTail(
-      this.timeline,
-      reason,
-      CARD_MARKDOWN_SOFT_CHAR_LIMIT,
-    );
+    await this.finishCurrentConversationSegment();
     this.needsBoundaryCompaction = false;
   }
 
   private compactTimelineForFinalCard(): void {
-    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_SOFT_CHAR_LIMIT) {
+    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_ROTATION_BYTE_LIMIT) {
       this.timeline = this.compactEntriesKeepingTail(
         this.timeline,
         "final",
-        CARD_MARKDOWN_SOFT_CHAR_LIMIT,
+        CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
       );
     }
-    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_ELEMENT_CHAR_LIMIT) {
+    if (timelineTextSize(this.timeline) >= CARD_MARKDOWN_ELEMENT_BYTE_LIMIT) {
       this.timeline = this.compactEntriesKeepingTail(
         this.timeline,
         "emergency",
-        CARD_MARKDOWN_SOFT_CHAR_LIMIT,
+        CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
       );
     }
     this.needsBoundaryCompaction = false;
@@ -808,24 +801,24 @@ export class HummingClient implements acp.Client {
   private compactEntriesKeepingTail(
     entries: readonly TimelineEntry[],
     reason: CardCompactionReason,
-    targetChars: number,
+    targetBytes: number,
   ): TimelineEntry[] {
-    let tailLength = 0;
+    let tailBytes = 0;
     const kept: TimelineEntry[] = [];
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       const entry = entries[i];
       if (!entry) continue;
-      const nextLength = tailLength + entryTextSize(entry);
-      if (nextLength > targetChars) break;
+      const nextBytes = tailBytes + entryTextSize(entry);
+      if (nextBytes > targetBytes) break;
       kept.unshift(entry);
-      tailLength = nextLength;
+      tailBytes = nextBytes;
     }
 
     if (kept.length === entries.length) return [...entries];
     const keptCount = kept.length;
     const removed = entries.slice(0, entries.length - keptCount);
-    const removedChars = timelineTextSize(removed);
-    return [compactedEntry(removedChars, reason), ...kept];
+    const removedBytes = timelineTextSize(removed);
+    return [compactedEntry(removedBytes, reason), ...kept];
   }
 
   private upsertTool(
@@ -989,11 +982,11 @@ export class HummingClient implements acp.Client {
   }
 
   private previewEntriesForRender(): readonly TimelineEntry[] {
-    if (timelineTextSize(this.timeline) < CARD_MARKDOWN_ELEMENT_CHAR_LIMIT) return this.timeline;
+    if (timelineTextSize(this.timeline) < CARD_MARKDOWN_ELEMENT_BYTE_LIMIT) return this.timeline;
     return this.compactEntriesKeepingTail(
       this.timeline,
       "emergency",
-      CARD_MARKDOWN_SOFT_CHAR_LIMIT,
+      CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
     );
   }
 

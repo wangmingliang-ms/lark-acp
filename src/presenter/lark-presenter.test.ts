@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import {
-  COMMAND_RESULT_BODY_CHAR_LIMIT,
+  COMMAND_RESULT_BODY_BYTE_LIMIT,
   LarkCardPresenter,
-  NOTICE_BODY_CHAR_LIMIT,
+  NOTICE_BODY_BYTE_LIMIT,
 } from "./lark-presenter.js";
-import { CARD_MARKDOWN_SOFT_CHAR_LIMIT } from "../acp/humming-client.js";
+import { CARD_MARKDOWN_ROTATION_BYTE_LIMIT, utf8ByteLength } from "./card-text-budget.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 
@@ -318,7 +318,7 @@ describe("LarkCardPresenter card summary", () => {
 
     await presenter.replyNoticeCard("om_1", {
       title: "⚠️ Agent 异常退出",
-      body: `Agent crashed\n\nstderr (最后 50 行):\n${"x".repeat(NOTICE_BODY_CHAR_LIMIT + 1_000)}`,
+      body: `Agent crashed\n\nstderr (最后 50 行):\n${"x".repeat(NOTICE_BODY_BYTE_LIMIT + 1_000)}`,
       template: "red",
     });
 
@@ -326,8 +326,8 @@ describe("LarkCardPresenter card summary", () => {
       .filter((element) => element.tag === "markdown")
       .map((element) => element.content ?? "");
     const content = contents.join("");
-    expect(NOTICE_BODY_CHAR_LIMIT).toBe(1_500);
-    expect(content.length).toBeLessThanOrEqual(NOTICE_BODY_CHAR_LIMIT);
+    expect(NOTICE_BODY_BYTE_LIMIT).toBe(1_500);
+    expect(content.length).toBeLessThanOrEqual(NOTICE_BODY_BYTE_LIMIT);
     expect(contents).toHaveLength(1);
     expect(content).toContain("内容过长，已截断");
     expect(content).toContain("bridge.log");
@@ -349,8 +349,8 @@ describe("LarkCardPresenter card summary", () => {
       .filter((element) => element.tag === "markdown")
       .map((element) => element.content ?? "")
       .join("");
-    expect(COMMAND_RESULT_BODY_CHAR_LIMIT).toBe(CARD_MARKDOWN_SOFT_CHAR_LIMIT);
-    expect(COMMAND_RESULT_BODY_CHAR_LIMIT).toBe(4_096);
+    expect(COMMAND_RESULT_BODY_BYTE_LIMIT).toBe(CARD_MARKDOWN_ROTATION_BYTE_LIMIT);
+    expect(utf8ByteLength(rendered)).toBeLessThanOrEqual(COMMAND_RESULT_BODY_BYTE_LIMIT);
     expect(rendered).toBe(body);
     expect(rendered).not.toContain("内容过长，已截断");
     expect(elements.filter((element) => element.tag === "markdown").length).toBeGreaterThan(1);
@@ -362,7 +362,7 @@ describe("LarkCardPresenter card summary", () => {
 
     await presenter.replyCommandResultCard("om_1", {
       title: "🧩 Agent capabilities",
-      body: `Capabilities\n\n${"x".repeat(COMMAND_RESULT_BODY_CHAR_LIMIT + 1_000)}`,
+      body: `Capabilities\n\n${"x".repeat(COMMAND_RESULT_BODY_BYTE_LIMIT + 1_000)}`,
       template: "blue",
     });
 
@@ -370,8 +370,31 @@ describe("LarkCardPresenter card summary", () => {
       .filter((element) => element.tag === "markdown")
       .map((element) => element.content ?? "");
     const content = contents.join("");
-    expect(content.length).toBeLessThanOrEqual(COMMAND_RESULT_BODY_CHAR_LIMIT);
-    expect(contents.every((chunk) => chunk.length <= 3_000)).toBe(true);
-    expect(content).toContain("结果内容超过 4096 字符，已截断");
+    expect(utf8ByteLength(content)).toBeLessThanOrEqual(COMMAND_RESULT_BODY_BYTE_LIMIT);
+    expect(contents.every((chunk) => utf8ByteLength(chunk) <= 3_000)).toBe(true);
+    expect(content).toContain("结果内容超过限制，已截断");
+  });
+
+  it("truncates multibyte command results with the shared UTF-8 budget", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const body = "界".repeat(
+      Math.floor(COMMAND_RESULT_BODY_BYTE_LIMIT / utf8ByteLength("界")) + 1_000,
+    );
+    expect(body.length).toBeLessThan(COMMAND_RESULT_BODY_BYTE_LIMIT);
+    expect(utf8ByteLength(body)).toBeGreaterThan(COMMAND_RESULT_BODY_BYTE_LIMIT);
+
+    await presenter.replyCommandResultCard("om_1", {
+      title: "🧩 Agent capabilities",
+      body,
+      template: "blue",
+    });
+
+    const content = (cards[0]?.body?.elements ?? [])
+      .filter((element) => element.tag === "markdown")
+      .map((element) => element.content ?? "")
+      .join("");
+    expect(utf8ByteLength(content)).toBeLessThanOrEqual(COMMAND_RESULT_BODY_BYTE_LIMIT);
+    expect(content).toContain("结果内容超过限制，已截断");
   });
 });

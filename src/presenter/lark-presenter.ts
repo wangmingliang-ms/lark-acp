@@ -1,8 +1,8 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { CARD_MARKDOWN_SOFT_CHAR_LIMIT } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "../lark/lark-http.js";
 import { markdownToPost, splitMarkdown } from "./lark-markdown.js";
+import { CARD_MARKDOWN_ROTATION_BYTE_LIMIT, splitUtf8, truncateUtf8 } from "./card-text-budget.js";
 import type {
   AgentStatus,
   AgentSwitchWarningCardSpec,
@@ -48,13 +48,13 @@ const CARD_SCHEMA_V2 = "2.0";
 const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 // Notices are deliberately compact. Slash-command output has a separate path
 // below so result listings do not force lifecycle/control notices to grow.
-export const NOTICE_BODY_CHAR_LIMIT = 1_500;
-export const COMMAND_RESULT_BODY_CHAR_LIMIT = CARD_MARKDOWN_SOFT_CHAR_LIMIT;
-const COMMAND_RESULT_MARKDOWN_ELEMENT_CHAR_LIMIT = 3_000;
+export const NOTICE_BODY_BYTE_LIMIT = 1_500;
+export const COMMAND_RESULT_BODY_BYTE_LIMIT = CARD_MARKDOWN_ROTATION_BYTE_LIMIT;
+const COMMAND_RESULT_MARKDOWN_ELEMENT_BYTE_LIMIT = 3_000;
 const NOTICE_TRUNCATION_SUFFIX =
   "\n\n…\n\n_内容过长，已截断；完整细节请查看 bridge.log 或本地日志。_";
 const COMMAND_RESULT_TRUNCATION_SUFFIX =
-  "\n\n…\n\n_结果内容超过 4096 字符，已截断；完整细节请查看 bridge.log 或本地日志。_";
+  "\n\n…\n\n_结果内容超过限制，已截断；完整细节请查看 bridge.log 或本地日志。_";
 
 function buildV2Card(
   headerContent: string | null,
@@ -270,31 +270,16 @@ function buildResolvedCard(
   );
 }
 
-function truncateBody(body: string, limit: number, suffix: string): string {
-  if (body.length <= limit) return body;
-  return `${body.slice(0, Math.max(0, limit - suffix.length)).trimEnd()}${suffix}`;
+function truncateBody(body: string, maxBytes: number, suffix: string): string {
+  return truncateUtf8(body, maxBytes, suffix);
 }
 
-function splitCardMarkdownBody(body: string, limit: number): string[] {
-  const chunks: string[] = [];
-  let remaining = body;
-  while (remaining.length > limit) {
-    let splitAt = remaining.lastIndexOf("\n\n", limit);
-    if (splitAt > 0) splitAt += 2;
-    if (splitAt <= 0) {
-      splitAt = remaining.lastIndexOf("\n", limit);
-      if (splitAt > 0) splitAt += 1;
-    }
-    if (splitAt <= 0) splitAt = limit;
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt);
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+function splitCardMarkdownBody(body: string, maxBytes: number): string[] {
+  return splitUtf8(body, maxBytes);
 }
 
-function buildMarkdownBodyElements(body: string, elementLimit: number): object[] {
-  return splitCardMarkdownBody(body, elementLimit).flatMap((chunk, index) => [
+function buildMarkdownBodyElements(body: string, maxElementBytes: number): object[] {
+  return splitCardMarkdownBody(body, maxElementBytes).flatMap((chunk, index) => [
     ...(index > 0 ? [{ tag: "hr" }] : []),
     { tag: "markdown", content: chunk },
   ]);
@@ -307,7 +292,7 @@ function buildNoticeCard(notice: NoticeCardSpec): object {
     [
       {
         tag: "markdown",
-        content: truncateBody(notice.body, NOTICE_BODY_CHAR_LIMIT, NOTICE_TRUNCATION_SUFFIX),
+        content: truncateBody(notice.body, NOTICE_BODY_BYTE_LIMIT, NOTICE_TRUNCATION_SUFFIX),
       },
     ],
     notice.title,
@@ -317,13 +302,13 @@ function buildNoticeCard(notice: NoticeCardSpec): object {
 function buildCommandResultCard(result: CommandResultCardSpec): object {
   const body = truncateBody(
     result.body,
-    COMMAND_RESULT_BODY_CHAR_LIMIT,
+    COMMAND_RESULT_BODY_BYTE_LIMIT,
     COMMAND_RESULT_TRUNCATION_SUFFIX,
   );
   return buildV2Card(
     result.title,
     result.template,
-    buildMarkdownBodyElements(body, COMMAND_RESULT_MARKDOWN_ELEMENT_CHAR_LIMIT),
+    buildMarkdownBodyElements(body, COMMAND_RESULT_MARKDOWN_ELEMENT_BYTE_LIMIT),
     result.title,
   );
 }

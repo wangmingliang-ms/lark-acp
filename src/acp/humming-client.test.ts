@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
+import { HummingClient } from "./humming-client.js";
 import {
-  CARD_MARKDOWN_ELEMENT_CHAR_LIMIT,
-  CARD_MARKDOWN_SOFT_CHAR_LIMIT,
-  HummingClient,
-} from "./humming-client.js";
+  CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
+  CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
+  utf8ByteLength,
+} from "../presenter/card-text-budget.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkPresenter, UnifiedCardState } from "../presenter/presenter.js";
 
@@ -417,9 +418,11 @@ describe("HummingClient card-v2 conversation rendering", () => {
     expect(updates.at(-1)?.state.entries).toEqual([{ kind: "text", text: "Hello from agent." }]);
   });
 
-  it("uses a compact 4096-character soft card fold threshold", () => {
-    expect(CARD_MARKDOWN_SOFT_CHAR_LIMIT).toBe(4_096);
-    expect(CARD_MARKDOWN_SOFT_CHAR_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_CHAR_LIMIT);
+  it("rotates conversation cards at 50% of the Feishu markdown byte ceiling", () => {
+    expect(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT).toBe(30_000);
+    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(
+      Math.floor(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT * 0.5),
+    );
   });
 
   it("keeps assistant messages and tool calls in the same conversation card", async () => {
@@ -774,10 +777,32 @@ describe("HummingClient card-v2 conversation rendering", () => {
     });
   });
 
-  it("folds long prose at the next tool call boundary", async () => {
+  it("does not rotate below 50% even when the next tool starts", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
-    const longText = "A".repeat(CARD_MARKDOWN_SOFT_CHAR_LIMIT + 10);
+    const text = "A".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT - 1);
+
+    await client.sessionUpdate(textChunk(text));
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_below_threshold",
+        title: "Read README",
+        kind: "read",
+        status: "pending",
+      },
+    });
+    await waitForFlush();
+
+    const sends = ops.filter((op) => op.kind === "sendUnified");
+    expect(sends).toHaveLength(1);
+  });
+
+  it("starts a fresh card at the next tool boundary after reaching 50%", async () => {
+    const ops: RenderOp[] = [];
+    const client = makeClient(ops);
+    const longText = "A".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT + 10);
 
     await client.sessionUpdate({
       sessionId: "sess_1",
@@ -799,14 +824,16 @@ describe("HummingClient card-v2 conversation rendering", () => {
     });
     await waitForFlush();
 
-    const send = ops.find(
+    const sends = ops.filter(
       (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
-    expect(send?.state.entries).toEqual([
-      expect.objectContaining({
-        kind: "text",
-        text: expect.stringContaining("已在安全边界折叠"),
-      }),
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.state).toMatchObject({
+      status: "sealed",
+      entries: [{ kind: "text", text: longText }],
+      cancellable: false,
+    });
+    expect(sends[1]?.state.entries).toEqual([
       {
         kind: "tool",
         toolCallId: "tool_read",
@@ -815,15 +842,12 @@ describe("HummingClient card-v2 conversation rendering", () => {
         status: "pending",
       },
     ]);
-    expect(
-      send?.state.entries.map((entry) => (entry.kind === "text" ? entry.text : "")).join(""),
-    ).not.toContain(longText);
   });
 
   it("folds long final output even when no later tool call arrives", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
-    const longText = "B".repeat(CARD_MARKDOWN_SOFT_CHAR_LIMIT + 10);
+    const longText = "B".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT + 10);
 
     await client.sessionUpdate({
       sessionId: "sess_1",
@@ -850,7 +874,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
   it("uses a render-only emergency fold before sending an over-limit running card", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
-    const hugeText = "C".repeat(CARD_MARKDOWN_ELEMENT_CHAR_LIMIT + 10);
+    const hugeText = "C".repeat(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT + 10);
 
     await client.sessionUpdate({
       sessionId: "sess_1",
@@ -881,23 +905,26 @@ describe("HummingClient card-v2 conversation rendering", () => {
       },
     });
     await waitForFlush();
-    const patch = ops.findLast(
-      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
-    expect(patch?.state.entries.at(0)).toMatchObject({
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.state.entries.at(0)).toMatchObject({
       kind: "text",
-      text: expect.stringContaining("下一次 tool call 开始前折叠"),
+      text: expect.stringContaining("发送卡片前折叠"),
     });
+    expect(sends[1]?.state.entries).toEqual([
+      expect.objectContaining({ kind: "tool", toolCallId: "tool_later" }),
+    ]);
   });
 
-  it("folds multibyte text by UTF-8 byte budget before final card patching", async () => {
+  it("rotates multibyte text by the shared UTF-8 byte budget", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
-    const multibyteText = "界".repeat(
-      Math.floor(CARD_MARKDOWN_SOFT_CHAR_LIMIT / Buffer.byteLength("界", "utf8")) + 10,
-    );
-    expect(multibyteText.length).toBeLessThan(CARD_MARKDOWN_SOFT_CHAR_LIMIT);
-    expect(Buffer.byteLength(multibyteText, "utf8")).toBeGreaterThan(CARD_MARKDOWN_SOFT_CHAR_LIMIT);
+    const targetBytes = CARD_MARKDOWN_ROTATION_BYTE_LIMIT;
+    const multibyteText = "界".repeat(Math.floor(targetBytes / utf8ByteLength("界")) + 10);
+    expect(multibyteText.length).toBeLessThan(targetBytes);
+    expect(utf8ByteLength(multibyteText)).toBeGreaterThan(targetBytes);
 
     await client.sessionUpdate({
       sessionId: "sess_1",
@@ -906,22 +933,30 @@ describe("HummingClient card-v2 conversation rendering", () => {
         content: { type: "text", text: multibyteText },
       },
     });
+    await client.sessionUpdate({
+      sessionId: "sess_1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool_after_multibyte",
+        title: "Continue",
+        kind: "read",
+        status: "pending",
+      },
+    });
     await waitForFlush();
-    await client.finalize("complete");
 
-    const finalPatch = ops.findLast(
-      (op): op is Extract<RenderOp, { kind: "updateUnified" }> => op.kind === "updateUnified",
+    const sends = ops.filter(
+      (op): op is Extract<RenderOp, { kind: "sendUnified" }> => op.kind === "sendUnified",
     );
-    expect(finalPatch?.state.status).toBe("complete");
-    expect(finalPatch?.state.entries).toEqual([
-      expect.objectContaining({
-        kind: "text",
-        text: expect.stringContaining("任务结束前折叠"),
-      }),
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.state).toMatchObject({
+      status: "sealed",
+      entries: [{ kind: "text", text: multibyteText }],
+      cancellable: false,
+    });
+    expect(sends[1]?.state.entries).toEqual([
+      expect.objectContaining({ kind: "tool", toolCallId: "tool_after_multibyte" }),
     ]);
-    expect(
-      finalPatch?.state.entries.map((entry) => (entry.kind === "text" ? entry.text : "")).join(""),
-    ).not.toContain(multibyteText);
   });
 
   it("sends a fallback notice when patching the unified card fails", async () => {
