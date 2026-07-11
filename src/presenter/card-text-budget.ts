@@ -2,8 +2,8 @@ import { Buffer } from "node:buffer";
 
 /** Feishu's documented ceiling for one card markdown element. */
 export const CARD_MARKDOWN_ELEMENT_BYTE_LIMIT = 30_000;
-/** Rotate conversation cards at 50% so later patches stay safely below the ceiling. */
-export const CARD_MARKDOWN_ROTATION_BYTE_LIMIT = Math.floor(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT * 0.5);
+/** Fixed product safety budget for rotating conversation cards before the hard ceiling. */
+export const CARD_MARKDOWN_ROTATION_BYTE_LIMIT = 8_192;
 
 export function utf8ByteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");

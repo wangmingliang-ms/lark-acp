@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
+  CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
   splitUtf8,
   truncateUtf8,
   utf8ByteLength,
@@ -8,6 +10,11 @@ import {
 } from "./card-text-budget.js";
 
 describe("card text byte budget", () => {
+  it("uses a fixed 8192-byte rotation budget below the hard element limit", () => {
+    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(8_192);
+    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT);
+  });
+
   it("measures all card text with UTF-8 bytes", () => {
     expect(utf8ByteLength("abc界")).toBe(6);
     expect(utf8PartsByteLength(["abc", "界"])).toBe(6);

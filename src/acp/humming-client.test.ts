@@ -418,11 +418,10 @@ describe("HummingClient card-v2 conversation rendering", () => {
     expect(updates.at(-1)?.state.entries).toEqual([{ kind: "text", text: "Hello from agent." }]);
   });
 
-  it("rotates conversation cards at 50% of the Feishu markdown byte ceiling", () => {
+  it("uses a fixed 8192-byte conversation card rotation budget", () => {
     expect(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT).toBe(30_000);
-    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(
-      Math.floor(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT * 0.5),
-    );
+    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(8_192);
+    expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT);
   });
 
   it("keeps assistant messages and tool calls in the same conversation card", async () => {
@@ -777,7 +776,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
     });
   });
 
-  it("does not rotate below 50% even when the next tool starts", async () => {
+  it("does not rotate below the fixed byte budget when the next tool starts", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
     const text = "A".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT - 1);
@@ -799,10 +798,10 @@ describe("HummingClient card-v2 conversation rendering", () => {
     expect(sends).toHaveLength(1);
   });
 
-  it("starts a fresh card at the next tool boundary after reaching 50%", async () => {
+  it("starts a fresh card at the next tool boundary after reaching the fixed byte budget", async () => {
     const ops: RenderOp[] = [];
     const client = makeClient(ops);
-    const longText = "A".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT + 10);
+    const longText = "A".repeat(CARD_MARKDOWN_ROTATION_BYTE_LIMIT);
 
     await client.sessionUpdate({
       sessionId: "sess_1",
