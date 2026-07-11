@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +63,25 @@ describe("FileBindingStore", () => {
     expect(await second.get("oc_a")).toMatchObject({ cwd: "/repo/a" });
     expect(await second.get("oc_b")).toMatchObject({ cwd: "/repo/b" });
     expect((await second.list()).length).toBe(2);
+  });
+
+  it("does not run a deferred flush after close already flushed synchronously", async () => {
+    const store = newStore();
+    await store.init();
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      await store.set(binding("oc_a", { cwd: "/repo/a" }));
+      await store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(stderrWrite).not.toHaveBeenCalledWith(
+        expect.stringContaining("binding store flush failed"),
+      );
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 
   it("overwrites on re-set (rebind)", async () => {

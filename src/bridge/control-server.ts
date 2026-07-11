@@ -9,6 +9,7 @@ import type {
   SessionControlPatch,
   SessionRecord,
 } from "../session-store/session-store.js";
+import { isSessionControlPatch } from "../session-store/session-controls.js";
 
 export interface AgentProbeFailureTarget {
   readonly label?: string;
@@ -336,7 +337,11 @@ function isControlRequest(value: unknown): value is ControlRequest {
   }
   if (value["method"] === "setControls") {
     const params = value["params"];
-    return isRecord(params) && typeof params["chatId"] === "string" && isRecord(params["controls"]);
+    return (
+      isRecord(params) &&
+      typeof params["chatId"] === "string" &&
+      isSessionControlPatch(params["controls"])
+    );
   }
   if (value["method"] === "setPendingTask") {
     const params = value["params"];
@@ -391,7 +396,7 @@ function isPendingTargetProfile(value: unknown): value is PendingTargetProfile {
     Array.isArray(value["agentArgs"]) &&
     value["agentArgs"].every((item) => typeof item === "string") &&
     typeof value["cwd"] === "string" &&
-    (value["controls"] === undefined || isRecord(value["controls"])) &&
+    (value["controls"] === undefined || isSessionControlPatch(value["controls"])) &&
     (value["task"] === undefined || isPendingSessionTask(value["task"])) &&
     typeof value["createdAt"] === "number" &&
     typeof value["updatedAt"] === "number"

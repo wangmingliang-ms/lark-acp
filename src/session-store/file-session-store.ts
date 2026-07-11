@@ -1,15 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import type {
-  SessionConfigControlValue,
   SessionControlPatch,
   SessionControlTarget,
-  SessionControls,
   PendingSessionTask,
   PendingTargetProfile,
   SessionRecord,
   SessionStore,
 } from "./session-store.js";
+import { mergeSessionControlPatches, mergeSessionControls } from "./session-controls.js";
 
 const SESSIONS_FILE_NAME = "sessions.json";
 
@@ -163,7 +162,7 @@ export class FileSessionStore implements SessionStore {
     const record = await this.findControlTarget(target);
     const updated: SessionRecord = {
       ...record,
-      controls: mergeControls(record.controls, controls),
+      controls: mergeSessionControls(record.controls, controls),
       updatedAt: Date.now(),
     };
     await this.save(updated);
@@ -177,7 +176,7 @@ export class FileSessionStore implements SessionStore {
     const record = await this.findControlTarget(target);
     const updated: SessionRecord = {
       ...record,
-      pendingControls: mergeControlPatches(record.pendingControls, controls),
+      pendingControls: mergeSessionControlPatches(record.pendingControls, controls),
       updatedAt: Date.now(),
     };
     await this.save(updated);
@@ -360,53 +359,4 @@ function sameAgentInvocation(a: SessionRecord, b: SessionRecord): boolean {
     JSON.stringify(a.agentArgs) === JSON.stringify(b.agentArgs) &&
     (a.agentLabel ?? "") === (b.agentLabel ?? "")
   );
-}
-
-function mergeControls(
-  existing: SessionControls | undefined,
-  patch: SessionControlPatch,
-): SessionControls {
-  const out: SessionControls = { ...(existing ?? {}) };
-  if (patch.clearModelId === true) delete out.modelId;
-  if (patch.modelId !== undefined) out.modelId = patch.modelId;
-  if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined)
-    out.bridgePermissionMode = patch.bridgePermissionMode;
-  const config = mergeConfig(existing?.config, patch.config);
-  if (config) out.config = config;
-  else delete out.config;
-  return out;
-}
-
-function mergeControlPatches(
-  existing: SessionControlPatch | undefined,
-  patch: SessionControlPatch,
-): SessionControlPatch {
-  const out: SessionControlPatch = { ...(existing ?? {}) };
-  if (patch.clearModelId === true) {
-    delete out.modelId;
-    out.clearModelId = true;
-  }
-  if (patch.modelId !== undefined) {
-    delete out.clearModelId;
-    out.modelId = patch.modelId;
-  }
-  if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined)
-    out.bridgePermissionMode = patch.bridgePermissionMode;
-  const config = mergeConfig(existing?.config, patch.config);
-  if (config) out.config = config;
-  else delete out.config;
-  return out;
-}
-
-function mergeConfig(
-  existing: SessionControls["config"] | undefined,
-  patch: SessionControls["config"] | undefined,
-): Record<string, SessionConfigControlValue> | undefined {
-  const merged: Record<string, SessionConfigControlValue> = {
-    ...(existing ?? {}),
-    ...(patch ?? {}),
-  };
-  return Object.keys(merged).length > 0 ? merged : undefined;
 }

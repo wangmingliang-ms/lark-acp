@@ -87,6 +87,7 @@ export class FileBindingStore implements BindingStore {
     if (this.flushScheduled) return;
     this.flushScheduled = true;
     setImmediate(() => {
+      if (!this.flushScheduled) return;
       try {
         this.flushNow();
       } catch (err) {

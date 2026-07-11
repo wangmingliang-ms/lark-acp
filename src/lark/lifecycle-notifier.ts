@@ -71,11 +71,18 @@ type LifecycleNoticeCardOptions = {
 };
 
 export type LifecycleNoticeOptions = LifecycleNoticeCardOptions & {
-  readonly http: Pick<LarkHttpClient, "sendCardToChat">;
+  readonly http: Pick<LarkHttpClient, "sendCardToChat"> &
+    Partial<Pick<LarkHttpClient, "patchCard">>;
   readonly chatIds: readonly string[];
   readonly kind: LifecycleNoticeKind;
   readonly logger: LarkLogger;
   readonly timeoutMs?: number;
+  readonly replace?: readonly LifecycleNoticeDelivery[];
+};
+
+export type LifecycleNoticeDelivery = {
+  readonly chatId: string;
+  readonly messageId: string;
 };
 
 export function buildLifecycleNoticeCard(
@@ -110,11 +117,13 @@ export function buildLifecycleNoticeCard(
  * Best-effort lifecycle broadcast. Individual chat failures are logged and do
  * not reject the whole bridge startup/shutdown path.
  */
-export async function sendLifecycleNotice(opts: LifecycleNoticeOptions): Promise<void> {
+export async function sendLifecycleNotice(
+  opts: LifecycleNoticeOptions,
+): Promise<readonly LifecycleNoticeDelivery[]> {
   const chatIds = dedupeChatIds(opts.chatIds);
   if (chatIds.length === 0) {
     opts.logger.debug({ kind: opts.kind }, "no lifecycle notification chats configured");
-    return;
+    return [];
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
@@ -123,19 +132,42 @@ export async function sendLifecycleNotice(opts: LifecycleNoticeOptions): Promise
     now: opts.now,
     codeRevision: opts.codeRevision,
   });
+  const replaceByChat = new Map(opts.replace?.map((item) => [item.chatId, item.messageId]) ?? []);
   const results = await Promise.allSettled(
-    chatIds.map((chatId) => withTimeout(opts.http.sendCardToChat(chatId, card), chatId, timeoutMs)),
+    chatIds.map(async (chatId): Promise<LifecycleNoticeDelivery | null> => {
+      const previousMessageId = replaceByChat.get(chatId);
+      if (previousMessageId && opts.http.patchCard) {
+        try {
+          await withTimeout(opts.http.patchCard(previousMessageId, card), chatId, timeoutMs);
+          return { chatId, messageId: previousMessageId };
+        } catch (err) {
+          opts.logger.warn(
+            { err, chatId, kind: opts.kind },
+            "lifecycle notice patch failed; sending replacement",
+          );
+        }
+      }
+      const messageId = await withTimeout(
+        opts.http.sendCardToChat(chatId, card),
+        chatId,
+        timeoutMs,
+      );
+      return messageId ? { chatId, messageId } : null;
+    }),
   );
 
+  const deliveries: LifecycleNoticeDelivery[] = [];
   results.forEach((result, index) => {
     const chatId = chatIds[index];
     if (chatId === undefined) return;
     if (result.status === "fulfilled") {
+      if (result.value) deliveries.push(result.value);
       opts.logger.info({ chatId, kind: opts.kind }, "lifecycle notice sent");
       return;
     }
     opts.logger.warn({ err: result.reason, chatId, kind: opts.kind }, "lifecycle notice failed");
   });
+  return deliveries;
 }
 
 function formatLifecycleTime(date: Date): string {

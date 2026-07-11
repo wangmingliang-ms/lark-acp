@@ -284,6 +284,44 @@ function makeBridge(
   });
 }
 
+describe("LarkBridge shutdown", () => {
+  it("shuts down runtimes before awaiting the lifecycle notice", async () => {
+    const events: string[] = [];
+    const bridge = makeBridge(
+      new MemorySessionStore(),
+      recordingPresenter({
+        warnings: [],
+        warningResolutions: [],
+        notices: [],
+        commandResults: [],
+        unifiedCards: [],
+        noticeUpdates: [],
+      }),
+    );
+    const runtime = {
+      chatId: "oc_A",
+      threadId: "omt_1",
+      shutdown: vi.fn(async () => {
+        events.push("runtime");
+      }),
+    };
+    const testable = bridge as unknown as {
+      started: boolean;
+      chats: Map<string, typeof runtime>;
+      sendLifecycleStoppingNotice: () => Promise<void>;
+    };
+    testable.started = true;
+    testable.chats.set("oc_A\u0000omt_1", runtime);
+    testable.sendLifecycleStoppingNotice = async () => {
+      events.push("lifecycle");
+    };
+
+    await bridge.stop();
+
+    expect(events).toEqual(["runtime", "lifecycle"]);
+  });
+});
+
 async function dispatchCommand(
   bridge: LarkBridge,
   command: LarkCommand,
@@ -555,8 +593,9 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect((await store.getLatest("oc_A", "omt_1"))?.pendingTask).toBeUndefined();
     expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
-    expect(events.notices.at(-1)).toMatchObject({ title: "✅ Agent 已切换" });
-    expect(events.notices.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
+    expect(events.notices).toHaveLength(1);
+    expect(events.noticeUpdates.at(-1)).toMatchObject({ title: "✅ Agent 已切换" });
+    expect(events.noticeUpdates.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
   });
 
   it("queues an atomic pending target profile with Agent, controls, and task in one notice", async () => {
@@ -661,6 +700,101 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect((await store.getLatest("oc_A", "omt_1"))?.pendingTargetProfile).toBeUndefined();
     expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks a queued Agent switch terminal when applying it fails", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {
+        throw new Error("supersede failed");
+      }),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
+    fakeRuntime.processing = false;
+
+    await expect(testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff")).rejects.toThrow(
+      "supersede failed",
+    );
+    expect(events.noticeUpdates.at(-1)).toMatchObject({
+      title: "⚠️ 排队的 Session 操作未完成",
+      template: "red",
+    });
+  });
+
+  it("does not mark a queued Agent switch successful before its pending task starts", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
+      controlSetPendingTask(
+        chatId: string,
+        threadId: string | null,
+        task: PendingSessionTask,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
+    await testable.controlSetPendingTask("oc_A", "omt_1", {
+      prompt: "continue after switch",
+      createdAt: 10,
+    });
+    spawnAgentMock.mockRejectedValueOnce(new Error("target Agent failed to start"));
+    fakeRuntime.processing = false;
+
+    await expect(testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff")).rejects.toThrow(
+      "target Agent failed to start",
+    );
+    expect(events.noticeUpdates).toHaveLength(1);
+    expect(events.noticeUpdates[0]).toMatchObject({
+      title: "⚠️ 排队的 Session 操作未完成",
+      template: "red",
+    });
   });
 
   it("rejects pending target profiles that put core profile fields under config controls", async () => {
@@ -871,6 +1005,102 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       agentLabel: "codex",
       controls: { modelId: "gpt-5.5" },
+    });
+  });
+
+  it("persists controls merged into an already queued pending target profile", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      unifiedCards: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlSetControls(
+        chatId: string,
+        threadId: string | null,
+        controls: SessionControlPatch,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      controlSetPendingTargetProfile(
+        chatId: string,
+        threadId: string | null,
+        profile: PendingTargetProfile,
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+    };
+
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+    probeAgentSessionCapabilitiesMock
+      .mockResolvedValueOnce({
+        sessionId: "probe_codex",
+        capabilities: {
+          models: {
+            currentModelId: "auto",
+            availableModels: [{ modelId: "gpt-5.5", name: "GPT-5.5" }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        sessionId: "probe_codex",
+        capabilities: {
+          models: {
+            currentModelId: "gpt-5.5",
+            availableModels: [
+              { modelId: "gpt-5.5", name: "GPT-5.5" },
+              { modelId: "gpt-5.6", name: "GPT-5.6" },
+            ],
+          },
+          modes: {
+            currentModeId: "ask",
+            availableModes: [{ id: "agent", name: "Agent" }],
+          },
+        },
+      });
+
+    await testable.controlSetPendingTargetProfile(
+      "oc_A",
+      "omt_1",
+      {
+        sessionId: "profile:atomic",
+        profileOnly: true,
+        agentCommand: "npx",
+        agentArgs: ["-y", "@zed-industries/codex-acp"],
+        agentLabel: "codex",
+        cwd: "/tmp",
+        controls: { modelId: "gpt-5.5" },
+        task: { prompt: "继续检查", createdAt: 10 },
+        createdAt: 10,
+        updatedAt: 10,
+      },
+      "om_handoff",
+    );
+    await testable.controlSetControls(
+      "oc_A",
+      "omt_1",
+      { modelId: "gpt-5.6", modeId: "agent" },
+      "om_model",
+    );
+
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+      agentLabel: "claude",
+      pendingTargetProfile: {
+        agentLabel: "codex",
+        controls: { modelId: "gpt-5.6", modeId: "agent" },
+        task: { prompt: "继续检查" },
+      },
     });
   });
 

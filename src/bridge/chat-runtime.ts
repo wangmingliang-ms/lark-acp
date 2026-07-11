@@ -1,6 +1,17 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
-import type { AgentStatus, LarkPresenter, SessionCardMeta } from "../presenter/presenter.js";
+import type {
+  AgentStatus,
+  LarkPresenter,
+  NoticeCardSpec,
+  SessionCardMeta,
+} from "../presenter/presenter.js";
+import {
+  createWipNoticeCard,
+  finalizeWipNoticeCard,
+  restoreWipNoticeCard,
+  type WipNoticeCardRef,
+} from "../presenter/notice-card-lifecycle.js";
 import { HummingClient, PERMISSION_MODES, type PermissionMode } from "../acp/humming-client.js";
 import {
   spawnAgent,
@@ -18,6 +29,7 @@ import type {
   SessionRecord,
   SessionStore,
 } from "../session-store/session-store.js";
+import { hasSessionControls, mergeSessionControls } from "../session-store/session-controls.js";
 
 const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
 
@@ -85,6 +97,12 @@ interface ChatRuntimeState {
   lastMessageId: string | null;
 }
 
+type FollowupInterruptNotice = {
+  readonly targetMessageId: string;
+  cardRef: WipNoticeCardRef | null;
+  terminal: NoticeCardSpec | null;
+};
+
 /**
  * Per-chat ACP runtime: owns one agent subprocess, one `HummingClient`,
  * and a FIFO queue of pending Lark messages.
@@ -102,6 +120,8 @@ export class ChatRuntime {
   private cancelRequested = false;
   /** True after a busy follow-up requested a soft cancel of the current prompt. */
   private followupInterruptRequested = false;
+  /** Busy-follow-up acknowledgement waiting to be patched once that message starts. */
+  private followupInterruptNotice: FollowupInterruptNotice | null = null;
   /** Suppress the prompt-error notice when this runtime is intentionally replaced. */
   private suppressPromptErrorNotice = false;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
@@ -197,21 +217,36 @@ export class ChatRuntime {
     this.followupInterruptRequested = true;
     state.client.cancelPendingPermission();
     const depth = state.queue.length;
-    await this.opts.presenter
-      .replyNoticeCard(message.messageId, {
-        title: "⚡ 正在中断当前任务",
-        body:
-          depth > 1
-            ? `已收到新消息，正在中断当前任务；后面还有 ${depth} 条消息排队。`
-            : "已收到新消息，正在中断当前任务；稍后会优先处理这条消息。",
-        template: "blue",
-      })
-      .catch((err) => this.logger.warn({ err }, "busy follow-up interrupt notice failed"));
+    const notice: FollowupInterruptNotice = {
+      targetMessageId: message.messageId,
+      cardRef: null,
+      terminal: null,
+    };
+    this.followupInterruptNotice = notice;
+    const noticePromise = createWipNoticeCard(this.opts.presenter, message.messageId, {
+      title: "⚡ 正在中断当前任务",
+      body:
+        depth > 1
+          ? `已收到新消息，正在中断当前任务；后面还有 ${depth} 条消息排队。`
+          : "已收到新消息，正在中断当前任务；稍后会优先处理这条消息。",
+      template: "blue",
+    }).catch((err) => {
+      this.logger.warn({ err }, "busy follow-up interrupt notice failed");
+      return null;
+    });
     try {
       await state.agent.connection.cancel({ sessionId: state.agent.sessionId });
     } catch (err) {
       this.logger.warn({ err }, "busy follow-up cancel notification rejected");
     }
+    const cardRef = await noticePromise;
+    if (this.followupInterruptNotice !== notice) return;
+    if (!cardRef) {
+      this.followupInterruptNotice = null;
+      return;
+    }
+    notice.cardRef = cardRef;
+    if (notice.terminal) await this.finishFollowupInterruptNotice(notice);
   }
 
   /**
@@ -223,6 +258,11 @@ export class ChatRuntime {
     this.logger.info("cancelling current task");
     this.cancelRequested = true;
     this.state.client.cancelPendingPermission();
+    await this.markFollowupTerminal({
+      title: "⛔ 新消息已取消",
+      body: "中断请求已取消，排队的新消息不会继续处理。",
+      template: "grey",
+    });
     try {
       await this.state.agent.connection.cancel({ sessionId: this.state.agent.sessionId });
     } catch (err) {
@@ -238,6 +278,11 @@ export class ChatRuntime {
     if (!state) return;
     this.logger.info("shutting down chat runtime");
     state.client.cancelPendingPermission();
+    await this.markFollowupTerminal({
+      title: "⛔ 新消息未处理",
+      body: "会话已结束，排队的新消息未继续处理。",
+      template: "grey",
+    });
     if (finalStatus !== null) {
       await withTimeout(
         state.client.finalizeIfRenderable(finalStatus),
@@ -263,6 +308,11 @@ export class ChatRuntime {
     this.suppressPromptErrorNotice = true;
     this.cancelRequested = true;
     state.client.cancelPendingPermission();
+    await this.markFollowupTerminal({
+      title: "⛔ 新消息未处理",
+      body: "Session 已被替换，排队的新消息未继续处理。",
+      template: "grey",
+    });
     await withTimeout(
       state.client.finalizeIfRenderable("complete"),
       SHUTDOWN_FINALIZE_TIMEOUT_MS,
@@ -435,7 +485,7 @@ export class ChatRuntime {
         await this.cleanPersistedControls(latest, controls);
         await this.notifyStoredControlsIgnored(firstMessage.messageId, ignored);
       }
-      if (hasControls(controls)) {
+      if (hasSessionControls(controls)) {
         state.sessionCapabilities = await this.applyControlsToState(state, controls);
         if (controls.bridgePermissionMode !== undefined) {
           state.client.setPermissionMode(controls.bridgePermissionMode);
@@ -446,7 +496,7 @@ export class ChatRuntime {
         state.sessionCapabilities,
         this.opts.inheritedControls,
       );
-      if (hasControls(controls)) {
+      if (hasSessionControls(controls)) {
         try {
           state.sessionCapabilities = await this.applyControlsToState(state, controls);
           if (controls.bridgePermissionMode !== undefined) {
@@ -584,7 +634,7 @@ export class ChatRuntime {
   ): Promise<void> {
     const updated: SessionRecord = {
       ...previous,
-      ...(hasControls(controls) ? { controls } : { controls: undefined }),
+      ...(hasSessionControls(controls) ? { controls } : { controls: undefined }),
       updatedAt: Date.now(),
     };
     await this.opts.sessionStore
@@ -737,6 +787,7 @@ export class ChatRuntime {
 
         state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
         state.client.adoptProgressCard(pending.progressCardId);
+        await this.markFollowupStarted(pending.messageId);
 
         await this.applyPendingControlsBeforePrompt(state, pending.messageId);
         if (this.aborted || this.state !== state) return;
@@ -762,6 +813,35 @@ export class ChatRuntime {
     }
   }
 
+  private async markFollowupStarted(messageId: string): Promise<void> {
+    const notice = this.followupInterruptNotice;
+    if (!notice || notice.targetMessageId !== messageId) return;
+    notice.terminal = {
+      title: "✅ 新消息已开始处理",
+      body: "上一任务已结束，Agent 已开始处理这条消息。",
+      template: "green",
+    };
+    if (notice.cardRef) await this.finishFollowupInterruptNotice(notice);
+  }
+
+  private async markFollowupTerminal(terminal: NoticeCardSpec): Promise<void> {
+    const notice = this.followupInterruptNotice;
+    if (!notice) return;
+    notice.terminal = terminal;
+    if (notice.cardRef) await this.finishFollowupInterruptNotice(notice);
+  }
+
+  private async finishFollowupInterruptNotice(notice: FollowupInterruptNotice): Promise<void> {
+    if (this.followupInterruptNotice !== notice) return;
+    const cardRef = notice.cardRef;
+    const terminal = notice.terminal;
+    if (!cardRef || !terminal) return;
+    this.followupInterruptNotice = null;
+    await finalizeWipNoticeCard(this.opts.presenter, cardRef, terminal, async () => {
+      await this.opts.presenter.replyNoticeCard(notice.targetMessageId, terminal);
+    });
+  }
+
   private async applyPendingControlsBeforePrompt(
     state: ChatRuntimeState,
     messageId: string,
@@ -778,7 +858,7 @@ export class ChatRuntime {
       return false;
     }
     const pendingControls = consumed.pendingControls;
-    if (pendingControls === undefined || !hasControls(pendingControls)) return false;
+    if (pendingControls === undefined || !hasSessionControls(pendingControls)) return false;
 
     const beforeSnapshot = cloneCapabilitiesSnapshot({
       ...state.sessionCapabilities,
@@ -854,9 +934,12 @@ export class ChatRuntime {
       ].join("\n"),
       template: "orange" as const,
     };
-    if (queuedNoticeMessageId && this.opts.presenter.updateNoticeCard) {
-      const updated = await this.opts.presenter.updateNoticeCard(queuedNoticeMessageId, notice);
-      if (updated) return;
+    const queuedNotice = restoreWipNoticeCard(queuedNoticeMessageId);
+    if (queuedNotice) {
+      await finalizeWipNoticeCard(this.opts.presenter, queuedNotice, notice, async () => {
+        await this.opts.presenter.replyNoticeCard(messageId, notice);
+      });
+      return;
     }
     await this.opts.presenter
       .replyNoticeCard(messageId, notice)
@@ -878,9 +961,12 @@ export class ChatRuntime {
       body: renderControlSuccessBody(before, after, controls),
       template: "green" as const,
     };
-    if (queuedNoticeMessageId && this.opts.presenter.updateNoticeCard) {
-      const updated = await this.opts.presenter.updateNoticeCard(queuedNoticeMessageId, notice);
-      if (updated) return;
+    const queuedNotice = restoreWipNoticeCard(queuedNoticeMessageId);
+    if (queuedNotice) {
+      await finalizeWipNoticeCard(this.opts.presenter, queuedNotice, notice, async () => {
+        await this.opts.presenter.replyNoticeCard(messageId, notice);
+      });
+      return;
     }
     await this.opts.presenter
       .replyNoticeCard(messageId, notice)
@@ -1341,43 +1427,6 @@ function cloneCapabilitiesSnapshot(
   snapshot: SessionCapabilitiesSnapshot,
 ): SessionCapabilitiesSnapshot {
   return structuredClone(snapshot) as SessionCapabilitiesSnapshot;
-}
-
-function mergeSessionControls(
-  existing: SessionControls | undefined,
-  patch: SessionControlPatch | undefined,
-): SessionControls {
-  const out: SessionControls = { ...(existing ?? {}) };
-  if (patch?.clearModelId === true) delete out.modelId;
-  if (patch?.modelId !== undefined) out.modelId = patch.modelId;
-  if (patch?.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch?.bridgePermissionMode !== undefined)
-    out.bridgePermissionMode = patch.bridgePermissionMode;
-  const config = mergeSessionConfig(existing?.config, patch?.config);
-  if (config) out.config = config;
-  else delete out.config;
-  return out;
-}
-
-function mergeSessionConfig(
-  existing: SessionControls["config"] | undefined,
-  patch: SessionControls["config"] | undefined,
-): Record<string, SessionConfigControlValue> | undefined {
-  const merged: Record<string, SessionConfigControlValue> = {
-    ...(existing ?? {}),
-    ...(patch ?? {}),
-  };
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-function hasControls(controls: SessionControlPatch): boolean {
-  return (
-    controls.clearModelId === true ||
-    controls.modelId !== undefined ||
-    controls.modeId !== undefined ||
-    controls.bridgePermissionMode !== undefined ||
-    Object.keys(controls.config ?? {}).length > 0
-  );
 }
 
 interface IgnoredInheritedControl {

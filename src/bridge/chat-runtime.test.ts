@@ -416,12 +416,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
   it("interrupts an in-flight prompt when a follow-up user message is queued", async () => {
     const states: UnifiedCardState[] = [];
     const notices: Array<{ title: string; body: string; template: string }> = [];
+    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
 
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter(states, notices),
+      presenter: recordingPresenter(states, notices, noticeUpdates),
       sessionStore: stubSessionStore(),
     });
 
@@ -453,18 +454,23 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       },
       { timeout: 1_000, interval: 20 },
     );
+    expect(noticeUpdates.at(-1)).toMatchObject({
+      title: "✅ 新消息已开始处理",
+      template: "green",
+    });
   });
 
   it("respawns and preserves the queued follow-up if interrupt closes the agent", async () => {
     const states: UnifiedCardState[] = [];
     const notices: Array<{ title: string; body: string; template: string }> = [];
+    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
     const first = makeFakeAgent();
     const second = makeFakeAgent();
     spawnAgentMock.mockResolvedValueOnce(first.agent).mockResolvedValueOnce(second.agent);
 
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter(states, notices),
+      presenter: recordingPresenter(states, notices, noticeUpdates),
       sessionStore: stubSessionStore(),
     });
 
@@ -493,6 +499,81 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       { timeout: 1_000, interval: 20 },
     );
     expect(notices.some((notice) => notice.title === "⚠️ Agent 异常退出")).toBe(false);
+    expect(noticeUpdates.at(-1)).toMatchObject({
+      title: "✅ 新消息已开始处理",
+      template: "green",
+    });
+  });
+
+  it("marks the follow-up interrupt card terminal when the queued message is cancelled", async () => {
+    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([], [], noticeUpdates),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first long task" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "queued follow-up" }],
+      messageId: "om_followup",
+      chatId: "oc_test",
+    });
+
+    await runtime.cancel();
+
+    expect(noticeUpdates.at(-1)).toMatchObject({
+      title: "⛔ 新消息已取消",
+      template: "grey",
+    });
+    fake.resolvePrompt("cancelled");
+  });
+
+  it("claims a follow-up card before awaiting its terminal patch", async () => {
+    let releasePatch: (() => void) | null = null;
+    const patchGate = new Promise<void>((resolve) => {
+      releasePatch = resolve;
+    });
+    const updateNoticeCard = vi.fn(async () => {
+      await patchGate;
+      return true;
+    });
+    const targetPresenter = recordingPresenter([]);
+    targetPresenter.updateNoticeCard = updateNoticeCard;
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: targetPresenter,
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first long task" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "queued follow-up" }],
+      messageId: "om_followup",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("cancelled");
+    await vi.waitFor(() => expect(updateNoticeCard).toHaveBeenCalledTimes(1));
+
+    await runtime.cancel();
+
+    expect(updateNoticeCard).toHaveBeenCalledTimes(1);
+    if (!releasePatch) throw new Error("terminal patch gate was not initialized");
+    releasePatch();
   });
 
   it("marks the card cancelled when a requested cancellation closes the agent connection", async () => {

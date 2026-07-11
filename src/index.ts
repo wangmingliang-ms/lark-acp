@@ -65,6 +65,12 @@ export {
   SessionAlreadyBoundError,
   SessionStoreControlError,
 } from "./session-store/file-session-store.js";
+export {
+  hasSessionControls,
+  isSessionControlPatch,
+  mergeSessionControlPatches,
+  mergeSessionControls,
+} from "./session-store/session-controls.js";
 
 export type { BindingStore, ChatBinding } from "./binding-store/binding-store.js";
 export { FileBindingStore, BindingStoreIoError } from "./binding-store/file-binding-store.js";
@@ -106,6 +112,7 @@ export {
 } from "./lark/lifecycle-notifier.js";
 export type {
   LifecycleCodeRevision,
+  LifecycleNoticeDelivery,
   LifecycleNoticeKind,
   LifecycleNoticeOptions,
 } from "./lark/lifecycle-notifier.js";

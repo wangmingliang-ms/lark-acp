@@ -87,4 +87,36 @@ describe("sendLifecycleNotice", () => {
 
     expect(sent).toEqual(["oc_A", "oc_B"]);
   });
+
+  it("patches restarting cards to restarted and falls back to send only when needed", async () => {
+    const sent: string[] = [];
+    const patched: Array<{ messageId: string; title: string | undefined }> = [];
+    const http = {
+      async sendCardToChat(chatId: string): Promise<string> {
+        sent.push(chatId);
+        return `om_${chatId}`;
+      },
+      async patchCard(messageId: string, card: object): Promise<void> {
+        patched.push({ messageId, title: headerTitle(card) });
+      },
+    };
+
+    const restarting = await sendLifecycleNotice({
+      http,
+      chatIds: ["oc_A"],
+      kind: "restarting",
+      logger: silentLogger,
+    });
+    const restarted = await sendLifecycleNotice({
+      http,
+      chatIds: ["oc_A"],
+      kind: "restarted",
+      logger: silentLogger,
+      replace: restarting,
+    });
+
+    expect(sent).toEqual(["oc_A"]);
+    expect(patched).toEqual([{ messageId: "om_oc_A", title: "✅ Humming 已重启" }]);
+    expect(restarted).toEqual([{ chatId: "oc_A", messageId: "om_oc_A" }]);
+  });
 });

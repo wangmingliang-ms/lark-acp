@@ -300,6 +300,68 @@ describe("BridgeControlServer", () => {
     });
   });
 
+  it("rejects malformed session control payloads before invoking handlers", async () => {
+    const socketPath = path.join(dir, "control.sock");
+    let setControlsCalled = false;
+    let pendingTargetProfileCalled = false;
+    server = new BridgeControlServer({
+      socketPath,
+      logger: createPinoLogger(),
+      handlers: {
+        capabilities: async (chatId, threadId) => ({
+          session: { chatId, threadId, sessionId: "sess_pipe" },
+          agent: { command: "node", args: [], cwd: "/repo" },
+          bridgePermissionModes: ["alwaysAsk", "alwaysAllow", "alwaysDeny"],
+          bridgePermissionMode: "alwaysAsk",
+        }),
+        setControls: async () => {
+          setControlsCalled = true;
+          return { applied: true };
+        },
+        setPendingTask: async () => ({ queued: true }),
+        setPendingTargetProfile: async () => {
+          pendingTargetProfileCalled = true;
+          return { queued: true };
+        },
+        bindSession: async (record) => ({ bound: true, record }),
+        setAgent: async (record) => ({ switched: true, record }),
+        agentProbeFailed: async () => ({ notified: true }),
+      },
+    });
+    await server.start();
+
+    await expect(
+      sendControlRequest(socketPath, {
+        method: "setControls",
+        params: {
+          chatId: "oc_A",
+          controls: { clearModelId: false },
+        },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: "invalid control request" });
+
+    await expect(
+      sendControlRequest(socketPath, {
+        method: "setPendingTargetProfile",
+        params: {
+          chatId: "oc_A",
+          profile: {
+            sessionId: "profile:bad",
+            agentCommand: "npx",
+            agentArgs: ["agent"],
+            cwd: "/repo",
+            controls: { bridgePermissionMode: "bypass" },
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: "invalid control request" });
+
+    expect(setControlsCalled).toBe(false);
+    expect(pendingTargetProfileCalled).toBe(false);
+  });
+
   it("does not crash when a control client disconnects before the response", async () => {
     const socketPath = path.join(dir, "control.sock");
     let releaseHandler: (() => void) | null = null;

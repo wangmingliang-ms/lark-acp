@@ -36,6 +36,7 @@ export {
 } from "./lifecycle-notifier.js";
 export type {
   LifecycleCodeRevision,
+  LifecycleNoticeDelivery,
   LifecycleNoticeKind,
   LifecycleNoticeOptions,
 } from "./lifecycle-notifier.js";

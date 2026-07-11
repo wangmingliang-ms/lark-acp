@@ -8,10 +8,17 @@ import { LarkHttpClient } from "../lark/lark-http.js";
 import {
   sendLifecycleNotice,
   type LifecycleCodeRevision,
+  type LifecycleNoticeDelivery,
   type LifecycleNoticeKind,
 } from "../lark/lifecycle-notifier.js";
 import { LarkWsConnection } from "../lark/lark-ws.js";
 import { LarkCardPresenter } from "../presenter/lark-presenter.js";
+import {
+  createWipNoticeCard,
+  finalizeWipNoticeCard,
+  updateWipNoticeCard,
+  type WipNoticeCardRef,
+} from "../presenter/notice-card-lifecycle.js";
 import { installHomeTemplates } from "../home-templates.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
 import { renderCommandHelpBody } from "../interpreter/commands.js";
@@ -51,6 +58,7 @@ import type {
   SessionRecord,
   SessionStore,
 } from "../session-store/session-store.js";
+import { mergeSessionControls } from "../session-store/session-controls.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -398,7 +406,7 @@ interface PendingPostTurnAgentSwitch {
   readonly record: SessionRecord;
   readonly noticeMessageId: string | null;
   readonly targetProfile?: PendingTargetProfile;
-  readonly queuedNoticeMessageId?: string | null;
+  readonly queuedNotice?: WipNoticeCardRef | null;
 }
 
 const POST_TURN_AGENT_SWITCH_TASK_HINT =
@@ -542,37 +550,45 @@ export class LarkBridge {
     if (!this.started) return;
     this.started = false;
     this.logger.info("stopping bridge");
-    await this.sendLifecycleStoppingNotice();
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     if (this.reloadTimer) clearTimeout(this.reloadTimer);
     if (this.settingsWatcher) {
       this.settingsWatcher.close();
       this.settingsWatcher = null;
     }
-    await this.controlServer?.stop();
-    this.controlServer = null;
+    // A process supervisor may deliver SIGTERM to child agents alongside the
+    // bridge. Mark runtimes aborted before awaiting any network notification.
     await this.shutdownAllRuntimes("cancelled");
     this.chats.clear();
+    await this.sendLifecycleStoppingNotice();
+    await this.controlServer?.stop();
+    this.controlServer = null;
     await this.sessionStore.close();
     await this.bindingStore.close();
     this.logger.info("bridge stopped");
   }
 
   private async sendLifecycleStartedNotice(): Promise<void> {
-    const restarted = this.consumeRestartMarker();
-    await this.sendLifecycleNotice(restarted ? "restarted" : "started");
+    const restart = this.consumeRestartMarker();
+    await this.sendLifecycleNotice(restart ? "restarted" : "started", restart?.deliveries);
   }
 
   private async sendLifecycleStoppingNotice(): Promise<void> {
-    await this.sendLifecycleNotice(this.hasRestartMarker() ? "restarting" : "stopping");
+    const restarting = this.hasRestartMarker();
+    const deliveries = await this.sendLifecycleNotice(restarting ? "restarting" : "stopping");
+    if (restarting) this.persistRestartNoticeDeliveries(deliveries);
   }
 
-  private async sendLifecycleNotice(kind: LifecycleNoticeKind): Promise<void> {
-    await sendLifecycleNotice({
+  private async sendLifecycleNotice(
+    kind: LifecycleNoticeKind,
+    replace?: readonly LifecycleNoticeDelivery[],
+  ): Promise<readonly LifecycleNoticeDelivery[]> {
+    return sendLifecycleNotice({
       http: this.http,
       chatIds: this.lifecycleNotificationChatIds,
       kind,
       logger: this.logger,
+      ...(replace !== undefined ? { replace } : {}),
       ...(this.lifecycleCodeRevision !== undefined
         ? { codeRevision: this.lifecycleCodeRevision }
         : {}),
@@ -586,15 +602,33 @@ export class LarkBridge {
     return this.restartMarkerPath !== null && fs.existsSync(this.restartMarkerPath);
   }
 
-  private consumeRestartMarker(): boolean {
+  private persistRestartNoticeDeliveries(deliveries: readonly LifecycleNoticeDelivery[]): void {
     const marker = this.restartMarkerPath;
-    if (marker === null || !fs.existsSync(marker)) return false;
+    if (marker === null) return;
+    try {
+      fs.writeFileSync(marker, JSON.stringify({ requestedAt: Date.now(), deliveries }), "utf-8");
+    } catch (err) {
+      this.logger.warn({ err, marker }, "failed to persist restart notice card ids");
+    }
+  }
+
+  private consumeRestartMarker(): {
+    readonly deliveries: readonly LifecycleNoticeDelivery[];
+  } | null {
+    const marker = this.restartMarkerPath;
+    if (marker === null || !fs.existsSync(marker)) return null;
+    let deliveries: readonly LifecycleNoticeDelivery[] = [];
+    try {
+      deliveries = parseRestartNoticeDeliveries(fs.readFileSync(marker, "utf-8"));
+    } catch (err) {
+      this.logger.warn({ err, marker }, "failed to parse restart marker");
+    }
     try {
       fs.unlinkSync(marker);
     } catch (err) {
       this.logger.warn({ err, marker }, "failed to remove restart marker");
     }
-    return true;
+    return { deliveries };
   }
 
   /** Active chat runtime count (mostly for tests / metrics). */
@@ -671,31 +705,59 @@ export class LarkBridge {
           );
           if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
 
+          const updatedControls = mergeSessionControls(
+            pendingAgentSwitch.record.controls,
+            controls,
+          );
           const updatedRecord: SessionRecord = {
             ...pendingAgentSwitch.record,
-            controls: mergeStoredControls(pendingAgentSwitch.record.controls, controls),
+            controls: updatedControls,
             updatedAt: Date.now(),
           };
-          this.pendingPostTurnAgentSwitches.set(key, {
-            ...pendingAgentSwitch,
-            record: updatedRecord,
-          });
+          const updatedProfile: PendingTargetProfile | undefined = pendingAgentSwitch.targetProfile
+            ? {
+                ...pendingAgentSwitch.targetProfile,
+                controls: updatedControls,
+                updatedAt: updatedRecord.updatedAt,
+              }
+            : undefined;
+          const latest = await this.sessionStore.getLatest(chatId, threadId);
+          if (latest?.pendingTargetProfile && updatedProfile) {
+            await this.sessionStore.setPendingTargetProfile({ chatId, threadId }, updatedProfile);
+          }
           const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-          await this.presenter
-            .replyNoticeCard(
-              replyTo,
-              buildPendingAgentSwitchControlQueuedNotice(
-                pendingAgentSwitch.record,
-                updatedRecord,
-                controls,
+          const queuedNoticeSpec = buildPendingAgentSwitchControlQueuedNotice(
+            pendingAgentSwitch.record,
+            updatedRecord,
+            controls,
+          );
+          let queuedNotice = pendingAgentSwitch.queuedNotice ?? null;
+          if (queuedNotice) {
+            await updateWipNoticeCard(this.presenter, queuedNotice, queuedNoticeSpec).catch((err) =>
+              this.logger.warn(
+                { err, chatId, threadId },
+                "pending target control queue notice update failed",
               ),
-            )
-            .catch((err) =>
+            );
+          } else {
+            queuedNotice = await createWipNoticeCard(
+              this.presenter,
+              replyTo,
+              queuedNoticeSpec,
+            ).catch((err) => {
               this.logger.warn(
                 { err, chatId, threadId },
                 "pending target control queue notice failed",
-              ),
-            );
+              );
+              return null;
+            });
+          }
+          this.pendingPostTurnAgentSwitches.set(key, {
+            ...pendingAgentSwitch,
+            record: updatedRecord,
+            ...(updatedProfile ? { targetProfile: updatedProfile } : {}),
+            queuedNotice,
+          });
           return { applied: false, queued: true, recordSessionId: updatedRecord.sessionId };
         }
 
@@ -709,16 +771,18 @@ export class LarkBridge {
         if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
         const record = await this.sessionStore.setPendingControls({ chatId, threadId }, controls);
         const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-        const queuedNoticeMessageId = await this.presenter
-          .replyNoticeCard(replyTo, buildPendingControlQueuedNotice(before, record, controls))
-          .catch((err) => {
-            this.logger.warn({ err, chatId, threadId }, "pending control queue notice failed");
-            return null;
-          });
-        if (queuedNoticeMessageId) {
+        const queuedNotice = await createWipNoticeCard(
+          this.presenter,
+          replyTo,
+          buildPendingControlQueuedNotice(before, record, controls),
+        ).catch((err) => {
+          this.logger.warn({ err, chatId, threadId }, "pending control queue notice failed");
+          return null;
+        });
+        if (queuedNotice) {
           await this.sessionStore.save({
             ...record,
-            pendingControlsNoticeMessageId: queuedNoticeMessageId,
+            pendingControlsNoticeMessageId: queuedNotice.messageId,
           });
         }
         return { applied: false, queued: true, recordSessionId: record.sessionId };
@@ -936,20 +1000,19 @@ export class LarkBridge {
       },
     );
     const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-    const queuedNoticeMessageId = await this.presenter
-      .replyNoticeCard(
-        replyTo,
-        buildPendingTargetProfileQueuedNotice(previous, baseRecord, saved.pendingTargetProfile),
-      )
-      .catch((err) => {
-        this.logger.warn({ err, chatId, threadId }, "pending target profile notice failed");
-        return null;
-      });
+    const queuedNotice = await createWipNoticeCard(
+      this.presenter,
+      replyTo,
+      buildPendingTargetProfileQueuedNotice(previous, baseRecord, saved.pendingTargetProfile),
+    ).catch((err) => {
+      this.logger.warn({ err, chatId, threadId }, "pending target profile notice failed");
+      return null;
+    });
     this.pendingPostTurnAgentSwitches.set(runtimeKey(chatId, threadId), {
       record: baseRecord,
       noticeMessageId: noticeMessageId ?? runtime.lastMessageId ?? null,
       targetProfile: profile,
-      queuedNoticeMessageId,
+      queuedNotice,
     });
     if (this.globalDefaultControlChatIds.includes(chatId)) {
       await this.persistGlobalDefaultPendingTargetProfile(
@@ -1004,15 +1067,22 @@ export class LarkBridge {
       : record;
 
     if (runtime?.processing) {
-      this.pendingPostTurnAgentSwitches.set(key, { record: nextRecord, noticeMessageId: replyTo });
+      let queuedNotice: WipNoticeCardRef | null = null;
       if (replyTo) {
-        await this.presenter
-          .replyNoticeCard(
-            replyTo,
-            buildPendingAgentSwitchQueuedNotice(nextRecord, previous, inherited),
-          )
-          .catch((err) => this.logger.warn({ err }, "pending agent switch notice failed"));
+        queuedNotice = await createWipNoticeCard(
+          this.presenter,
+          replyTo,
+          buildPendingAgentSwitchQueuedNotice(nextRecord, previous, inherited),
+        ).catch((err) => {
+          this.logger.warn({ err }, "pending agent switch notice failed");
+          return null;
+        });
       }
+      this.pendingPostTurnAgentSwitches.set(key, {
+        record: nextRecord,
+        noticeMessageId: replyTo,
+        queuedNotice,
+      });
       return { queued: true, agent: record.agentLabel ?? record.agentCommand };
     }
 
@@ -1027,7 +1097,7 @@ export class LarkBridge {
     replyTo: string | null,
     pendingTask?: PendingSessionTask,
     noticeKind: "agent-switch" | "pending-target-profile" = "agent-switch",
-    updateNoticeMessageId?: string | null,
+    queuedNotice?: WipNoticeCardRef | null,
   ): Promise<void> {
     const key = runtimeKey(record.chatId, record.threadId);
     const runtime = this.chats.get(key);
@@ -1040,20 +1110,19 @@ export class LarkBridge {
     await this.sessionStore.clearThread(record.chatId, record.threadId);
     await this.sessionStore.save(record);
 
+    if (pendingTask) await this.enqueueTaskForSwitchedAgent(record, pendingTask, replyTo);
+
     const notice =
       noticeKind === "pending-target-profile"
         ? buildPendingTargetProfileAppliedNotice(record, previous, pendingTask)
         : buildSessionAgentSwitchedNotice(record, previous, inherited, pendingTask);
-    if (updateNoticeMessageId && this.presenter.updateNoticeCard) {
-      const updated = await this.presenter.updateNoticeCard(updateNoticeMessageId, notice);
-      if (!updated) {
+    if (queuedNotice) {
+      await finalizeWipNoticeCard(this.presenter, queuedNotice, notice, async () => {
         await this.sendAgentSwitchNotice(record.chatId, replyTo, notice);
-      }
+      });
     } else {
       await this.sendAgentSwitchNotice(record.chatId, replyTo, notice);
     }
-
-    if (pendingTask) await this.enqueueTaskForSwitchedAgent(record, pendingTask, replyTo);
   }
 
   private async sendAgentSwitchNotice(
@@ -1088,15 +1157,25 @@ export class LarkBridge {
     const targetRecord =
       pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, targetProfile!);
     const pendingTask = targetProfile?.task ?? previous?.pendingTask;
-    await this.applyAgentSwitchNow(
-      targetRecord,
-      previous,
-      pending?.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
-      pending?.noticeMessageId ?? messageId,
-      pendingTask,
-      targetProfile ? "pending-target-profile" : "agent-switch",
-      pending?.queuedNoticeMessageId ?? null,
-    );
+    try {
+      await this.applyAgentSwitchNow(
+        targetRecord,
+        previous,
+        pending?.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
+        pending?.noticeMessageId ?? messageId,
+        pendingTask,
+        targetProfile ? "pending-target-profile" : "agent-switch",
+        pending?.queuedNotice ?? null,
+      );
+    } catch (err) {
+      if (pending?.queuedNotice) {
+        const failure = buildPendingAgentSwitchFailedNotice(err);
+        await finalizeWipNoticeCard(this.presenter, pending.queuedNotice, failure, async () => {
+          await this.sendAgentSwitchNotice(chatId, pending.noticeMessageId ?? messageId, failure);
+        });
+      }
+      throw err;
+    }
   }
 
   private async enqueueTaskForSwitchedAgent(
@@ -2326,7 +2405,7 @@ export class LarkBridge {
     await this.mutateSettingsRuntime(
       (runtime) => {
         const existingControls = readSettingsControls(runtime["defaultControls"]);
-        const nextControls = mergeGlobalDefaultControls(existingControls, controls);
+        const nextControls = mergeSessionControls(existingControls, controls);
         runtime["defaultControls"] = nextControls;
         if (controls.bridgePermissionMode !== undefined) {
           runtime["permissionMode"] = controls.bridgePermissionMode;
@@ -2346,7 +2425,7 @@ export class LarkBridge {
         runtime["agent"] = profile.agentLabel ?? profile.agentCommand;
         if (profile.controls) {
           const existingControls = readSettingsControls(runtime["defaultControls"]);
-          const nextControls = mergeGlobalDefaultControls(existingControls, profile.controls);
+          const nextControls = mergeSessionControls(existingControls, profile.controls);
           runtime["defaultControls"] = nextControls;
           if (profile.controls.bridgePermissionMode !== undefined) {
             runtime["permissionMode"] = profile.controls.bridgePermissionMode;
@@ -2702,34 +2781,6 @@ function controlPatchNeedsAgentCapabilities(controls: SessionControlPatch): bool
     controls.modeId !== undefined ||
     Object.keys(controls.config ?? {}).length > 0
   );
-}
-
-function mergeStoredControls(
-  existing: SessionControls | undefined,
-  patch: SessionControlPatch,
-): SessionControls {
-  const out: SessionControls = { ...(existing ?? {}) };
-  if (patch.clearModelId === true) delete out.modelId;
-  if (patch.modelId !== undefined) out.modelId = patch.modelId;
-  if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined) {
-    out.bridgePermissionMode = patch.bridgePermissionMode;
-  }
-  const config = mergeStoredConfig(existing?.config, patch.config);
-  if (config) out.config = config;
-  else delete out.config;
-  return out;
-}
-
-function mergeStoredConfig(
-  existing: SessionControls["config"] | undefined,
-  patch: SessionControls["config"] | undefined,
-): Record<string, NonNullable<SessionControls["config"]>[string]> | undefined {
-  const merged: Record<string, NonNullable<SessionControls["config"]>[string]> = {
-    ...(existing ?? {}),
-    ...(patch ?? {}),
-  };
-  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function pendingTargetProfileToSessionRecord(
@@ -3139,6 +3190,14 @@ function buildPendingTargetProfileAppliedNotice(
   };
 }
 
+function buildPendingAgentSwitchFailedNotice(err: unknown): NoticeCardSpec {
+  return {
+    title: "⚠️ 排队的 Session 操作未完成",
+    body: `当前 turn 已结束，但应用目标 profile 或启动 pending task 时失败。目标 profile 可能已经写入，请用 /profile 确认当前状态后重试任务。\n\n原因：${formatBootstrapError(err)}`,
+    template: "red",
+  };
+}
+
 function buildPendingAgentSwitchQueuedNotice(
   record: SessionRecord,
   before?: SessionRecord | null,
@@ -3503,28 +3562,43 @@ function isPermissionMode(value: unknown): value is PermissionMode {
   return value === "alwaysAllow" || value === "alwaysDeny" || value === "alwaysAsk";
 }
 
-function mergeGlobalDefaultControls(
-  existing: SessionControls | undefined,
-  patch: SessionControlPatch,
-): SessionControls {
-  const out: SessionControls = { ...(existing ?? {}) };
-  if (patch.clearModelId === true) delete out.modelId;
-  if (patch.modelId !== undefined) out.modelId = patch.modelId;
-  if (patch.modeId !== undefined) out.modeId = patch.modeId;
-  if (patch.bridgePermissionMode !== undefined)
-    out.bridgePermissionMode = patch.bridgePermissionMode;
-  const config = { ...(existing?.config ?? {}), ...(patch.config ?? {}) };
-  if (Object.keys(config).length > 0) out.config = config;
-  else delete out.config;
-  return out;
-}
-
 function buildProfileCommandUsageNotice(command: string): NoticeCardSpec {
   return {
     title: `ℹ️ 用法：/${command}`,
     body: profileCommandUsage(command),
     template: "blue",
   };
+}
+
+/**
+ * Parse lifecycle card ids persisted by the old bridge process. A numeric
+ * marker is the legacy format and still identifies a restart without cards.
+ *
+ * @throws {SyntaxError} when a JSON marker has an invalid shape.
+ */
+function parseRestartNoticeDeliveries(raw: string): readonly LifecycleNoticeDelivery[] {
+  const normalized = raw.trim();
+  if (/^\d+$/u.test(normalized)) return [];
+  const parsed: unknown = JSON.parse(normalized);
+  if (!isUnknownRecord(parsed) || !Array.isArray(parsed["deliveries"])) {
+    throw new SyntaxError("restart marker must contain a deliveries array");
+  }
+  return parsed["deliveries"].map((item) => {
+    if (
+      !isUnknownRecord(item) ||
+      typeof item["chatId"] !== "string" ||
+      item["chatId"].length === 0 ||
+      typeof item["messageId"] !== "string" ||
+      item["messageId"].length === 0
+    ) {
+      throw new SyntaxError("restart marker contains an invalid lifecycle card reference");
+    }
+    return { chatId: item["chatId"], messageId: item["messageId"] };
+  });
+}
+
+function isUnknownRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function profileCommandUsage(command: string): string {
