@@ -10,34 +10,31 @@ export type CardDeliveryResult =
 
 export class ConversationCardDelivery {
   private activeCardId: string | null = null;
-  private desiredState: UnifiedCardState | null = null;
+  private lifecycleEpoch = 0;
+  private deliveryQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: CardDeliveryTransport) {}
 
-  async deliver(state: UnifiedCardState): Promise<CardDeliveryResult> {
-    this.desiredState = state;
-    if (this.activeCardId === null) return this.createCard(state);
-
-    const cardId = this.activeCardId;
-    if (await this.patchActiveCard(cardId, state)) {
-      return { outcome: "visible", cardId };
-    }
-
-    this.abandon(cardId);
-    return this.createCard(state);
+  deliver(state: UnifiedCardState): Promise<CardDeliveryResult> {
+    const epoch = this.lifecycleEpoch;
+    const delivery = this.deliveryQueue.then(() => this.applyState(state, epoch));
+    this.deliveryQueue = delivery.then(
+      () => undefined,
+      () => undefined,
+    );
+    return delivery;
   }
 
   adopt(cardId: string): void {
-    this.activeCardId = cardId;
+    this.beginNewLifecycle(cardId);
   }
 
   detach(): void {
-    this.activeCardId = null;
+    this.beginNewLifecycle(null);
   }
 
   reset(): void {
-    this.activeCardId = null;
-    this.desiredState = null;
+    this.beginNewLifecycle(null);
   }
 
   hasCard(): boolean {
@@ -46,19 +43,36 @@ export class ConversationCardDelivery {
 
   takeActiveCardId(): string | null {
     const cardId = this.activeCardId;
-    this.activeCardId = null;
+    this.beginNewLifecycle(null);
     return cardId;
   }
 
-  private async createCard(state: UnifiedCardState): Promise<CardDeliveryResult> {
+  private async applyState(state: UnifiedCardState, epoch: number): Promise<CardDeliveryResult> {
+    if (!this.isCurrent(epoch)) return { outcome: "skipped" };
+    if (this.activeCardId === null) return this.sendAndInstall(state, epoch);
+
+    const cardId = this.activeCardId;
+    const accepted = await this.patchCard(cardId, state);
+    if (!this.isCurrent(epoch) || this.activeCardId !== cardId) return { outcome: "skipped" };
+    if (accepted) return { outcome: "visible", cardId };
+
+    this.activeCardId = null;
+    return this.sendAndInstall(state, epoch);
+  }
+
+  private async sendAndInstall(
+    state: UnifiedCardState,
+    epoch: number,
+  ): Promise<CardDeliveryResult> {
     const cardId = await this.transport.send(state);
+    if (!this.isCurrent(epoch)) return { outcome: "skipped" };
     if (cardId === null) return { outcome: "pending" };
 
     this.activeCardId = cardId;
     return { outcome: "visible", cardId };
   }
 
-  private async patchActiveCard(cardId: string, state: UnifiedCardState): Promise<boolean> {
+  private async patchCard(cardId: string, state: UnifiedCardState): Promise<boolean> {
     try {
       return await this.transport.patch(cardId, state);
     } catch {
@@ -66,7 +80,12 @@ export class ConversationCardDelivery {
     }
   }
 
-  private abandon(cardId: string): void {
-    if (this.activeCardId === cardId) this.activeCardId = null;
+  private beginNewLifecycle(cardId: string | null): void {
+    this.lifecycleEpoch += 1;
+    this.activeCardId = cardId;
+  }
+
+  private isCurrent(epoch: number): boolean {
+    return this.lifecycleEpoch === epoch;
   }
 }
