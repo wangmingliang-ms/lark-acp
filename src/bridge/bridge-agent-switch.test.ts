@@ -1157,6 +1157,7 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         }>;
       };
 
+      const bindingResolvedBeforeSettingsChange = await testable.resolveBinding("oc_A");
       spawnAgentMock.mockResolvedValueOnce(
         fakeAgentProcess("sess_codex_hot", {
           models: {
@@ -1178,8 +1179,11 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         }),
       );
 
-      const binding = await testable.resolveBinding("oc_A");
-      const runtime = await testable.acquireRuntime("oc_A", "omt_hot", binding);
+      const runtime = await testable.acquireRuntime(
+        "oc_A",
+        "omt_hot",
+        bindingResolvedBeforeSettingsChange,
+      );
       await runtime.enqueue({ prompt: [], messageId: "om_hot", chatId: "oc_A" });
 
       expect(await store.getLatest("oc_A", "omt_hot")).toMatchObject({

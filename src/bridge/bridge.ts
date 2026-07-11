@@ -348,6 +348,8 @@ interface EffectiveBinding {
   readonly args: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly label: string;
+  /** `true` when this binding's Agent came from a stored session profile. */
+  readonly profileSelected?: boolean;
   /** `true` when it came from an explicit `/bind`, `false` for the default. */
   readonly explicit: boolean;
   /**
@@ -2106,44 +2108,17 @@ export class LarkBridge {
     threadId: string | null,
     binding: EffectiveBinding,
   ): Promise<ChatRuntime> {
-    this.refreshRuntimeDefaultsFromSettings();
     const key = runtimeKey(chatId, threadId);
     const existing = this.chats.get(key);
     if (existing) return existing;
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
 
-    const pinned = binding.fallbackFrom
-      ? null
-      : await this.sessionStore.getLatest(chatId, threadId);
-    const inherited =
-      pinned || binding.fallbackFrom
-        ? null
-        : await this.findRecentRepoSessionProfile(chatId, threadId, binding.cwd);
-    const effective: EffectiveBinding = pinned
-      ? {
-          cwd: pinned.cwd,
-          command: pinned.agentCommand,
-          args: pinned.agentArgs,
-          ...(pinned.agentEnv ? { env: pinned.agentEnv } : {}),
-          label: pinned.agentLabel ?? pinned.agentCommand,
-          explicit: binding.explicit,
-          reception: false,
-        }
-      : inherited
-        ? {
-            cwd: inherited.cwd,
-            command: inherited.agentCommand,
-            args: inherited.agentArgs,
-            ...(inherited.agentEnv ? { env: inherited.agentEnv } : {}),
-            label: inherited.agentLabel ?? inherited.agentCommand,
-            explicit: binding.explicit,
-            reception: false,
-            ...(inherited.controls ? { inheritedControls: inherited.controls } : {}),
-          }
-        : this.defaultControls
-          ? { ...binding, inheritedControls: this.defaultControls }
-          : binding;
+    const { effective, inherited, usesGlobalDefaults } = await this.resolveRuntimeSessionProfile(
+      chatId,
+      threadId,
+      binding,
+    );
 
     if (inherited) {
       this.logger.info(
@@ -2182,9 +2157,7 @@ export class LarkBridge {
       agentLabel: effective.label,
       ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),
       ...(effective.inheritedControls ? { inheritedControls: effective.inheritedControls } : {}),
-      ...(effective.inheritedControls === this.defaultControls
-        ? { persistInheritedControls: true }
-        : {}),
+      ...(usesGlobalDefaults ? { persistInheritedControls: true } : {}),
       onTurnComplete: (messageId) => this.handleRuntimeTurnComplete(chatId, threadId, messageId),
       presenter: this.presenter,
       sessionStore: this.sessionStore,
@@ -2192,6 +2165,56 @@ export class LarkBridge {
     });
     this.chats.set(key, runtime);
     return runtime;
+  }
+
+  private async resolveRuntimeSessionProfile(
+    chatId: string,
+    threadId: string | null,
+    binding: EffectiveBinding,
+  ): Promise<{
+    readonly effective: EffectiveBinding;
+    readonly inherited: SessionRecord | null;
+    readonly usesGlobalDefaults: boolean;
+  }> {
+    this.refreshRuntimeDefaultsFromSettings();
+
+    if (!binding.fallbackFrom) {
+      const pinned = await this.sessionStore.getLatest(chatId, threadId);
+      if (pinned) {
+        return {
+          effective: sessionRecordToEffectiveBinding(pinned, binding.explicit, false),
+          inherited: null,
+          usesGlobalDefaults: false,
+        };
+      }
+
+      const inherited = await this.findRecentRepoSessionProfile(chatId, threadId, binding.cwd);
+      if (inherited) {
+        return {
+          effective: sessionRecordToEffectiveBinding(inherited, binding.explicit, true),
+          inherited,
+          usesGlobalDefaults: false,
+        };
+      }
+    }
+
+    const globalBinding = this.globalDefaultsBinding(binding);
+    return { effective: globalBinding, inherited: null, usesGlobalDefaults: true };
+  }
+
+  private globalDefaultsBinding(binding: EffectiveBinding): EffectiveBinding {
+    if (!binding.profileSelected && this.defaultAgent) {
+      return {
+        ...binding,
+        command: this.defaultAgent.command,
+        args: this.defaultAgent.args,
+        ...(this.defaultAgent.env ? { env: this.defaultAgent.env } : { env: undefined }),
+        label: this.defaultAgent.label,
+        profileSelected: true,
+        ...(this.defaultControls ? { inheritedControls: this.defaultControls } : {}),
+      };
+    }
+    return this.defaultControls ? { ...binding, inheritedControls: this.defaultControls } : binding;
   }
 
   private async findRecentRepoSessionProfile(
@@ -3380,6 +3403,24 @@ function formatSelectConfigValues(
       return `${option.value}=${option.name}`;
     })
     .join(", ");
+}
+
+function sessionRecordToEffectiveBinding(
+  record: SessionRecord,
+  explicit: boolean,
+  includeControls: boolean,
+): EffectiveBinding {
+  return {
+    cwd: record.cwd,
+    command: record.agentCommand,
+    args: record.agentArgs,
+    ...(record.agentEnv ? { env: record.agentEnv } : {}),
+    label: record.agentLabel ?? record.agentCommand,
+    profileSelected: true,
+    explicit,
+    reception: false,
+    ...(includeControls && record.controls ? { inheritedControls: record.controls } : {}),
+  };
 }
 
 function buildProbeCapabilitiesSnapshot(
