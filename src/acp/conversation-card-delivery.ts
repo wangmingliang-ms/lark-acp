@@ -6,21 +6,46 @@ export interface CardDeliveryTransport {
 }
 
 export type CardDeliveryResult =
-  { outcome: "visible"; cardId: string } | { outcome: "pending" } | { outcome: "skipped" };
+  | { outcome: "visible"; cardId: string }
+  | { outcome: "superseded"; cardId: string }
+  | { outcome: "pending" }
+  | { outcome: "skipped" };
+
+type DeliveryLifecycle = {
+  activeCardId: string | null;
+  queue: Promise<void>;
+  lastSequence: number;
+  pendingDeliveries: number;
+  skipThroughSequence: number;
+};
+
+function lifecycle(activeCardId: string | null): DeliveryLifecycle {
+  return {
+    activeCardId,
+    queue: Promise.resolve(),
+    lastSequence: 0,
+    pendingDeliveries: 0,
+    skipThroughSequence: 0,
+  };
+}
 
 export class ConversationCardDelivery {
-  private activeCardId: string | null = null;
-  private lifecycleEpoch = 0;
-  private deliveryQueue: Promise<void> = Promise.resolve();
+  private current = lifecycle(null);
 
   constructor(private readonly transport: CardDeliveryTransport) {}
 
   deliver(state: UnifiedCardState): Promise<CardDeliveryResult> {
-    const epoch = this.lifecycleEpoch;
-    const delivery = this.deliveryQueue.then(() => this.applyState(state, epoch));
-    this.deliveryQueue = delivery.then(
+    const owner = this.current;
+    const sequence = ++owner.lastSequence;
+    owner.pendingDeliveries += 1;
+    const delivery = owner.queue.then(() => this.applyState(owner, sequence, state));
+    owner.queue = delivery.then(
       () => undefined,
       () => undefined,
+    );
+    void delivery.then(
+      () => (owner.pendingDeliveries -= 1),
+      () => (owner.pendingDeliveries -= 1),
     );
     return delivery;
   }
@@ -38,37 +63,58 @@ export class ConversationCardDelivery {
   }
 
   hasCard(): boolean {
-    return this.activeCardId !== null;
+    return this.current.activeCardId !== null;
+  }
+
+  hasCardOrPendingDelivery(): boolean {
+    return this.hasCard() || this.current.pendingDeliveries > 0;
   }
 
   takeActiveCardId(): string | null {
-    const cardId = this.activeCardId;
+    const cardId = this.current.activeCardId;
     this.beginNewLifecycle(null);
     return cardId;
   }
 
-  private async applyState(state: UnifiedCardState, epoch: number): Promise<CardDeliveryResult> {
-    if (!this.isCurrent(epoch)) return { outcome: "skipped" };
-    if (this.activeCardId === null) return this.sendAndInstall(state, epoch);
+  private async applyState(
+    owner: DeliveryLifecycle,
+    sequence: number,
+    state: UnifiedCardState,
+  ): Promise<CardDeliveryResult> {
+    if (owner !== this.current || sequence <= owner.skipThroughSequence) {
+      return { outcome: "skipped" };
+    }
+    if (owner.activeCardId === null) return this.sendAndInstall(owner, state);
 
-    const cardId = this.activeCardId;
+    const cardId = owner.activeCardId;
     const accepted = await this.patchCard(cardId, state);
-    if (!this.isCurrent(epoch) || this.activeCardId !== cardId) return { outcome: "skipped" };
+    if (owner !== this.current || owner.activeCardId !== cardId) return { outcome: "skipped" };
     if (accepted) return { outcome: "visible", cardId };
 
-    this.activeCardId = null;
-    return this.sendAndInstall(state, epoch);
+    owner.activeCardId = null;
+    return this.sendAndInstall(owner, state);
   }
 
   private async sendAndInstall(
+    owner: DeliveryLifecycle,
     state: UnifiedCardState,
-    epoch: number,
   ): Promise<CardDeliveryResult> {
-    const cardId = await this.transport.send(state);
-    if (!this.isCurrent(epoch)) return { outcome: "skipped" };
-    if (cardId === null) return { outcome: "pending" };
+    let cardId: string | null;
+    try {
+      cardId = await this.transport.send(state);
+    } catch (error) {
+      owner.skipThroughSequence = owner.lastSequence;
+      throw error;
+    }
+    if (owner !== this.current) {
+      return cardId === null ? { outcome: "skipped" } : { outcome: "superseded", cardId };
+    }
+    if (cardId === null) {
+      owner.skipThroughSequence = owner.lastSequence;
+      return { outcome: "pending" };
+    }
 
-    this.activeCardId = cardId;
+    owner.activeCardId = cardId;
     return { outcome: "visible", cardId };
   }
 
@@ -81,11 +127,6 @@ export class ConversationCardDelivery {
   }
 
   private beginNewLifecycle(cardId: string | null): void {
-    this.lifecycleEpoch += 1;
-    this.activeCardId = cardId;
-  }
-
-  private isCurrent(epoch: number): boolean {
-    return this.lifecycleEpoch === epoch;
+    this.current = lifecycle(cardId);
   }
 }

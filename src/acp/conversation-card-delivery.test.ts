@@ -154,6 +154,49 @@ describe("ConversationCardDelivery", () => {
   it.each([
     ["returns null", null],
     ["throws", new Error("replacement send failed")],
+  ])("does not let queued updates retry a replacement send that %s", async (_, failure) => {
+    const replacementSend = deferred<string | null>();
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce("old-card")
+      .mockImplementationOnce(() =>
+        replacementSend.promise.then((cardId) => {
+          if (failure instanceof Error) throw failure;
+          return cardId;
+        }),
+      )
+      .mockResolvedValueOnce("new-card");
+    const patch = vi.fn(async () => false);
+    const delivery = new ConversationCardDelivery({ send, patch });
+    await delivery.deliver(cardState("initial"));
+
+    const failedDelivery = delivery.deliver(cardState("failed replacement"));
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    const queuedOne = delivery.deliver(cardState("queued one"));
+    const queuedTwo = delivery.deliver(cardState("queued two"));
+    replacementSend.resolve(null);
+
+    if (failure instanceof Error) {
+      await expect(failedDelivery).rejects.toBe(failure);
+    } else {
+      await expect(failedDelivery).resolves.toEqual({ outcome: "pending" });
+    }
+    await expect(queuedOne).resolves.toEqual({ outcome: "skipped" });
+    await expect(queuedTwo).resolves.toEqual({ outcome: "skipped" });
+    expect(send).toHaveBeenCalledTimes(2);
+
+    const newestState = cardState("newest state on independent retry");
+    await expect(delivery.deliver(newestState)).resolves.toEqual({
+      outcome: "visible",
+      cardId: "new-card",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenNthCalledWith(3, newestState);
+  });
+
+  it.each([
+    ["returns null", null],
+    ["throws", new Error("replacement send failed")],
   ])(
     "retries the newest complete state on a later delivery after replacement send %s",
     async (_, failure) => {
@@ -220,6 +263,21 @@ describe("ConversationCardDelivery", () => {
     expect(cardTransport.send).not.toHaveBeenCalled();
   });
 
+  it("reports current lifecycle delivery work while card creation is in flight", async () => {
+    const pendingSend = deferred<string | null>();
+    const delivery = new ConversationCardDelivery(
+      transport({ send: vi.fn(() => pendingSend.promise) }),
+    );
+
+    expect(delivery.hasCardOrPendingDelivery()).toBe(false);
+    const inFlight = delivery.deliver(cardState("in flight"));
+    expect(delivery.hasCardOrPendingDelivery()).toBe(true);
+
+    pendingSend.resolve(null);
+    await expect(inFlight).resolves.toEqual({ outcome: "pending" });
+    expect(delivery.hasCardOrPendingDelivery()).toBe(false);
+  });
+
   it("takes active ownership once and makes the next delivery create a card", async () => {
     const cardTransport = transport({ send: vi.fn(async () => "new-card") });
     const delivery = new ConversationCardDelivery(cardTransport);
@@ -246,6 +304,36 @@ describe("ConversationCardDelivery", () => {
     expect(cardTransport.send).toHaveBeenCalledExactlyOnceWith(cardState("after detach"));
     expect(cardTransport.patch).not.toHaveBeenCalled();
   });
+
+  it.each(["reset", "detach"] as const)(
+    "%s starts a fresh queue while an old send is still in flight and reports its stale card id",
+    async (transition) => {
+      const oldSend = deferred<string | null>();
+      const send = vi
+        .fn()
+        .mockImplementationOnce(() => oldSend.promise)
+        .mockResolvedValueOnce("fresh-card");
+      const patch = vi.fn(async () => true);
+      const delivery = new ConversationCardDelivery({ send, patch });
+      const oldDelivery = delivery.deliver(cardState("old lifecycle"));
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+      delivery[transition]();
+      const freshState = cardState("fresh lifecycle");
+      await expect(delivery.deliver(freshState)).resolves.toEqual({
+        outcome: "visible",
+        cardId: "fresh-card",
+      });
+      expect(send).toHaveBeenNthCalledWith(2, freshState);
+
+      oldSend.resolve("stale-card");
+      await expect(oldDelivery).resolves.toEqual({
+        outcome: "superseded",
+        cardId: "stale-card",
+      });
+      expect(delivery.takeActiveCardId()).toBe("fresh-card");
+    },
+  );
 
   it("reset skips queued work from the old lifecycle and protects a fresh delivery", async () => {
     const inFlightPatch = deferred<boolean>();
