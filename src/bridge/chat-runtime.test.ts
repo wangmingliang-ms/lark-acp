@@ -606,11 +606,34 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     );
   });
 
-  it("shows a notice when an idle agent exits unexpectedly", async () => {
+  it("forces an in-flight card to a terminal state when the bridge shuts down", async () => {
     const states: UnifiedCardState[] = [];
-    const notices: Array<{ title: string; body: string; template: string }> = [];
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "restart the bridge" }],
+      messageId: "om_restart",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+
+    await runtime.shutdown("cancelled");
+
+    expect(states.at(-1)).toMatchObject({ status: "cancelled", cancellable: false });
+  });
+
+  it("silently discards an idle agent that exits unexpectedly and respawns on demand", async () => {
+    const states: UnifiedCardState[] = [];
+    const notices: Array<{ title: string; body: string; template: string }> = [];
+    const first = makeFakeAgent();
+    const second = makeFakeAgent();
+    spawnAgentMock.mockResolvedValueOnce(first.agent).mockResolvedValueOnce(second.agent);
 
     const runtime = new ChatRuntime({
       ...opts(),
@@ -623,22 +646,24 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_idle",
       chatId: "oc_test",
     });
-    fake.resolvePrompt("end_turn");
+    first.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(runtime.processing).toBe(false), {
       timeout: 1_000,
       interval: 20,
     });
 
-    fake.exitProcess(42, null);
+    first.exitProcess(42, null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(notices).toEqual([]);
 
-    await vi.waitFor(
-      () => {
-        expect(notices.at(-1)).toMatchObject({ title: "⚠️ Agent 异常退出", template: "red" });
-        expect(notices.at(-1)?.body).toContain("code=42");
-        expect(notices.at(-1)?.body).toContain("fatal: boom");
-      },
-      { timeout: 1_000, interval: 20 },
-    );
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "after idle exit" }],
+      messageId: "om_after_idle",
+      chatId: "oc_test",
+    });
+
+    expect(spawnAgentMock).toHaveBeenCalledTimes(2);
+    second.resolvePrompt("end_turn");
   });
 
   it("still finalizes normally when the prompt resolves before any close", async () => {

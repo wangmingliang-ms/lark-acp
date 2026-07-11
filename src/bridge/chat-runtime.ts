@@ -285,7 +285,9 @@ export class ChatRuntime {
     });
     if (finalStatus !== null) {
       await withTimeout(
-        state.client.finalizeIfRenderable(finalStatus),
+        this.promptInFlight
+          ? state.client.finalize(finalStatus)
+          : state.client.finalizeIfRenderable(finalStatus),
         SHUTDOWN_FINALIZE_TIMEOUT_MS,
       ).catch((err) => this.logger.warn({ err }, "shutdown card finalize failed"));
     }
@@ -314,7 +316,9 @@ export class ChatRuntime {
       template: "grey",
     });
     await withTimeout(
-      state.client.finalizeIfRenderable("complete"),
+      this.promptInFlight
+        ? state.client.finalize("complete")
+        : state.client.finalizeIfRenderable("complete"),
       SHUTDOWN_FINALIZE_TIMEOUT_MS,
     ).catch((err) => this.logger.warn({ err }, "supersede card finalize failed"));
     this.state = null;
@@ -755,21 +759,8 @@ export class ChatRuntime {
       this.logger.error({ code, signal }, "agent exited unexpectedly while idle");
     }
 
-    const messageId = this.state.lastMessageId;
-    const tail = this.state.agent.getRecentStderr();
     this.state = null;
     this.aborted = true;
-
-    if (!messageId || exitedNormally) return;
-
-    const body = formatExitBody(`Agent 进程意外退出 (${formatExitCode(code, signal)})`, tail);
-    this.opts.presenter
-      .replyNoticeCard(messageId, {
-        title: "⚠️ Agent 异常退出",
-        body,
-        template: "red",
-      })
-      .catch((err) => this.logger.warn({ err }, "exit notice reply failed"));
   }
 
   private async processQueue(): Promise<void> {
