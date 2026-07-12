@@ -89,7 +89,10 @@ Then the canonical projection is:
 showTitle = isTail;
 showMetadata = isTail;
 showCancel =
-  isTail && response.phase === "active" && topic.executionOwnerResponseId === response.id;
+  isTail &&
+  card.kind === "response" &&
+  response.isInProgress &&
+  topic.executionOwnerResponseId === response.id;
 ```
 
 ### 4.1 Intermediate Card
@@ -110,13 +113,14 @@ This rule is independent of why the successor Card was created.
 
 The tail Card retains Title and Metadata in all non-terminal phases:
 
-| Response phase              | Title | Metadata | Cancel |
-| --------------------------- | ----: | -------: | -----: |
-| received / queued           |   yes |      yes |     no |
-| interrupting                |   yes |      yes |     no |
-| preparing                   |   yes |      yes |     no |
-| active, not Execution Owner |   yes |      yes |     no |
-| active, Execution Owner     |   yes |      yes |    yes |
+| Response phase                       | Title | Metadata | Cancel |
+| ------------------------------------ | ----: | -------: | -----: |
+| received / queued                    |   yes |      yes |     no |
+| interrupting                         |   yes |      yes |     no |
+| preparing                            |   yes |      yes |     no |
+| active, not Execution Owner          |   yes |      yes |     no |
+| active, Execution Owner              |   yes |      yes |    yes |
+| awaiting permission, Execution Owner |   yes |      yes |    yes |
 
 `active, not Execution Owner` should normally be unreachable. If observed, it is an invariant violation and must not render Cancel.
 
