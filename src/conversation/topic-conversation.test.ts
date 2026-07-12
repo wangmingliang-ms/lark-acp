@@ -63,6 +63,103 @@ function response(topic: TopicConversation, responseId: ResponseId) {
 }
 
 describe("TopicConversation canonical lifecycle", () => {
+  it("drops a failed merged hydration member without blocking the carrier", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+    const b = accept(topic, "b");
+    const c = accept(topic, "c");
+
+    expect(
+      topic.snapshot().pendingBatch?.messages.map((message) => message.sourceMessageId),
+    ).toEqual(["message-b", "message-c"]);
+    topic.dropMergedBatchMember(b);
+    expect(topic.snapshot().pendingBatch).toMatchObject({
+      carrierResponseId: c,
+      state: "collecting",
+    });
+    expect(
+      topic.snapshot().pendingBatch?.messages.map((message) => message.sourceMessageId),
+    ).toEqual(["message-c"]);
+    expect(() => topic.dropMergedBatchMember(c)).toThrow(
+      "cannot drop the current pending batch carrier",
+    );
+  });
+
+  it("treats a follow-up admitted before first activation as interrupting work", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    const b = accept(topic, "b");
+
+    expect(response(topic, a).state).toMatchObject({ phase: "received" });
+    expect(response(topic, b).state).toMatchObject({ phase: "interrupting" });
+    expect(topic.snapshot().pendingBatch).toMatchObject({
+      carrierResponseId: b,
+      messages: [{ content: "b" }],
+      state: "collecting",
+    });
+
+    start(topic, a, "a");
+    expect(response(topic, b).state).toMatchObject({ phase: "interrupting" });
+    const handoff = topic.sealOwnerForPendingBatch("interrupted");
+    expect(handoff).toMatchObject({ carrierResponseId: b, state: "sealed" });
+  });
+
+  it("merges pre-activation follow-ups and keeps only the latest carrier", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    const b = accept(topic, "b");
+    const c = append(topic, "c");
+
+    expect(response(topic, b).state).toEqual({ kind: "terminal", outcome: "merged" });
+    expect(response(topic, c).state).toMatchObject({ phase: "interrupting" });
+    expect(topic.snapshot().pendingBatch).toMatchObject({
+      carrierResponseId: c,
+      messages: [{ content: "b" }, { content: "c" }],
+    });
+    start(topic, a, "a");
+    expect(topic.sealOwnerForPendingBatch("interrupted")).toMatchObject({ carrierResponseId: c });
+  });
+
+  it("normalizes running tools before publishing a terminal snapshot", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+    topic.append(a, {
+      kind: "tool",
+      toolCallId: "tool-running",
+      title: "Run",
+      status: "in_progress",
+    });
+    topic.seal(a, "failed");
+
+    expect(response(topic, a).cards.at(-1)?.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool-running",
+        title: "Run",
+        status: "interrupted",
+      },
+    ]);
+  });
+
+  it("coalesces consecutive streaming text and thought chunks", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+    topic.append(a, { kind: "text", text: "我" });
+    topic.append(a, { kind: "text", text: "先" });
+    topic.append(a, { kind: "thought", text: "检" });
+    topic.append(a, { kind: "thought", text: "查" });
+    topic.append(a, { kind: "text", text: "完成" });
+
+    expect(response(topic, a).cards.at(-1)?.entries).toEqual([
+      { kind: "text", text: "我先" },
+      { kind: "thought", text: "检查" },
+      { kind: "text", text: "完成" },
+    ]);
+  });
+
   it("projects only the active execution owner's tail with Cancel", () => {
     const topic = new TopicConversation();
     const a = accept(topic, "a");

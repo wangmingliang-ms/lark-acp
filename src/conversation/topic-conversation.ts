@@ -144,15 +144,22 @@ class ResponseCard {
   }
 
   append(entry: TimelineEntry): void {
+    if (entry.kind === "text" || entry.kind === "thought") {
+      const last = this.timeline.at(-1);
+      if (last?.kind === entry.kind) {
+        this.timeline[this.timeline.length - 1] = { ...last, text: last.text + entry.text };
+        return;
+      }
+    }
     this.timeline.push(entry);
   }
 
-  sealRunningTools(): void {
+  sealRunningTools(status: "continued" | "interrupted" = "continued"): void {
     for (let index = 0; index < this.timeline.length; index += 1) {
       const entry = this.timeline[index];
       if (entry?.kind !== "tool") continue;
       if (entry.status !== "pending" && entry.status !== "in_progress") continue;
-      this.timeline[index] = { ...entry, status: "continued" };
+      this.timeline[index] = { ...entry, status };
     }
   }
 
@@ -233,6 +240,7 @@ class ResponseLifecycle {
 
   seal(outcome: TerminalOutcome): void {
     if (this.stateValue.kind === "terminal") return;
+    this.tail.sealRunningTools("interrupted");
     this.stateValue = { kind: "terminal", outcome };
   }
 
@@ -352,7 +360,11 @@ export class TopicConversation {
     if (this.pendingBatchValue?.state === "sealed") {
       throw new Error("cannot accept a new turn while a sealed batch is committing");
     }
-    const phase = this.executionOwner === null ? "received" : "interrupting";
+    const provisionalOwner =
+      this.executionOwner ??
+      this.turns.find((turn) => turn.response.state.kind === "in_progress")?.response.id ??
+      null;
+    const phase = provisionalOwner === null ? "received" : "interrupting";
     const request = cloneRequest(input.request);
     const response = new ResponseLifecycle(
       input.responseId,
@@ -362,8 +374,8 @@ export class TopicConversation {
       phase,
     );
     this.turns.push(new Turn(input.turnId, request, response));
-    if (this.executionOwner !== null) {
-      this.expireCurrentPermissionFor(this.executionOwner);
+    if (provisionalOwner !== null) {
+      this.expireCurrentPermissionFor(provisionalOwner);
       this.pendingBatchValue = {
         messages: [request],
         carrierResponseId: input.responseId,
@@ -383,8 +395,13 @@ export class TopicConversation {
   prepare(responseId: ResponseId): void {
     if (this.executionOwner !== null) throw new Error("cannot prepare while execution is owned");
     const batch = this.pendingBatchValue;
-    if (batch !== null && (batch.state !== "sealed" || batch.carrierResponseId !== responseId)) {
-      throw new Error("only a sealed batch carrier may prepare");
+    if (batch !== null) {
+      const provisionalOwner = this.turns.find((turn) => turn.response.state.kind === "in_progress")
+        ?.response.id;
+      const allowed =
+        (batch.state === "sealed" && batch.carrierResponseId === responseId) ||
+        (batch.state === "collecting" && provisionalOwner === responseId);
+      if (!allowed) throw new Error("only the provisional owner or sealed carrier may prepare");
     }
     const response = this.response(responseId);
     if (response.state.kind !== "in_progress") throw new Error("terminal response cannot prepare");
@@ -402,12 +419,22 @@ export class TopicConversation {
       throw new Error("only a preparing response may activate");
     }
     const batch = this.pendingBatchValue;
-    if (batch !== null && (batch.state !== "sealed" || batch.carrierResponseId !== responseId)) {
-      throw new Error("only the sealed batch carrier may activate");
+    if (batch !== null) {
+      const provisionalOwner = this.turns.find(
+        (turn) =>
+          turn.response.state.kind === "in_progress" &&
+          turn.response.id !== batch.carrierResponseId,
+      )?.response.id;
+      const allowed =
+        (batch.state === "sealed" && batch.carrierResponseId === responseId) ||
+        (batch.state === "collecting" && provisionalOwner === responseId);
+      if (!allowed)
+        throw new Error("only the provisional owner or sealed batch carrier may activate");
     }
     response.transition("active");
     this.executionOwner = responseId;
     this.cancel = { kind: "cancel", responseId, cardId: response.tail.id, token };
+    this.collectPreActivationFollowups(responseId);
     this.assertInvariants();
   }
 
@@ -614,6 +641,23 @@ export class TopicConversation {
     return "accepted";
   }
 
+  dropMergedBatchMember(responseId: ResponseId): void {
+    const batch = this.pendingBatchValue;
+    if (batch === null) return;
+    if (batch.carrierResponseId === responseId) {
+      throw new Error("cannot drop the current pending batch carrier");
+    }
+    const turn = this.turns.find((candidate) => candidate.response.id === responseId);
+    if (turn === undefined) throw new Error(`unknown response ${responseId}`);
+    if (turn.response.state.kind !== "terminal" || turn.response.state.outcome !== "merged") {
+      throw new Error("only a merged pending batch member may be dropped");
+    }
+    const index = batch.messages.findIndex((request) => request.id === turn.request.id);
+    if (index < 0) return;
+    batch.messages.splice(index, 1);
+    this.assertInvariants();
+  }
+
   commitPendingBatchAfterOwnerEnded(): PendingRequestBatchSnapshot {
     if (this.executionOwner !== null) throw new Error("execution owner has not ended");
     const batch = this.pendingBatchValue;
@@ -708,6 +752,28 @@ export class TopicConversation {
       carrierResponseId: batch.carrierResponseId,
       state: batch.state,
     });
+  }
+
+  private collectPreActivationFollowups(ownerId: ResponseId): void {
+    if (this.pendingBatchValue !== null) return;
+    const ownerIndex = this.turns.findIndex((turn) => turn.response.id === ownerId);
+    if (ownerIndex < 0) return;
+    const waiting = this.turns.slice(ownerIndex + 1).filter((turn) => {
+      const state = turn.response.state;
+      return state.kind === "in_progress" && state.phase === "received";
+    });
+    if (waiting.length === 0) return;
+    for (let index = 0; index < waiting.length; index += 1) {
+      const turn = waiting[index];
+      if (turn === undefined) continue;
+      turn.response.transition("interrupting");
+      if (index < waiting.length - 1) turn.response.seal("merged");
+    }
+    this.pendingBatchValue = {
+      messages: waiting.map((turn) => cloneRequest(turn.request)),
+      carrierResponseId: waiting.at(-1)!.response.id,
+      state: "collecting",
+    };
   }
 
   private appendCollectingBatch(input: AppendToBatchInput): ResponseId {

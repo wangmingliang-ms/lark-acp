@@ -627,7 +627,7 @@ function buildSemanticPermissionCard(view: PermissionCardView): object {
 function semanticEmptyMessage(view: ConversationCardView): string {
   switch (view.kind) {
     case "queued":
-      return emptyStateMessage("queued");
+      return emptyStateMessage("received");
     case "interrupting":
       return emptyStateMessage("interrupting");
     case "starting":
@@ -664,6 +664,7 @@ function semanticEmptyMessage(view: ConversationCardView): string {
 function semanticHeader(view: ConversationCardView): { content: string; template: string } | null {
   switch (view.kind) {
     case "queued":
+      return STATUS_HEADER.received;
     case "interrupting":
     case "starting":
     case "active":
@@ -712,7 +713,7 @@ function semanticSummary(
       return text ? truncateSummary(text) : "对话片段";
     }
     case "queued":
-      return statusSummary("queued", view.entries);
+      return statusSummary("received", view.entries);
     case "interrupting":
       return statusSummary("interrupting", view.entries);
     case "starting":
@@ -869,17 +870,6 @@ function entries(value: Record<string, unknown>): readonly Record<string, unknow
   return value.entries as readonly Record<string, unknown>[];
 }
 
-function hasTextEntry(value: Record<string, unknown>): boolean {
-  return entries(value).some((entry) => entry.kind === "text" && (entry.text as string).length > 0);
-}
-
-function hasRunningToolEntry(value: Record<string, unknown>): boolean {
-  return entries(value).some(
-    (entry) =>
-      entry.kind === "tool" && (entry.status === "pending" || entry.status === "in_progress"),
-  );
-}
-
 function hasOnlyTerminalToolEntries(value: Record<string, unknown>): boolean {
   return entries(value).every(
     (entry) =>
@@ -940,9 +930,6 @@ function isConversationCardView(value: unknown): value is ConversationCardView {
         ["thinking", "waiting", "calling_tool", "responding"].includes(value.header as string) &&
         hasEntries(value) &&
         isProfile(value.profile) &&
-        (value.header !== "responding" || hasTextEntry(value)) &&
-        (value.header !== "calling_tool" || hasRunningToolEntry(value)) &&
-        (value.header !== "waiting" || entries(value).length === 0) &&
         (value.cancelAction === undefined ||
           (isRecord(value.cancelAction) &&
             hasOnlyKeys(value.cancelAction, ["p", "s", "a"]) &&

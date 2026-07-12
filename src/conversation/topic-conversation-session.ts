@@ -396,7 +396,13 @@ export class TopicConversationSession {
 
   async failResponse(responseId: ResponseId, text: string): Promise<void> {
     const response = this.response(responseId);
-    if (response.state.kind === "terminal") return;
+    if (response.state.kind === "terminal") {
+      if (response.state.outcome === "merged") {
+        this.store.transaction((aggregate) => aggregate.dropMergedBatchMember(responseId));
+        this.removeAcknowledgement(responseId);
+      }
+      return;
+    }
     const owner = this.snapshot.executionOwnerResponseId;
     if (owner === responseId) {
       this.store.transaction((aggregate) => aggregate.append(responseId, { kind: "notice", text }));

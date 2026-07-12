@@ -77,6 +77,71 @@ function permissionRequest(): acp.RequestPermissionRequest {
 }
 
 describe("LarkCardPresenter card summary", () => {
+  it("accepts asynchronous active snapshots and renders Cancel", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards, [], { v2Enabled: true });
+    const base = {
+      profile: null,
+      cancelAction: {
+        p: "prompt" as PromptToken,
+        s: "segment" as SegmentToken,
+        a: "action" as ActionToken,
+      },
+      route: { c: "chat", th: "thread" },
+    } as const;
+
+    await expect(
+      presenter.sendConversationCard("message", {
+        kind: "active",
+        header: "waiting",
+        entries: [{ kind: "text", text: "已有内容" }],
+        ...base,
+      }),
+    ).resolves.toBe("card_1");
+    await expect(
+      presenter.sendConversationCard("message", {
+        kind: "active",
+        header: "responding",
+        entries: [],
+        ...base,
+      }),
+    ).resolves.toBe("card_1");
+    await expect(
+      presenter.sendConversationCard("message", {
+        kind: "active",
+        header: "calling_tool",
+        entries: [],
+        ...base,
+      }),
+    ).resolves.toBe("card_1");
+
+    expect(cards).toHaveLength(3);
+    for (const card of cards) {
+      expect(
+        card.body?.elements?.some(
+          (element) => element.tag === "button" && element.text?.content === "中断当前任务",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("labels a newly received semantic Response as received, not queued behind prior work", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards, [], { v2Enabled: true });
+    await expect(
+      presenter.sendConversationCard("message", {
+        kind: "queued",
+        header: "queued",
+        entries: [],
+        profile: null,
+        route: { c: "chat", th: "thread" },
+      }),
+    ).resolves.toBe("card_1");
+    expect(cards[0]?.header?.title?.content).toBe("📩 消息已收到");
+    expect(cards[0]?.body?.elements?.[0]?.content).toContain("已收到消息");
+    expect(JSON.stringify(cards[0])).not.toContain("前一任务仍在进行");
+  });
+
   it("adds processing / waiting / terminal summaries for home-list status", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
@@ -572,7 +637,7 @@ describe("LarkCardPresenter semantic conversation cards", () => {
     }
 
     expect(cards.map((card) => card.header?.title?.content)).toEqual([
-      "⏳ 消息已排队",
+      "📩 消息已收到",
       "⚡ 正在中断当前任务",
       "🔄 准备中...",
       "对话片段",
@@ -581,7 +646,7 @@ describe("LarkCardPresenter semantic conversation cards", () => {
       "✅ 已结束",
     ]);
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
-      "⏳ 等待处理",
+      "📩 Humming 已收到消息",
       "⚡ 正在中断当前任务",
       "🔄 正在启动或连接 Agent",
       "对话片段",
@@ -657,24 +722,7 @@ describe("LarkCardPresenter semantic conversation cards", () => {
       status: "in_progress",
     };
     const malformed = [
-      { kind: "active", header: "responding", entries: [], profile, route },
-      { kind: "active", header: "calling_tool", entries: [], profile, route },
-      {
-        kind: "active",
-        header: "waiting",
-        entries: [{ kind: "text", text: "unexpected" }],
-        profile,
-        route,
-      },
       { kind: "archived", entries: [running], summary: "x", route },
-      {
-        kind: "terminal",
-        header: "failed",
-        entries: [running],
-        profile,
-        body: "content",
-        route,
-      },
       {
         kind: "terminal",
         header: "complete",

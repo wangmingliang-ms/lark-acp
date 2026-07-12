@@ -38,7 +38,7 @@ import type { AcknowledgementPort } from "../conversation/topic-conversation-ses
 import { PromptCallbackRouter } from "../acp/prompt-callback-router.js";
 import { TopicConversationSession } from "../conversation/topic-conversation-session.js";
 import { ConversationResponseHandle } from "../conversation/conversation-response-handle.js";
-import type { ResponseId } from "../conversation/topic-conversation.js";
+import type { RequestMessage, ResponseId } from "../conversation/topic-conversation.js";
 import type { PromptToken } from "../presenter/conversation-card-view.js";
 import crypto from "node:crypto";
 
@@ -132,7 +132,20 @@ export class ChatRuntime {
   private activeResponse: ConversationResponseHandle | null = null;
   private pendingCarrier: PendingMessage | null = null;
   private committedCarrierResponseId: ResponseId | null = null;
+  private committedPendingBatch: readonly RequestMessage[] | null = null;
   private state: ChatRuntimeState | null = null;
+  private bootstrapPromise: Promise<ChatRuntimeState> | null = null;
+  private readonly admissionOrder: ResponseId[] = [];
+  private readonly hydratedAdmissions = new Map<
+    ResponseId,
+    {
+      readonly message: PendingMessage;
+      readonly resolve: () => void;
+      readonly reject: (error: unknown) => void;
+    }
+  >();
+  private readonly hydratedByMessageId = new Map<string, PendingMessage>();
+  private admissionDrain: Promise<void> = Promise.resolve();
   private aborted = false;
   /** True after a topic-level /cancel or runtime shutdown requested cancellation. */
   private topicCancelRequested = false;
@@ -197,12 +210,14 @@ export class ChatRuntime {
       content: context.content,
       profile: context.profile,
     });
-    return new ConversationResponseHandle(
+    const handle = new ConversationResponseHandle(
       accepted.responseId,
       accepted.responseToken,
       context.messageId,
       this.conversation,
     );
+    this.admissionOrder.push(handle.responseId);
+    return handle;
   }
 
   get chatId(): string {
@@ -236,8 +251,12 @@ export class ChatRuntime {
    *         The runtime is left in an unusable state — caller must drop it.
    */
   async enqueue(message: PendingMessage): Promise<void> {
-    const pending: PendingMessage =
-      this.conversationCardFeature.v2Enabled && message.response === undefined
+    if (!this.conversationCardFeature.v2Enabled) {
+      await this.enqueueReady(message);
+      return;
+    }
+    const admitted: PendingMessage =
+      message.response === undefined
         ? {
             ...message,
             response: this.acceptResponse({
@@ -247,15 +266,53 @@ export class ChatRuntime {
             }),
           }
         : message;
+    await new Promise<void>((resolve, reject) => {
+      this.hydratedByMessageId.set(admitted.messageId, admitted);
+      this.hydratedAdmissions.set(admitted.response!.responseId, {
+        message: admitted,
+        resolve,
+        reject,
+      });
+      this.scheduleAdmissionDrain();
+    });
+  }
+
+  private scheduleAdmissionDrain(): void {
+    this.admissionDrain = this.admissionDrain
+      .then(async () => {
+        while (this.admissionOrder.length > 0) {
+          const responseId = this.admissionOrder[0];
+          if (responseId === undefined) return;
+          const hydrated = this.hydratedAdmissions.get(responseId);
+          if (hydrated === undefined) return;
+          this.admissionOrder.shift();
+          this.hydratedAdmissions.delete(responseId);
+          try {
+            await this.enqueueReady(hydrated.message);
+            hydrated.resolve();
+          } catch (error) {
+            hydrated.reject(error);
+          }
+        }
+      })
+      .catch((error) => this.logger.error({ error }, "admission drain crashed"));
+  }
+
+  private async enqueueReady(message: PendingMessage): Promise<void> {
+    const pending = message;
     if (!this.state) {
       // A previous agent crash / idle exit tears down `state`; the next user
       // message should spawn a fresh agent, not inherit the old aborted flag.
       this.aborted = false;
       this.topicCancelRequested = false;
       this.followupInterruptRequested = false;
-      this.booting = true;
+      const ownsBootstrap = this.bootstrapPromise === null;
+      if (ownsBootstrap) {
+        this.booting = true;
+        this.bootstrapPromise = this.bootstrap(pending);
+      }
       try {
-        this.state = await this.bootstrap(pending);
+        this.state = await this.bootstrapPromise;
       } catch (err) {
         if (pending.response !== undefined) {
           await pending.response
@@ -265,11 +322,16 @@ export class ChatRuntime {
         this.aborted = true;
         throw err;
       } finally {
-        this.booting = false;
+        if (ownsBootstrap) {
+          this.bootstrapPromise = null;
+          this.booting = false;
+        }
       }
     }
 
-    this.state.lastActivity = Date.now();
+    const state = this.state;
+    if (state === null) throw new Error("runtime bootstrap did not produce state");
+    state.lastActivity = Date.now();
     if (pending.response !== undefined && !pending.response.isRunnable()) return;
     if (
       this.conversationCardFeature.v2Enabled &&
@@ -281,9 +343,10 @@ export class ChatRuntime {
       }
       this.committedCarrierResponseId = null;
       this.pendingCarrier = null;
-      this.state.queue.push(pending);
-      if (!this.state.processing) {
-        this.state.processing = true;
+      this.applyCommittedBatchPrompt(pending);
+      state.queue.push(pending);
+      if (!state.processing) {
+        state.processing = true;
         this.processQueue().catch((err) => this.logger.error({ err }, "queue processor crashed"));
       }
       return;
@@ -291,7 +354,7 @@ export class ChatRuntime {
     if (
       this.conversationCardFeature.v2Enabled &&
       this.conversation.snapshot.executionOwnerResponseId !== null &&
-      (this.state.processing || this.promptInFlight) &&
+      (state.processing || this.promptInFlight) &&
       pending.response !== undefined
     ) {
       const previousCarrier = this.pendingCarrier;
@@ -303,28 +366,38 @@ export class ChatRuntime {
         ];
       }
       this.pendingCarrier = pending;
-      await this.interruptCurrentPromptForFollowup(this.state, pending);
+      await this.interruptCurrentPromptForFollowup(state, pending);
       return;
     }
-    this.state.queue.push(pending);
+    state.queue.push(pending);
 
-    if (this.state.processing || this.promptInFlight) {
+    if (state.processing || this.promptInFlight) {
       await this.updatePendingMessageCard(pending, "queued");
       if (!this.conversationCardFeature.v2Enabled) {
-        await this.interruptCurrentPromptForFollowup(this.state, pending);
+        await this.interruptCurrentPromptForFollowup(state, pending);
       }
       return;
     }
 
-    this.state.processing = true;
+    state.processing = true;
     this.processQueue().catch((err) => this.logger.error({ err }, "queue processor crashed"));
   }
 
   private commitPendingCarrier(handoff: {
-    readonly pendingBatch: readonly unknown[] | null;
+    readonly pendingBatch: readonly RequestMessage[] | null;
     readonly carrierResponseId: ResponseId | null;
   }): void {
     if (handoff.pendingBatch === null || handoff.carrierResponseId === null) return;
+    this.committedPendingBatch = handoff.pendingBatch;
+    const queuedCarrier = this.state?.queue.find(
+      (message) => message.response?.responseId === handoff.carrierResponseId,
+    );
+    if (queuedCarrier !== undefined) {
+      this.applyCommittedBatchPrompt(queuedCarrier);
+      this.pendingCarrier = null;
+      this.committedCarrierResponseId = null;
+      return;
+    }
     const carrier = this.pendingCarrier;
     if (carrier === null) {
       this.committedCarrierResponseId = handoff.carrierResponseId;
@@ -333,8 +406,33 @@ export class ChatRuntime {
     if (carrier.response?.responseId !== handoff.carrierResponseId) {
       throw new Error("domain pending batch carrier does not match runtime carrier");
     }
+    this.applyCommittedBatchPrompt(carrier);
     this.pendingCarrier = null;
     this.state?.queue.push(carrier);
+  }
+
+  private applyCommittedBatchPrompt(carrier: PendingMessage): void {
+    const batch = this.committedPendingBatch;
+    if (batch === null) return;
+    const blocks: acp.ContentBlock[] = [];
+    for (let index = 0; index < batch.length; index += 1) {
+      const request = batch[index];
+      if (request === undefined) continue;
+      const hydrated = this.hydratedByMessageId.get(request.sourceMessageId);
+      if (hydrated === undefined) {
+        throw new Error(`pending batch message is not hydrated: ${request.sourceMessageId}`);
+      }
+      if (blocks.length > 0) {
+        blocks.push({
+          type: "text",
+          text: "[用户补充/修正了上一条尚未发送的消息，以下内容属于同一请求批次]",
+        });
+      }
+      blocks.push(...hydrated.prompt);
+    }
+    carrier.prompt = blocks;
+    for (const request of batch) this.hydratedByMessageId.delete(request.sourceMessageId);
+    this.committedPendingBatch = null;
   }
 
   /**
@@ -375,6 +473,17 @@ export class ChatRuntime {
     }
   }
 
+  private clearAdmissionState(reason: string): void {
+    const error = new Error(reason);
+    for (const hydrated of this.hydratedAdmissions.values()) hydrated.reject(error);
+    this.admissionOrder.length = 0;
+    this.hydratedAdmissions.clear();
+    this.hydratedByMessageId.clear();
+    this.committedPendingBatch = null;
+    this.committedCarrierResponseId = null;
+    this.pendingCarrier = null;
+  }
+
   /**
    * Cancel the current prompt (if any) and clear the queue. Keeps the
    * agent process alive so the next message can resume the same session.
@@ -397,8 +506,7 @@ export class ChatRuntime {
     } catch (err) {
       this.logger.warn({ err }, "cancel notification rejected");
     }
-    this.pendingCarrier = null;
-    this.committedCarrierResponseId = null;
+    this.clearAdmissionState("topic was cancelled");
     state.queue.length = 0;
   }
 
@@ -407,14 +515,14 @@ export class ChatRuntime {
     this.aborted = true;
     const state = this.state;
     if (!state) {
+      this.clearAdmissionState("runtime was shut down");
       await this.finalizePendingMessages([], "Bridge 已停止，排队的新消息未处理。");
       return;
     }
     this.logger.info("shutting down chat runtime");
     if (this.conversationCardFeature.v2Enabled) {
       await this.conversation.interruptTopic();
-      this.pendingCarrier = null;
-      this.committedCarrierResponseId = null;
+      this.clearAdmissionState("runtime was shut down");
     }
     state.client.cancelPendingPermission();
     await this.finalizePendingMessages(state.queue, "Bridge 已停止，排队的新消息未处理。");
@@ -440,14 +548,16 @@ export class ChatRuntime {
   async supersede(): Promise<void> {
     this.aborted = true;
     const state = this.state;
-    if (!state) return;
+    if (!state) {
+      this.clearAdmissionState("runtime was superseded");
+      return;
+    }
     this.logger.info("superseding chat runtime");
     this.suppressPromptErrorNotice = true;
     this.topicCancelRequested = true;
     if (this.conversationCardFeature.v2Enabled) {
       await this.conversation.interruptTopic();
-      this.pendingCarrier = null;
-      this.committedCarrierResponseId = null;
+      this.clearAdmissionState("runtime was superseded");
     }
     state.client.cancelPendingPermission();
     await this.finalizePendingMessages(state.queue, "Session 已被替换，排队的新消息未处理。");
@@ -488,8 +598,20 @@ export class ChatRuntime {
   }
 
   abandonHydration(responseId: ResponseId): void {
+    const index = this.admissionOrder.indexOf(responseId);
+    if (index >= 0) this.admissionOrder.splice(index, 1);
+    const hydrated = this.hydratedAdmissions.get(responseId);
+    if (hydrated !== undefined) {
+      this.hydratedAdmissions.delete(responseId);
+      this.hydratedByMessageId.delete(hydrated.message.messageId);
+      hydrated.reject(new Error("response hydration was abandoned"));
+    }
+    this.scheduleAdmissionDrain();
     if (this.pendingCarrier?.response?.responseId === responseId) this.pendingCarrier = null;
-    if (this.committedCarrierResponseId === responseId) this.committedCarrierResponseId = null;
+    if (this.committedCarrierResponseId === responseId) {
+      this.committedCarrierResponseId = null;
+      this.committedPendingBatch = null;
+    }
   }
 
   consumeCancelAction(input: {
@@ -996,6 +1118,8 @@ export class ChatRuntime {
           state.queue.push(...this.queuedAfterRespawn.splice(0));
         }
         const pending = state.queue.shift()!;
+        if (pending.response !== undefined && !pending.response.isRunnable()) continue;
+        this.hydratedByMessageId.delete(pending.messageId);
         state.lastMessageId = pending.messageId;
 
         state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
@@ -1034,7 +1158,7 @@ export class ChatRuntime {
       if (this.state) this.state.processing = false;
       if (!this.state && this.queuedAfterRespawn.length > 0 && !this.aborted) {
         const next = this.queuedAfterRespawn.shift()!;
-        await this.enqueue(next);
+        await this.enqueueReady(next);
       }
     }
   }
@@ -1179,6 +1303,16 @@ export class ChatRuntime {
           }
         : {}),
     };
+    if (injected.response !== undefined) {
+      this.hydratedByMessageId.set(injected.messageId, injected);
+      this.hydratedAdmissions.set(injected.response.responseId, {
+        message: injected,
+        resolve: () => undefined,
+        reject: (error) => this.logger.warn({ error }, "injected pending task admission failed"),
+      });
+      this.scheduleAdmissionDrain();
+      return;
+    }
     state.queue.unshift(injected);
   }
 
@@ -1253,6 +1387,18 @@ export class ChatRuntime {
         }),
       );
       await pending.response.activate();
+      const batch = this.conversation.snapshot.pendingBatch;
+      if (batch?.state === "collecting") {
+        const carrierMessageId = batch.messages.at(-1)?.sourceMessageId;
+        const carrier =
+          carrierMessageId === undefined
+            ? undefined
+            : this.hydratedByMessageId.get(carrierMessageId);
+        if (carrier !== undefined) {
+          this.pendingCarrier = carrier;
+          await this.interruptCurrentPromptForFollowup(state, carrier);
+        }
+      }
       routeHandle = router.activate(pending.response.responseToken as PromptToken, {
         sessionUpdate: async (params) => pending.response?.applyAgentUpdate(params.update),
         requestPermission: async (params) =>

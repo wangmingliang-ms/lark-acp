@@ -91,9 +91,68 @@ describe("ChatRuntime idle-eviction getters (regression: evicted mid-spawn)", ()
 });
 
 describe("ChatRuntime prompt preparation", () => {
+  beforeEach(() => {
+    spawnAgentMock.mockReset();
+    spawnAndResumeAgentMock.mockReset();
+  });
+
   it("keeps the production feature gate disabled by default", () => {
     const runtime = new ChatRuntime(opts());
     expect(runtime.conversationCardFeature).toBe(DISABLED_CONVERSATION_CARD_FEATURE);
+  });
+
+  it("releases hydration waiters when shutdown occurs before the first admission hydrates", async () => {
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+      conversationCardFeature: { v2Enabled: true },
+    });
+    runtime.acceptResponse({ messageId: "om_a", content: "A", profile: null });
+    const b = runtime.acceptResponse({ messageId: "om_b", content: "B", profile: null });
+    const waiting = runtime.enqueue({
+      prompt: [{ type: "text", text: "B" }],
+      messageId: "om_b",
+      chatId: "oc_test",
+      response: b,
+    });
+
+    await runtime.shutdown();
+    await expect(waiting).rejects.toThrow("runtime was shut down");
+  });
+
+  it("shares one bootstrap when two messages enqueue concurrently", async () => {
+    const fake = makeFakeAgent();
+    let releaseSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    spawnAgentMock.mockImplementation(async () => {
+      await spawnBlocked;
+      return fake.agent;
+    });
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+    });
+
+    const first = runtime.enqueue({
+      prompt: [{ type: "text", text: "first" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    const second = runtime.enqueue({
+      prompt: [{ type: "text", text: "second" }],
+      messageId: "om_second",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(spawnAgentMock).toHaveBeenCalledOnce());
+    releaseSpawn();
+    await Promise.all([first, second]);
+    expect(spawnAgentMock).toHaveBeenCalledOnce();
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(fake.prompts()).toContain("first"));
   });
 
   it("uses the legacy ACP client when the semantic gate is disabled", async () => {
@@ -584,6 +643,115 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(routes).toEqual(expect.arrayContaining(["oc_test"]));
   });
 
+  it("preserves admission order when B hydrates before the first A", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+      conversationCardFeature: { v2Enabled: true },
+    });
+    const a = runtime.acceptResponse({ messageId: "om_a", content: "A", profile: null });
+    const b = runtime.acceptResponse({ messageId: "om_b", content: "B", profile: null });
+
+    const enqueueB = runtime.enqueue({
+      prompt: [{ type: "text", text: "B" }],
+      messageId: "om_b",
+      chatId: "oc_test",
+      response: b,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake.prompts()).toEqual([]);
+    const enqueueA = runtime.enqueue({
+      prompt: [{ type: "text", text: "A" }],
+      messageId: "om_a",
+      chatId: "oc_test",
+      response: a,
+    });
+
+    await Promise.all([enqueueA, enqueueB]);
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    expect(fake.prompts()[0]).toContain("A");
+    fake.resolvePrompt("cancelled");
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
+    expect(fake.prompts()[1]).toContain("B");
+  });
+
+  it("continues with C when merged B hydration is abandoned", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+      conversationCardFeature: { v2Enabled: true },
+    });
+    const a = runtime.acceptResponse({ messageId: "om_a", content: "A", profile: null });
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "A" }],
+      messageId: "om_a",
+      chatId: "oc_test",
+      response: a,
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    const b = runtime.acceptResponse({ messageId: "om_b", content: "B", profile: null });
+    const c = runtime.acceptResponse({ messageId: "om_c", content: "C", profile: null });
+
+    runtime.abandonHydration(b.responseId);
+    await b.fail("hydrate failed");
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "C" }],
+      messageId: "om_c",
+      chatId: "oc_test",
+      response: c,
+    });
+    fake.resolvePrompt("cancelled");
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
+    expect(fake.prompts()[1]).not.toContain("B");
+    expect(fake.prompts()[1]).toContain("C");
+  });
+
+  it("rebuilds B and C in admission order when C hydrates first", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+      conversationCardFeature: { v2Enabled: true },
+    });
+    const a = runtime.acceptResponse({ messageId: "om_a", content: "A", profile: null });
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "A" }],
+      messageId: "om_a",
+      chatId: "oc_test",
+      response: a,
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    const b = runtime.acceptResponse({ messageId: "om_b", content: "B", profile: null });
+    const c = runtime.acceptResponse({ messageId: "om_c", content: "C", profile: null });
+    const enqueueC = runtime.enqueue({
+      prompt: [{ type: "text", text: "C" }],
+      messageId: "om_c",
+      chatId: "oc_test",
+      response: c,
+    });
+    const enqueueB = runtime.enqueue({
+      prompt: [{ type: "text", text: "B" }],
+      messageId: "om_b",
+      chatId: "oc_test",
+      response: b,
+    });
+    await Promise.all([enqueueB, enqueueC]);
+    fake.resolvePrompt("cancelled");
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
+    const combined = fake.prompts()[1] ?? "";
+    expect(combined).toContain("B");
+    expect(combined).toContain("C");
+    expect(combined.indexOf("B")).toBeLessThan(combined.indexOf("C"));
+  });
+
   it("waits for an accepted carrier that finishes hydration after the owner stops", async () => {
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
@@ -613,10 +781,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fake.prompts()).toHaveLength(1);
     await runtime.enqueue({
-      prompt: [
-        { type: "text", text: "B" },
-        { type: "text", text: "C" },
-      ],
+      prompt: [{ type: "text", text: "C" }],
       messageId: "om_c",
       chatId: "oc_test",
       response: c,
@@ -1331,6 +1496,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       ...opts(),
       presenter: recordingPresenter([]),
       sessionStore: store,
+      conversationCardFeature: { v2Enabled: true },
     });
 
     await runtime.enqueue({
@@ -1359,6 +1525,20 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       expect.arrayContaining([{ type: "text", text: "implement the pending task" }]),
     );
     expect(latest?.pendingTask).toBeUndefined();
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "normal message after injected task" }],
+      messageId: "om_after_injected",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(3), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(prompt.mock.calls[2]?.[0].prompt).toEqual(
+      expect.arrayContaining([{ type: "text", text: "normal message after injected task" }]),
+    );
 
     fake.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(runtime.processing).toBe(false), {

@@ -234,9 +234,15 @@ A2 -> tail: Title + Metadata + Cancel
 
 When A ends, `A2` remains the final tail with terminal Title and Metadata and without Cancel.
 
-## 7. New Request while another Response is active
+## 7. New Request while another Response is active or activating
 
-Suppose Response A is active and owns execution. Request B arrives.
+Suppose Response A is active and owns execution, or has already been admitted as the earliest unfinished Response but is still bootstrapping/preparing. Request B arrives.
+
+Admission ordering—not only `executionOwnerResponseId`—defines whether B is a follow-up. Before A becomes active it is the provisional owner; B must enter `interrupting` and a collecting batch immediately rather than appearing as an independent received Response.
+
+Runtime Agent bootstrap is single-flight per topic. Concurrent enqueues await one bootstrap and must never spawn duplicate Agents. Consecutive pre-activation follow-ups merge exactly like active follow-ups, with only the newest Response retaining carrier authority. A hydrated carrier already present in the Runtime queue satisfies handoff immediately; merged non-carriers are skipped before Agent dispatch.
+
+Streaming text and thought chunks are semantic continuations, not separate visual rows. Adjacent chunks of the same kind on the same Card are coalesced; tool, notice, kind-change, and Card-rotation boundaries end coalescing.
 
 ### 7.1 B is accepted immediately
 
