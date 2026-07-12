@@ -187,7 +187,10 @@ export class ConversationCardDelivery {
       return nextOwner;
 
     owner.accepting = false;
-    const snapshot = cardSnapshot(view);
+    const snapshot = cardSnapshot(view) as Extract<
+      ConversationCardView,
+      { kind: "archived" | "terminal" }
+    >;
     const sequence = ++owner.lastSequence;
     owner.closeSequence = sequence;
     const priorQueue = owner.queue;
