@@ -454,6 +454,37 @@ All terminal paths use one sealing operation:
 
 An old Card's stale visual button must be harmless because its action token has been revoked. An unversioned/tokenless legacy Cancel must never cancel a newer Response.
 
+### 9.1 Response-scoped Card Cancel
+
+A tokenized Cancel button is bound to exactly one Response and its current tail. Consuming it cancels only that Response.
+
+If A owns execution while a PendingRequestBatch `[B, C]` is waiting to take over:
+
+```text
+Card Cancel on A
+  -> A terminal(cancelled)
+  -> expire any Permission owned by A
+  -> release A's Execution Ownership
+  -> preserve [B, C]
+  -> current batch carrier C moves preparing -> active
+```
+
+The button must not clear, cancel, or otherwise mutate B, C, or any other Response. A stale A token is inert after A ends.
+
+### 9.2 Topic-scoped `/cancel`
+
+The explicit `/cancel` command cancels all unfinished work in the Topic:
+
+```text
+1. Cancel and seal the current Execution Owner as cancelled.
+2. Expire its current Permission request, if any.
+3. Discard any unsealed PendingRequestBatch.
+4. Seal its current carrier and every other waiting Response as cancelled, except former carriers already terminal(merged).
+5. Clear all Topic scheduling state.
+```
+
+This command is intentionally broader than a Card Cancel. The UI and tests must keep the two scopes distinct.
+
 ## 10. Restart semantics
 
 Restart is intentionally simple and non-durable.
@@ -498,6 +529,7 @@ I12. Every Permission Card is immediately followed by a continuation Response ta
 I13. Failed external patches do not roll back domain state; their stale action tokens remain invalid.
 I14. During interrupt handoff, all messages collected before the handoff boundary form one ordered PendingRequestBatch and are forwarded to the Agent once.
 I15. The newest message's Response is the batch carrier; every previous carrier terminates as merged.
+I16. A tokenized Card Cancel affects only its bound Response; `/cancel` cancels all unfinished work in the Topic.
 ```
 
 ## 13. Conformance matrix
@@ -519,6 +551,8 @@ I15. The newest message's Response is the batch carrier; every previous carrier 
 | Response completes                      | final tail complete Title + Metadata                                         | none                                              | none                                |
 | Response fails                          | final tail failed Title + Metadata                                           | none                                              | none                                |
 | Response is cancelled                   | final tail cancelled Title + Metadata                                        | none                                              | none                                |
+| Card Cancel on A while [B,C] waits      | A cancelled Title + Metadata                                                 | carrier C continues preparing/active              | C once active                       |
+| `/cancel` with unfinished work          | owner and waiting carrier tails become cancelled; merged tails stay merged   | no successor starts                               | none                                |
 | Bridge restarts                         | final tail interrupted Title + Metadata                                      | optional non-actionable notice only               | none                                |
 | Late callback arrives                   | no change                                                                    | no new Card                                       | none                                |
 
