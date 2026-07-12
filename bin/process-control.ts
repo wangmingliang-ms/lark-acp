@@ -9,10 +9,9 @@
  * liveness probe, a detached `child_process.spawn` for backgrounding, and
  * `path`/`fs` for state files — rather than a Linux-only supervisor.
  *
- * Graceful stop (SIGTERM → the bridge's own shutdown hook) is POSIX-only; on
- * Windows `process.kill` hard-terminates. Crash-restart / boot-autostart are
- * intentionally out of scope here (a later platform layer — systemd unit /
- * Task Scheduler — would call `start`).
+ * Graceful stop uses SIGTERM on POSIX and the local control pipe on Windows.
+ * Crash-restart / boot-autostart are intentionally out of scope here (a later
+ * platform layer — systemd unit / Task Scheduler — would call `start`).
  */
 
 import crypto from "node:crypto";
@@ -20,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { sendControlRequest } from "../src/bridge/control-server.js";
 
 /** Used only in user-facing hint text; kept local to avoid coupling to the CLI. */
 const APP_NAME = "humming";
@@ -42,6 +42,8 @@ const POST_SPAWN_CHECK_MS = 600;
 const FAILURE_TAIL_LINES = 15;
 /** How long SIGTERM is given to shut the bridge down before SIGKILL. */
 const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
+/** How long Windows waits for the bridge to accept a local graceful-shutdown request. */
+const CONTROL_SHUTDOWN_TIMEOUT_MS = 1_000;
 /** How long we wait for the process to vanish after SIGKILL. */
 const SIGKILL_TIMEOUT_MS = 2_000;
 /** Poll cadence while waiting for a process to exit. */
@@ -59,6 +61,24 @@ export class ProcessControlError extends Error {
   override readonly name = "ProcessControlError";
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
+  }
+}
+
+async function requestWindowsGracefulShutdown(homeDir: string): Promise<void> {
+  try {
+    const request = sendControlRequest(bridgeControlSocketPath(homeDir), {
+      method: "shutdown",
+      params: {},
+    });
+    // The CLI may time out before the named pipe reports its eventual failure.
+    // Keep that late rejection handled while stopBridge proceeds to its fallback.
+    void request.catch(() => undefined);
+    const response = await withTimeout(request, CONTROL_SHUTDOWN_TIMEOUT_MS);
+    if (!response.ok) {
+      process.stderr.write(`  graceful shutdown rejected: ${response.error}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`  graceful shutdown unavailable: ${formatErr(err)}\n`);
   }
 }
 
@@ -560,11 +580,15 @@ export async function stopBridge(opts: StopOptions): Promise<boolean> {
   }
 
   process.stdout.write(`stopping bridge (PID ${pid})...\n`);
-  signalQuietly(pid, "SIGTERM");
+  if (process.platform === "win32") {
+    await requestWindowsGracefulShutdown(opts.homeDir);
+  } else {
+    signalQuietly(pid, "SIGTERM");
+  }
 
   const exited = await waitForExit(pid, GRACEFUL_STOP_TIMEOUT_MS);
   if (!exited) {
-    process.stderr.write("  graceful stop timed out; sending SIGKILL\n");
+    process.stderr.write("  graceful stop timed out; forcing process termination\n");
     signalQuietly(pid, "SIGKILL");
     await waitForExit(pid, SIGKILL_TIMEOUT_MS);
   }
@@ -768,6 +792,20 @@ function removeQuietly(filePath: string): void {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("control request timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Poll until `pid` is no longer alive or the timeout elapses. */

@@ -323,6 +323,9 @@ export interface LarkBridgeOptions {
   /** Unix-domain socket for local `humming control …` requests. */
   controlSocketPath?: string | null;
 
+  /** Ask the foreground CLI to stop this bridge after replying to a local control request. */
+  onShutdownRequested?: () => void;
+
   /** Direct-message chat ids whose Agent/Model/Mode/Permission changes update settings.json defaults. */
   globalDefaultControlChatIds?: readonly string[];
 
@@ -445,6 +448,7 @@ export class LarkBridge {
   private readonly unboundCwd: string | null;
   private readonly settingsPath: string | null;
   private readonly controlSocketPath: string | null;
+  private readonly onShutdownRequested: (() => void) | undefined;
   private readonly globalDefaultControlChatIds: readonly string[];
   private readonly lark: LarkBridgeLarkOptions;
   private readonly lifecycleNotificationChatIds: readonly string[];
@@ -500,6 +504,7 @@ export class LarkBridge {
     this.unboundCwd = opts.unboundCwd ?? null;
     this.settingsPath = opts.settingsPath ?? null;
     this.controlSocketPath = opts.controlSocketPath ?? null;
+    this.onShutdownRequested = opts.onShutdownRequested;
     this.globalDefaultControlChatIds = opts.globalDefaultControlChatIds ?? [];
     this.lifecycleNotificationChatIds = opts.lifecycle?.notificationChatIds ?? [];
     this.restartMarkerPath = opts.lifecycle?.restartMarkerPath ?? null;
@@ -642,6 +647,11 @@ export class LarkBridge {
       socketPath: this.controlSocketPath,
       logger: this.logger,
       handlers: {
+        shutdown: async () => {
+          if (!this.onShutdownRequested) throw new Error("bridge shutdown is unavailable");
+          this.onShutdownRequested();
+          return { accepted: true };
+        },
         capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
         setControls: async (chatId, threadId, controls) => {
           const result = await this.controlSetControls(chatId, threadId, controls);

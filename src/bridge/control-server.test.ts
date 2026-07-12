@@ -26,6 +26,7 @@ describe("BridgeControlServer", () => {
       socketPath,
       logger: createPinoLogger(),
       handlers: {
+        shutdown: async () => ({ accepted: true }),
         capabilities: async (chatId, threadId) => ({
           session: { chatId, threadId, sessionId: "sess_1" },
           agent: { command: "node", args: [], cwd: "/repo" },
@@ -76,6 +77,10 @@ describe("BridgeControlServer", () => {
       },
     });
     await server.start();
+
+    await expect(
+      sendControlRequest(socketPath, { method: "shutdown", params: {} }),
+    ).resolves.toMatchObject({ ok: true, result: { accepted: true } });
 
     const caps = await sendControlRequest(socketPath, {
       method: "capabilities",
@@ -244,6 +249,7 @@ describe("BridgeControlServer", () => {
       socketPath,
       logger: createPinoLogger(),
       handlers: {
+        shutdown: async () => ({ accepted: true }),
         capabilities: async (chatId, threadId) => ({
           session: { chatId, threadId, sessionId: "sess_pipe" },
           agent: { command: "node", args: [], cwd: "/repo" },

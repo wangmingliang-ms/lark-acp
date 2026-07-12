@@ -3016,6 +3016,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   });
   const codeRevision = readCodeRevision(path.dirname(fileURLToPath(import.meta.url)));
 
+  let requestShutdown = (): void => {};
   const bridge = new LarkBridge({
     lark: { appId: cfg.appId, appSecret: cfg.appSecret },
     agent: {
@@ -3038,6 +3039,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     unboundCwd: cfg.unboundCwd,
     settingsPath: configPath,
     controlSocketPath: bridgeControlSocketPath(homeDir),
+    onShutdownRequested: () => requestShutdown(),
     globalDefaultControlChatIds: cfg.globalControlChatIds,
     lifecycle: {
       notificationChatIds: cfg.lifecycleNotifyChatIds,
@@ -3050,10 +3052,10 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   });
 
   let stopping = false;
-  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+  const shutdown = async (reason: NodeJS.Signals | "CONTROL"): Promise<void> => {
     if (stopping) return;
     stopping = true;
-    cliLogger.info(`received ${signal}, stopping`);
+    cliLogger.info(`received ${reason}, stopping`);
     try {
       await bridge.stop();
     } catch (err) {
@@ -3063,6 +3065,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     }
     process.exit(0);
   };
+  requestShutdown = () => setImmediate(() => void shutdown("CONTROL"));
   process.on("SIGINT", (sig) => void shutdown(sig));
   process.on("SIGTERM", (sig) => void shutdown(sig));
 
