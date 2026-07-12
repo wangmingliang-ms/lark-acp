@@ -195,6 +195,8 @@ interface FakeAgentHandle {
   closeConnection: () => void;
   /** Number of ACP cancel notifications sent to this fake agent. */
   cancelCalls: () => number;
+  /** Hold the next ACP cancel notification until the returned callback is invoked. */
+  holdNextCancel: () => () => void;
   /** Prompt texts delivered to ACP in order. */
   prompts: () => readonly string[];
 }
@@ -217,6 +219,7 @@ function makeFakeAgent(): FakeAgentHandle {
   const queuedPromptResponses: acp.PromptResponse[] = [];
   const promptTexts: string[] = [];
   let cancelCallCount = 0;
+  let nextCancelGate: Promise<void> | null = null;
 
   let exitHandler: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = null;
   const proc = {
@@ -245,6 +248,11 @@ function makeFakeAgent(): FakeAgentHandle {
     },
     cancel: async () => {
       cancelCallCount += 1;
+      if (nextCancelGate) {
+        const gate = nextCancelGate;
+        nextCancelGate = null;
+        await gate;
+      }
     },
     unstable_setSessionModel: async () => ({}),
     setSessionMode: async () => ({}),
@@ -313,6 +321,13 @@ function makeFakeAgent(): FakeAgentHandle {
       resolveClosed();
     },
     cancelCalls: () => cancelCallCount,
+    holdNextCancel: () => {
+      let release: () => void = () => {};
+      nextCancelGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return release;
+    },
     prompts: () => [...promptTexts],
   };
 }
@@ -417,14 +432,12 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
   it("interrupts an in-flight prompt when a follow-up user message is queued", async () => {
     const states: UnifiedCardState[] = [];
-    const notices: Array<{ title: string; body: string; template: string }> = [];
-    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
 
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter(states, notices, noticeUpdates),
+      presenter: recordingPresenter(states),
       sessionStore: stubSessionStore(),
     });
 
@@ -442,10 +455,11 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       prompt: [{ type: "text", text: "urgent follow-up" }],
       messageId: "om_followup",
       chatId: "oc_test",
+      progressCardId: "card_followup",
     });
 
     expect(fake.cancelCalls()).toBe(1);
-    expect(notices.at(-1)).toMatchObject({ title: "⚡ 正在中断当前任务", template: "blue" });
+    expect(states.slice(-2).map((state) => state.status)).toEqual(["queued", "interrupting"]);
 
     fake.resolvePrompt("cancelled");
 
@@ -456,23 +470,19 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       },
       { timeout: 1_000, interval: 20 },
     );
-    expect(noticeUpdates.at(-1)).toMatchObject({
-      title: "✅ 新消息已开始处理",
-      template: "green",
-    });
+    expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: true });
   });
 
   it("respawns and preserves the queued follow-up if interrupt closes the agent", async () => {
     const states: UnifiedCardState[] = [];
     const notices: Array<{ title: string; body: string; template: string }> = [];
-    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
     const first = makeFakeAgent();
     const second = makeFakeAgent();
     spawnAgentMock.mockResolvedValueOnce(first.agent).mockResolvedValueOnce(second.agent);
 
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter(states, notices, noticeUpdates),
+      presenter: recordingPresenter(states, notices),
       sessionStore: stubSessionStore(),
     });
 
@@ -490,6 +500,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       prompt: [{ type: "text", text: "urgent follow-up after crash" }],
       messageId: "om_followup",
       chatId: "oc_test",
+      progressCardId: "card_followup",
     });
     first.closeConnection();
 
@@ -501,19 +512,16 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       { timeout: 1_000, interval: 20 },
     );
     expect(notices.some((notice) => notice.title === "⚠️ Agent 异常退出")).toBe(false);
-    expect(noticeUpdates.at(-1)).toMatchObject({
-      title: "✅ 新消息已开始处理",
-      template: "green",
-    });
+    expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: true });
   });
 
-  it("marks the follow-up interrupt card terminal when the queued message is cancelled", async () => {
-    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
+  it("marks the queued message card terminal when the queued message is cancelled", async () => {
+    const states: UnifiedCardState[] = [];
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: recordingPresenter([], [], noticeUpdates),
+      presenter: recordingPresenter(states),
       sessionStore: stubSessionStore(),
     });
 
@@ -527,33 +535,26 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       prompt: [{ type: "text", text: "queued follow-up" }],
       messageId: "om_followup",
       chatId: "oc_test",
+      progressCardId: "card_followup",
     });
 
     await runtime.cancel();
 
-    expect(noticeUpdates.at(-1)).toMatchObject({
-      title: "⛔ 新消息已取消",
-      template: "grey",
+    expect(states.at(-1)).toMatchObject({
+      status: "cancelled",
+      entries: [{ kind: "text", text: "排队的新消息已取消。" }],
     });
     fake.resolvePrompt("cancelled");
   });
 
-  it("claims a follow-up card before awaiting its terminal patch", async () => {
-    let releasePatch: (() => void) | null = null;
-    const patchGate = new Promise<void>((resolve) => {
-      releasePatch = resolve;
-    });
-    const updateNoticeCard = vi.fn(async () => {
-      await patchGate;
-      return true;
-    });
-    const targetPresenter = recordingPresenter([]);
-    targetPresenter.updateNoticeCard = updateNoticeCard;
-    const fake = makeFakeAgent();
-    spawnAgentMock.mockResolvedValue(fake.agent);
+  it("does not respawn a queued follow-up when explicit cancel races an agent disconnect", async () => {
+    const states: UnifiedCardState[] = [];
+    const first = makeFakeAgent();
+    const second = makeFakeAgent();
+    spawnAgentMock.mockResolvedValueOnce(first.agent).mockResolvedValueOnce(second.agent);
     const runtime = new ChatRuntime({
       ...opts(),
-      presenter: targetPresenter,
+      presenter: recordingPresenter(states),
       sessionStore: stubSessionStore(),
     });
 
@@ -562,20 +563,25 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       messageId: "om_first",
       chatId: "oc_test",
     });
-    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    await vi.waitFor(() => expect(first.prompts()).toHaveLength(1));
     await runtime.enqueue({
       prompt: [{ type: "text", text: "queued follow-up" }],
       messageId: "om_followup",
       chatId: "oc_test",
+      progressCardId: "card_followup",
     });
-    fake.resolvePrompt("cancelled");
-    await vi.waitFor(() => expect(updateNoticeCard).toHaveBeenCalledTimes(1));
 
-    await runtime.cancel();
+    const releaseCancel = first.holdNextCancel();
+    const cancellation = runtime.cancel();
+    await vi.waitFor(() => expect(first.cancelCalls()).toBe(2));
+    first.closeConnection();
+    await vi.waitFor(() => expect(states.at(-1)?.status).toBe("cancelled"));
+    releaseCancel();
+    await cancellation;
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(updateNoticeCard).toHaveBeenCalledTimes(1);
-    if (!releasePatch) throw new Error("terminal patch gate was not initialized");
-    releasePatch();
+    expect(spawnAgentMock).toHaveBeenCalledOnce();
+    expect(second.prompts()).toEqual([]);
   });
 
   it("marks the card cancelled when a requested cancellation closes the agent connection", async () => {

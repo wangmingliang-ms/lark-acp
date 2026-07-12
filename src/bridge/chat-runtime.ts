@@ -3,15 +3,10 @@ import type { LarkLogger } from "../logger/logger.js";
 import type {
   AgentStatus,
   LarkPresenter,
-  NoticeCardSpec,
   SessionCardMeta,
+  UnifiedCardState,
 } from "../presenter/presenter.js";
-import {
-  createWipNoticeCard,
-  finalizeWipNoticeCard,
-  restoreWipNoticeCard,
-  type WipNoticeCardRef,
-} from "../presenter/notice-card-lifecycle.js";
+import { finalizeWipNoticeCard, restoreWipNoticeCard } from "../presenter/notice-card-lifecycle.js";
 import { HummingClient, PERMISSION_MODES, type PermissionMode } from "../acp/humming-client.js";
 import {
   spawnAgent,
@@ -97,12 +92,6 @@ interface ChatRuntimeState {
   lastMessageId: string | null;
 }
 
-type FollowupInterruptNotice = {
-  readonly targetMessageId: string;
-  cardRef: WipNoticeCardRef | null;
-  terminal: NoticeCardSpec | null;
-};
-
 /**
  * Per-chat ACP runtime: owns one agent subprocess, one `HummingClient`,
  * and a FIFO queue of pending Lark messages.
@@ -120,8 +109,6 @@ export class ChatRuntime {
   private cancelRequested = false;
   /** True after a busy follow-up requested a soft cancel of the current prompt. */
   private followupInterruptRequested = false;
-  /** Busy-follow-up acknowledgement waiting to be patched once that message starts. */
-  private followupInterruptNotice: FollowupInterruptNotice | null = null;
   /** Suppress the prompt-error notice when this runtime is intentionally replaced. */
   private suppressPromptErrorNotice = false;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
@@ -196,6 +183,7 @@ export class ChatRuntime {
     this.state.queue.push(message);
 
     if (this.state.processing || this.promptInFlight) {
+      await this.updatePendingMessageCard(message, "queued");
       await this.interruptCurrentPromptForFollowup(this.state, message);
       return;
     }
@@ -216,37 +204,12 @@ export class ChatRuntime {
     if (this.followupInterruptRequested) return;
     this.followupInterruptRequested = true;
     state.client.cancelPendingPermission();
-    const depth = state.queue.length;
-    const notice: FollowupInterruptNotice = {
-      targetMessageId: message.messageId,
-      cardRef: null,
-      terminal: null,
-    };
-    this.followupInterruptNotice = notice;
-    const noticePromise = createWipNoticeCard(this.opts.presenter, message.messageId, {
-      title: "⚡ 正在中断当前任务",
-      body:
-        depth > 1
-          ? `已收到新消息，正在中断当前任务；后面还有 ${depth} 条消息排队。`
-          : "已收到新消息，正在中断当前任务；稍后会优先处理这条消息。",
-      template: "blue",
-    }).catch((err) => {
-      this.logger.warn({ err }, "busy follow-up interrupt notice failed");
-      return null;
-    });
+    await this.updatePendingMessageCard(message, "interrupting");
     try {
       await state.agent.connection.cancel({ sessionId: state.agent.sessionId });
     } catch (err) {
       this.logger.warn({ err }, "busy follow-up cancel notification rejected");
     }
-    const cardRef = await noticePromise;
-    if (this.followupInterruptNotice !== notice) return;
-    if (!cardRef) {
-      this.followupInterruptNotice = null;
-      return;
-    }
-    notice.cardRef = cardRef;
-    if (notice.terminal) await this.finishFollowupInterruptNotice(notice);
   }
 
   /**
@@ -254,35 +217,34 @@ export class ChatRuntime {
    * agent process alive so the next message can resume the same session.
    */
   async cancel(): Promise<void> {
-    if (!this.state) return;
+    const state = this.state;
+    if (!state) {
+      await this.finalizePendingMessages([], "排队的新消息已取消。");
+      return;
+    }
     this.logger.info("cancelling current task");
     this.cancelRequested = true;
-    this.state.client.cancelPendingPermission();
-    await this.markFollowupTerminal({
-      title: "⛔ 新消息已取消",
-      body: "中断请求已取消，排队的新消息不会继续处理。",
-      template: "grey",
-    });
+    state.client.cancelPendingPermission();
+    await this.finalizePendingMessages(state.queue, "排队的新消息已取消。");
     try {
-      await this.state.agent.connection.cancel({ sessionId: this.state.agent.sessionId });
+      await state.agent.connection.cancel({ sessionId: state.agent.sessionId });
     } catch (err) {
       this.logger.warn({ err }, "cancel notification rejected");
     }
-    this.state.queue.length = 0;
+    state.queue.length = 0;
   }
 
   /** Tear down the agent process so the next message starts fresh. */
   async shutdown(finalStatus: AgentStatus | null = "cancelled"): Promise<void> {
     this.aborted = true;
     const state = this.state;
-    if (!state) return;
+    if (!state) {
+      await this.finalizePendingMessages([], "Bridge 已停止，排队的新消息未处理。");
+      return;
+    }
     this.logger.info("shutting down chat runtime");
     state.client.cancelPendingPermission();
-    await this.markFollowupTerminal({
-      title: "⛔ 新消息未处理",
-      body: "会话已结束，排队的新消息未继续处理。",
-      template: "grey",
-    });
+    await this.finalizePendingMessages(state.queue, "Bridge 已停止，排队的新消息未处理。");
     if (finalStatus !== null) {
       await withTimeout(
         this.promptInFlight
@@ -310,11 +272,7 @@ export class ChatRuntime {
     this.suppressPromptErrorNotice = true;
     this.cancelRequested = true;
     state.client.cancelPendingPermission();
-    await this.markFollowupTerminal({
-      title: "⛔ 新消息未处理",
-      body: "Session 已被替换，排队的新消息未继续处理。",
-      template: "grey",
-    });
+    await this.finalizePendingMessages(state.queue, "Session 已被替换，排队的新消息未处理。");
     await withTimeout(
       this.promptInFlight
         ? state.client.finalize("complete")
@@ -778,7 +736,6 @@ export class ChatRuntime {
 
         state.client.setContext(pending.messageId, pending.chatId, this.opts.threadId);
         state.client.adoptProgressCard(pending.progressCardId);
-        await this.markFollowupStarted(pending.messageId);
 
         await this.applyPendingControlsBeforePrompt(state, pending.messageId);
         if (this.aborted || this.state !== state) return;
@@ -804,33 +761,56 @@ export class ChatRuntime {
     }
   }
 
-  private async markFollowupStarted(messageId: string): Promise<void> {
-    const notice = this.followupInterruptNotice;
-    if (!notice || notice.targetMessageId !== messageId) return;
-    notice.terminal = {
-      title: "✅ 新消息已开始处理",
-      body: "上一任务已结束，Agent 已开始处理这条消息。",
-      template: "green",
+  private async updatePendingMessageCard(
+    message: PendingMessage,
+    status: "queued" | "interrupting",
+  ): Promise<void> {
+    if (!message.progressCardId) return;
+    const updated = await this.opts.presenter.updateUnifiedCard(
+      message.progressCardId,
+      this.pendingMessageCardState(message, status),
+    );
+    if (!updated) {
+      this.logger.warn(
+        { messageId: message.messageId, status },
+        "pending message card update failed",
+      );
+    }
+  }
+
+  private async finalizePendingMessages(
+    messages: readonly PendingMessage[],
+    text: string,
+  ): Promise<void> {
+    await Promise.all(
+      [...messages, ...this.queuedAfterRespawn].map(async (message) => {
+        if (!message.progressCardId) return;
+        const updated = await this.opts.presenter.updateUnifiedCard(message.progressCardId, {
+          ...this.pendingMessageCardState(message, "cancelled"),
+          entries: [{ kind: "text", text }],
+        });
+        if (!updated) {
+          this.logger.warn(
+            { messageId: message.messageId },
+            "pending message terminal card update failed",
+          );
+        }
+      }),
+    );
+    this.queuedAfterRespawn.length = 0;
+  }
+
+  private pendingMessageCardState(
+    message: PendingMessage,
+    status: "queued" | "interrupting" | "cancelled",
+  ): UnifiedCardState {
+    return {
+      status,
+      entries: [],
+      cancellable: false,
+      chatId: message.chatId,
+      threadId: this.opts.threadId,
     };
-    if (notice.cardRef) await this.finishFollowupInterruptNotice(notice);
-  }
-
-  private async markFollowupTerminal(terminal: NoticeCardSpec): Promise<void> {
-    const notice = this.followupInterruptNotice;
-    if (!notice) return;
-    notice.terminal = terminal;
-    if (notice.cardRef) await this.finishFollowupInterruptNotice(notice);
-  }
-
-  private async finishFollowupInterruptNotice(notice: FollowupInterruptNotice): Promise<void> {
-    if (this.followupInterruptNotice !== notice) return;
-    const cardRef = notice.cardRef;
-    const terminal = notice.terminal;
-    if (!cardRef || !terminal) return;
-    this.followupInterruptNotice = null;
-    await finalizeWipNoticeCard(this.opts.presenter, cardRef, terminal, async () => {
-      await this.opts.presenter.replyNoticeCard(notice.targetMessageId, terminal);
-    });
   }
 
   private async applyPendingControlsBeforePrompt(
@@ -1056,6 +1036,14 @@ export class ChatRuntime {
     // the next queue iteration, and avoid surfacing a scary crash notice: the
     // user already saw the "interrupting" acknowledgement for this transition.
     if (followupInterruptRequested && !isAuthError && (procDead || disconnected)) {
+      if (cancelRequested) {
+        this.logger.info({ err, disconnected }, "agent closed while cancelling busy follow-up");
+        state.queue.length = 0;
+        this.queuedAfterRespawn.length = 0;
+        this.state = null;
+        this.followupInterruptRequested = false;
+        return;
+      }
       this.logger.info({ err, disconnected }, "agent closed after busy follow-up interrupt");
       const queuedFollowups = state.queue.splice(0);
       this.queuedAfterRespawn.push(...queuedFollowups);

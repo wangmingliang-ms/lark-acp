@@ -3,6 +3,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 /** Status chip rendered in the unified card header. */
 export type AgentStatus =
   | "received"
+  | "queued"
+  | "interrupting"
   | "preparing"
   | "thinking"
   | "waiting"

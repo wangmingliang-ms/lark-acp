@@ -21,6 +21,8 @@ const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
   received: { content: "📩 消息已收到", template: "wathet" },
+  queued: { content: "⏳ 消息已排队", template: "wathet" },
+  interrupting: { content: "⚡ 正在中断当前任务", template: "blue" },
   preparing: { content: "🔄 准备中...", template: "blue" },
   thinking: { content: "💭 思考中...", template: "wathet" },
   waiting: { content: "⏳ 等待中...", template: "wathet" },
@@ -406,6 +408,7 @@ function truncateSummary(text: string): string {
 }
 
 function buildSessionMetaElement(state: UnifiedCardState): object | null {
+  if (state.status === "sealed") return null;
   const meta = state.meta;
   if (!meta) return null;
   return {
@@ -427,6 +430,10 @@ function emptyStateMessage(status: AgentStatus): string {
   switch (status) {
     case "received":
       return "_Humming 已收到消息，正在处理…_";
+    case "queued":
+      return "_前一任务仍在进行，这条消息已排入队列，正在等待处理…_";
+    case "interrupting":
+      return "_正在中断进行中的任务，这条消息将在中断完成后发送给 Agent…_";
     case "preparing":
       return "_正在启动或连接 Agent，请稍候…_";
     case "thinking":

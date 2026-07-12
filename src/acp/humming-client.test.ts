@@ -42,6 +42,24 @@ function cloneState(state: UnifiedCardState): UnifiedCardState {
   return structuredClone(state) as UnifiedCardState;
 }
 
+function expectAtMostOneCancellableCard(ops: readonly RenderOp[]): void {
+  const cardStates = new Map<string, UnifiedCardState>();
+  let sentCards = 0;
+  for (const op of ops) {
+    if (op.kind === "sendUnified") {
+      sentCards += 1;
+      cardStates.set(`card_${sentCards}`, op.state);
+    } else if (op.kind === "updateUnified") {
+      cardStates.set(op.cardId, op.state);
+    } else {
+      continue;
+    }
+    expect(
+      [...cardStates.values()].filter((state) => state.cancellable).length,
+    ).toBeLessThanOrEqual(1);
+  }
+}
+
 function recordingPresenter(
   ops: RenderOp[],
   options: {
@@ -524,6 +542,7 @@ describe("HummingClient card-v2 conversation rendering", () => {
         state.entries.some((entry) => entry.kind === "tool" && entry.toolCallId === "tool_24"),
       ),
     ).toBe(true);
+    expectAtMostOneCancellableCard(ops);
   });
 
   it("logs when a prompt finalizes without renderable output", async () => {

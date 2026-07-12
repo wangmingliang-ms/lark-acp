@@ -137,10 +137,17 @@ describe("LarkCardPresenter card summary", () => {
       cancellable: false,
       chatId: "oc_1",
       threadId: null,
+      meta: {
+        agent: "Claude",
+        mode: "Plan Mode",
+        model: "Claude Sonnet 5",
+        permission: "Edit Automatically: on",
+      },
     });
 
     expect(cards[0]?.header).toBeUndefined();
     expect(cards[0]?.config?.summary?.content).toBe("before approve");
+    expect(JSON.stringify(cards[0])).not.toContain("Agent: Claude");
   });
 
   it("renders completed conversation cards as ended and mirrors that status in summaries", async () => {
@@ -207,7 +214,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(content).toContain("本轮任务出错");
   });
 
-  it("always renders session metadata at the bottom of conversation cards", async () => {
+  it("renders session metadata on running and titled terminal conversation cards", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
     const meta = {
