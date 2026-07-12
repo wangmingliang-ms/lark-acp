@@ -96,6 +96,33 @@ describe("ChatRuntime prompt preparation", () => {
     expect(runtime.conversationCardFeature).toBe(DISABLED_CONVERSATION_CARD_FEATURE);
   });
 
+  it("uses the legacy ACP client when the semantic gate is disabled", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockImplementation(async (opts) => {
+      expect(opts.client).toBeInstanceOf(HummingClient);
+      return fake.agent;
+    });
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: {
+        sendUnifiedCard: vi.fn(async () => "card"),
+        updateUnifiedCard: vi.fn(async () => true),
+      } as unknown as LarkPresenter,
+      sessionStore: { getLatest: vi.fn(async () => null) } as unknown as SessionStore,
+    });
+
+    const enqueue = runtime.enqueue({
+      prompt: [{ type: "text", text: "hello" }],
+      messageId: "om_legacy",
+      chatId: "oc_test",
+    });
+
+    await vi.waitFor(() => expect(spawnAgentMock).toHaveBeenCalledOnce());
+    fake.resolvePrompt("end_turn");
+    await enqueue;
+    expect(spawnAgentMock).toHaveBeenCalledOnce();
+  });
+
   it("allocates a real controller/router/delivery graph per prepared prompt", () => {
     const runtime = new ChatRuntime({
       ...opts(),

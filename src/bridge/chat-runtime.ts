@@ -115,7 +115,7 @@ const HANDOFF_TASK_HINT =
 
 interface ChatRuntimeState {
   client: HummingClient;
-  router: PromptCallbackRouter;
+  router: PromptCallbackRouter | null;
   agent: AgentProcess;
   sessionCapabilities: SessionCapabilitiesSnapshot;
   sessionTitle?: string;
@@ -543,31 +543,34 @@ export class ChatRuntime {
       onSessionInfoUpdate: applySessionInfo,
     });
     currentClient = client;
-    const router = new PromptCallbackRouter(
-      {
-        readTextFile: (params) => client.readTextFile(params),
-        writeTextFile: (params) => client.writeTextFile(params),
-        onSessionInfo: applySessionInfo,
-        onMode: () => undefined,
-        onConfig: () => undefined,
-        onCommands: () => undefined,
-        onUsage: () => undefined,
-      },
-      this.lifecycleDiagnostics,
-    );
-    const bootstrapRoute = router.activateBootstrap(
-      latest && !latest.profileOnly ? "resume" : "new",
-      {
+    const router = this.conversationCardFeature.v2Enabled
+      ? new PromptCallbackRouter(
+          {
+            readTextFile: (params) => client.readTextFile(params),
+            writeTextFile: (params) => client.writeTextFile(params),
+            onSessionInfo: applySessionInfo,
+            onMode: () => undefined,
+            onConfig: () => undefined,
+            onCommands: () => undefined,
+            onUsage: () => undefined,
+          },
+          this.lifecycleDiagnostics,
+        )
+      : null;
+    const bootstrapRoute =
+      router?.activateBootstrap(latest && !latest.profileOnly ? "resume" : "new", {
         sessionUpdate: async (params) => {
           const update = params.update;
           if (update.sessionUpdate === "session_info_update") applySessionInfo(update);
         },
-      },
-    );
+      }) ?? null;
     client.setContext(firstMessage.messageId, firstMessage.chatId, this.opts.threadId);
     client.adoptProgressCard(firstMessage.progressCardId);
     if (firstMessage.prepared !== undefined) {
-      client.bindPromptLifecycle(firstMessage.prepared.controller, router);
+      const semanticRouter = router;
+      if (semanticRouter === null)
+        throw new Error("prepared semantic prompt requires a callback router");
+      client.bindPromptLifecycle(firstMessage.prepared.controller, semanticRouter);
     }
     await client.showPreparing();
 
@@ -576,7 +579,7 @@ export class ChatRuntime {
       args: this.opts.agentArgs,
       cwd: this.opts.agentCwd,
       env: this.opts.agentEnv,
-      client: router,
+      client: router ?? client,
       logger: this.logger,
     };
 
@@ -593,7 +596,7 @@ export class ChatRuntime {
       firstMessage.prepared?.failBeforeEnqueue("bootstrap_failed");
       throw err;
     } finally {
-      router.closeBootstrap(bootstrapRoute);
+      if (router !== null && bootstrapRoute !== null) router.closeBootstrap(bootstrapRoute);
     }
 
     await this.persistSession(agent.sessionId);
@@ -931,7 +934,8 @@ export class ChatRuntime {
           if (pending.prepared !== undefined && this.activePreparedPrompt === pending.prepared) {
             this.activePreparedPrompt = null;
           }
-          if (!state.router.isConnectionHealthy()) {
+          const router = state.router;
+          if (router !== null && !router.isConnectionHealthy()) {
             this.logger.warn(
               "quarantined ACP callback route; restarting connection before next prompt",
             );
@@ -1161,9 +1165,11 @@ export class ChatRuntime {
   private async runPrompt(state: ChatRuntimeState, pending: PendingMessage): Promise<void> {
     this.logger.info("sending prompt to agent");
     if (pending.prepared !== undefined) {
+      const router = state.router;
+      if (router === null) throw new Error("semantic prompt requires an ACP callback router");
       this.activePreparedPrompt = pending.prepared;
       pending.prepared.markStarted();
-      state.client.bindPromptLifecycle(pending.prepared.controller, state.router);
+      state.client.bindPromptLifecycle(pending.prepared.controller, router);
       pending.prepared.controller.markPreparing(
         sessionMetaFromSnapshot({
           ...state.sessionCapabilities,
