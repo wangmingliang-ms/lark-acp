@@ -25,6 +25,34 @@ import type {
   SessionStore,
 } from "../session-store/session-store.js";
 import { hasSessionControls, mergeSessionControls } from "../session-store/session-controls.js";
+import {
+  LegacyConversationCardAdapter,
+  createSemanticConversationCardTransport,
+} from "../presenter/legacy-conversation-card-adapter.js";
+import {
+  DISABLED_CONVERSATION_CARD_FEATURE,
+  type ConversationCardFeatureGate,
+} from "./conversation-card-feature.js";
+import {
+  RingBufferLifecycleDiagnosticSink,
+  type LifecycleDiagnosticSink,
+} from "../acp/lifecycle-diagnostics.js";
+import { ConversationCardDelivery } from "../acp/conversation-card-delivery.js";
+import {
+  PromptCardController,
+  type PromptCardTokenFactory,
+} from "../acp/prompt-card-controller.js";
+import { PromptCallbackRouter } from "../acp/prompt-callback-router.js";
+import { PreparedPrompt } from "./prepared-prompt.js";
+import type {
+  ActionToken,
+  CardRoute,
+  OwnershipToken,
+  PermissionToken,
+  PromptToken,
+  SegmentToken,
+} from "../presenter/conversation-card-view.js";
+import crypto from "node:crypto";
 
 const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
 
@@ -33,6 +61,8 @@ export interface PendingMessage {
   /** Message used as reply/card anchor for this prompt. */
   messageId: string;
   chatId: string;
+  /** Prompt-scoped semantic lifecycle, present only on the explicit v2 path. */
+  prepared?: PreparedPrompt;
   /** Progress card created by the bridge as soon as it accepted the prompt. */
   progressCardId?: string | null;
 }
@@ -74,6 +104,8 @@ export interface ChatRuntimeOptions {
   sessionStore: SessionStore;
   logger: LarkLogger;
   onTurnComplete?: (messageId: string) => Promise<void>;
+  conversationCardFeature?: ConversationCardFeatureGate;
+  lifecycleDiagnostics?: LifecycleDiagnosticSink;
 }
 
 const HANDOFF_TASK_HINT =
@@ -103,6 +135,10 @@ interface ChatRuntimeState {
 export class ChatRuntime {
   private readonly opts: ChatRuntimeOptions;
   private readonly logger: LarkLogger;
+  private readonly legacyCards: LegacyConversationCardAdapter;
+  readonly conversationCardFeature: ConversationCardFeatureGate;
+  private readonly lifecycleDiagnostics: LifecycleDiagnosticSink;
+  private promptSequence = 0;
   private state: ChatRuntimeState | null = null;
   private aborted = false;
   /** True after the user pressed Stop or sent /cancel for the in-flight prompt. */
@@ -129,6 +165,64 @@ export class ChatRuntime {
   constructor(opts: ChatRuntimeOptions) {
     this.opts = opts;
     this.logger = opts.logger.child({ name: "chat", chatId: opts.chatId, threadId: opts.threadId });
+    this.legacyCards = new LegacyConversationCardAdapter(opts.presenter);
+    this.conversationCardFeature =
+      opts.conversationCardFeature ?? DISABLED_CONVERSATION_CARD_FEATURE;
+    this.lifecycleDiagnostics =
+      opts.lifecycleDiagnostics ?? new RingBufferLifecycleDiagnosticSink();
+  }
+
+  preparePrompt(context: {
+    messageId: string;
+    chatId: string;
+    threadId: string | null;
+    profile: SessionCardMeta | null;
+  }): PreparedPrompt {
+    const route: CardRoute = {
+      c: context.chatId,
+      ...(context.threadId === null ? {} : { th: context.threadId }),
+    };
+    const tokens = runtimeTokenFactory();
+    const delivery = new ConversationCardDelivery(
+      { send: async () => null, patch: async () => false },
+      this.lifecycleDiagnostics,
+      tokens.ownership,
+      createSemanticConversationCardTransport(this.opts.presenter, context.messageId),
+    );
+    const router = new PromptCallbackRouter(
+      {
+        readTextFile: async (params) => ({
+          content: await import("node:fs/promises").then((fs) => fs.readFile(params.path, "utf8")),
+        }),
+        writeTextFile: async (params) => {
+          await import("node:fs/promises").then((fs) =>
+            fs.writeFile(params.path, params.content, "utf8"),
+          );
+          return {};
+        },
+        onSessionInfo: () => undefined,
+        onMode: () => undefined,
+        onConfig: () => undefined,
+        onCommands: () => undefined,
+        onUsage: () => undefined,
+      },
+      this.lifecycleDiagnostics,
+    );
+    const controller = new PromptCardController({
+      initialPhase: "queued",
+      profile: context.profile,
+      route,
+      correlation: { runtimeSequence: 1, promptSequence: ++this.promptSequence },
+      tokens,
+      delivery,
+      diagnostics: this.lifecycleDiagnostics,
+      deliveryContext: { messageSequence: this.promptSequence },
+      cancel: () => {
+        void this.cancel();
+      },
+      permissionTimeoutMs: this.opts.permissionTimeoutMs,
+    });
+    return new PreparedPrompt(controller, context.messageId, router);
   }
 
   get chatId(): string {
@@ -162,6 +256,21 @@ export class ChatRuntime {
    *         The runtime is left in an unusable state — caller must drop it.
    */
   async enqueue(message: PendingMessage): Promise<void> {
+    const pending =
+      this.conversationCardFeature.v2Enabled && message.prepared === undefined
+        ? {
+            ...message,
+            prepared: this.preparePrompt({
+              messageId: message.messageId,
+              chatId: message.chatId,
+              threadId: this.opts.threadId,
+              profile: null,
+            }),
+          }
+        : message;
+    if (pending.prepared !== undefined && pending.progressCardId) {
+      pending.prepared.controller.adoptCard(pending.progressCardId);
+    }
     if (!this.state) {
       // A previous agent crash / idle exit tears down `state`; the next user
       // message should spawn a fresh agent, not inherit the old aborted flag.
@@ -170,8 +279,9 @@ export class ChatRuntime {
       this.followupInterruptRequested = false;
       this.booting = true;
       try {
-        this.state = await this.bootstrap(message);
+        this.state = await this.bootstrap(pending);
       } catch (err) {
+        pending.prepared?.failBeforeEnqueue("bootstrap_failed");
         this.aborted = true;
         throw err;
       } finally {
@@ -180,11 +290,12 @@ export class ChatRuntime {
     }
 
     this.state.lastActivity = Date.now();
-    this.state.queue.push(message);
+    this.state.queue.push(pending);
 
     if (this.state.processing || this.promptInFlight) {
-      await this.updatePendingMessageCard(message, "queued");
-      await this.interruptCurrentPromptForFollowup(this.state, message);
+      await this.updatePendingMessageCard(pending, "queued");
+      pending.prepared?.controller.markInterrupting();
+      await this.interruptCurrentPromptForFollowup(this.state, pending);
       return;
     }
 
@@ -275,12 +386,38 @@ export class ChatRuntime {
     await this.finalizePendingMessages(state.queue, "Session 已被替换，排队的新消息未处理。");
     await withTimeout(
       this.promptInFlight
-        ? state.client.finalize("complete")
-        : state.client.finalizeIfRenderable("complete"),
+        ? this.finishRuntimePrompt(state, "superseded")
+        : this.finishRuntimePromptIfActive(state, "superseded"),
       SHUTDOWN_FINALIZE_TIMEOUT_MS,
     ).catch((err) => this.logger.warn({ err }, "supersede card finalize failed"));
     this.state = null;
     killAgent(state.agent.process);
+  }
+
+  private async finishRuntimePrompt(
+    state: ChatRuntimeState,
+    outcome: "complete" | "cancelled" | "failed" | "superseded" | "abandoned",
+  ): Promise<void> {
+    if (this.conversationCardFeature.v2Enabled && outcome === "superseded") {
+      state.client.finishLifecycle("superseded");
+      return;
+    }
+    await state.client.finalize(
+      outcome === "superseded" ? "complete" : outcome === "abandoned" ? "failed" : outcome,
+    );
+  }
+
+  private async finishRuntimePromptIfActive(
+    state: ChatRuntimeState,
+    outcome: "complete" | "cancelled" | "failed" | "superseded" | "abandoned",
+  ): Promise<void> {
+    if (this.conversationCardFeature.v2Enabled && outcome === "superseded") {
+      state.client.finishLifecycle("superseded");
+      return;
+    }
+    await state.client.finalizeIfRenderable(
+      outcome === "superseded" ? "complete" : outcome === "abandoned" ? "failed" : outcome,
+    );
   }
 
   /** Forward a card-action event to the underlying ACP client. */
@@ -365,6 +502,7 @@ export class ChatRuntime {
       showCancelButton: this.opts.showCancelButton,
       permissionTimeoutMs: this.opts.permissionTimeoutMs,
       idleStatusCardMs: this.opts.idleStatusCardMs,
+      conversationCardFeature: this.conversationCardFeature,
       permissionMode:
         latest?.controls?.bridgePermissionMode ??
         this.opts.inheritedControls?.bridgePermissionMode ??
@@ -389,6 +527,9 @@ export class ChatRuntime {
     currentClient = client;
     client.setContext(firstMessage.messageId, firstMessage.chatId, this.opts.threadId);
     client.adoptProgressCard(firstMessage.progressCardId);
+    if (firstMessage.prepared?.router !== undefined) {
+      client.bindPromptLifecycle(firstMessage.prepared.controller, firstMessage.prepared.router);
+    }
     await client.showPreparing();
 
     const spawnOpts: SpawnAgentOptions = {
@@ -766,7 +907,7 @@ export class ChatRuntime {
     status: "queued" | "interrupting",
   ): Promise<void> {
     if (!message.progressCardId) return;
-    const updated = await this.opts.presenter.updateUnifiedCard(
+    const updated = await this.legacyCards.update(
       message.progressCardId,
       this.pendingMessageCardState(message, status),
     );
@@ -785,7 +926,7 @@ export class ChatRuntime {
     await Promise.all(
       [...messages, ...this.queuedAfterRespawn].map(async (message) => {
         if (!message.progressCardId) return;
-        const updated = await this.opts.presenter.updateUnifiedCard(message.progressCardId, {
+        const updated = await this.legacyCards.update(message.progressCardId, {
           ...this.pendingMessageCardState(message, "cancelled"),
           entries: [{ kind: "text", text }],
         });
@@ -948,6 +1089,18 @@ export class ChatRuntime {
 
   private async runPrompt(state: ChatRuntimeState, pending: PendingMessage): Promise<void> {
     this.logger.info("sending prompt to agent");
+    if (pending.prepared !== undefined) {
+      if (pending.prepared.router === undefined)
+        throw new Error("prepared prompt is missing its callback router");
+      state.client.bindPromptLifecycle(pending.prepared.controller, pending.prepared.router);
+      pending.prepared.markEnqueued();
+      pending.prepared.controller.markPreparing(
+        sessionMetaFromSnapshot({
+          ...state.sessionCapabilities,
+          bridgePermissionMode: state.client.getPermissionMode(),
+        }),
+      );
+    }
     state.client.beginPrompt();
     await state.client.showForwarded();
 
@@ -1132,6 +1285,16 @@ export class ChatRuntime {
       this.logger.warn({ err }, "session store save failed");
     }
   }
+}
+
+function runtimeTokenFactory(): PromptCardTokenFactory {
+  return {
+    prompt: () => crypto.randomUUID() as PromptToken,
+    segment: () => crypto.randomUUID() as SegmentToken,
+    action: () => crypto.randomUUID() as ActionToken,
+    permission: () => crypto.randomUUID() as PermissionToken,
+    ownership: () => crypto.randomUUID() as OwnershipToken,
+  };
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

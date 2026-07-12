@@ -20,6 +20,7 @@ import type {
   PromptScopedCallbacks,
 } from "./prompt-callback-router.js";
 import { ConversationCardDelivery } from "./conversation-card-delivery.js";
+import { LegacyConversationCardAdapter } from "../presenter/legacy-conversation-card-adapter.js";
 import {
   CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
   CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
@@ -356,8 +357,8 @@ export class HummingClient implements acp.Client {
   private readonly onSessionInfoUpdate?: (
     update: Extract<acp.SessionUpdate, { sessionUpdate: "session_info_update" }>,
   ) => void;
-  private readonly lifecycleController?: HummingClientLifecycleController;
-  private readonly callbackRouter?: HummingClientCallbackRouter;
+  private lifecycleController?: HummingClientLifecycleController;
+  private callbackRouter?: HummingClientCallbackRouter;
   private readonly lifecycleV2Enabled: boolean;
   private activePromptRoute: PromptRouteHandle | null = null;
   private permissionMode: PermissionMode;
@@ -401,15 +402,18 @@ export class HummingClient implements acp.Client {
     this.permissionMode = opts.permissionMode;
     this.lifecycleV2Enabled = opts.conversationCardFeature?.v2Enabled === true;
     if (this.lifecycleV2Enabled) {
-      if (opts.lifecycleController === undefined || opts.callbackRouter === undefined) {
-        throw new TypeError("lifecycle v2 requires controller and router injection");
+      const hasController = opts.lifecycleController !== undefined;
+      const hasRouter = opts.callbackRouter !== undefined;
+      if (hasController !== hasRouter) {
+        throw new TypeError("lifecycle v2 controller and router must be injected together");
       }
       this.lifecycleController = opts.lifecycleController;
       this.callbackRouter = opts.callbackRouter;
     }
+    const legacyCards = new LegacyConversationCardAdapter(this.presenter);
     this.cardDelivery = new ConversationCardDelivery({
-      send: (state) => this.presenter.sendUnifiedCard(this.currentMessageId, state),
-      patch: (cardId, state) => this.presenter.updateUnifiedCard(cardId, state),
+      send: (state) => legacyCards.send(this.currentMessageId, state),
+      patch: (cardId, state) => legacyCards.update(cardId, state),
     });
   }
 
@@ -419,6 +423,26 @@ export class HummingClient implements acp.Client {
 
   getPermissionMode(): PermissionMode {
     return this.permissionMode;
+  }
+
+  bindPromptLifecycle(
+    controller: HummingClientLifecycleController,
+    router: HummingClientCallbackRouter,
+  ): void {
+    if (!this.lifecycleV2Enabled) throw new Error("cannot bind lifecycle while v2 is disabled");
+    if (this.activePromptRoute !== null)
+      throw new Error("cannot replace an active prompt lifecycle");
+    this.lifecycleController = controller;
+    this.callbackRouter = router;
+  }
+
+  finishLifecycle(outcome: TerminalOutcome): void {
+    if (!this.lifecycleV2Enabled || this.lifecycleController === undefined)
+      throw new Error("cannot finish lifecycle while v2 is inactive");
+    const route = this.activePromptRoute;
+    this.activePromptRoute = null;
+    if (route !== null) this.callbackRouter?.close(route);
+    this.lifecycleController.finish(outcome);
   }
 
   /** Bind the current Lark message context so cards reply to the right message. */
@@ -790,10 +814,7 @@ export class HummingClient implements acp.Client {
    */
   async finalize(status: AgentStatus): Promise<void> {
     if (this.lifecycleController !== undefined && this.callbackRouter !== undefined) {
-      const route = this.activePromptRoute;
-      this.activePromptRoute = null;
-      if (route !== null) this.callbackRouter.close(route);
-      this.lifecycleController.finish(toTerminalOutcome(status));
+      this.finishLifecycle(toTerminalOutcome(status));
       return;
     }
     this.status = status;

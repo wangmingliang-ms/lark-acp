@@ -7,6 +7,8 @@ import { createPinoLogger, type LarkLogger } from "../logger/logger.js";
 import type { LarkPresenter, UnifiedCardState } from "../presenter/presenter.js";
 import type { SessionRecord, SessionStore } from "../session-store/session-store.js";
 import type { AgentProcess, SpawnAgentOptions } from "../acp/agent-process.js";
+import { DISABLED_CONVERSATION_CARD_FEATURE } from "./conversation-card-feature.js";
+import { RingBufferLifecycleDiagnosticSink } from "../acp/lifecycle-diagnostics.js";
 
 // The agent subprocess is the correct mock boundary: we replace `spawnAgent`
 // so no real process is spawned, then hand ChatRuntime a fake AgentProcess
@@ -79,6 +81,34 @@ describe("ChatRuntime idle-eviction getters (regression: evicted mid-spawn)", ()
   it("processing is false before any message (no spawn in flight yet)", () => {
     const runtime = new ChatRuntime(opts());
     expect(runtime.processing).toBe(false);
+  });
+});
+
+describe("ChatRuntime prompt preparation", () => {
+  it("keeps the production feature gate disabled by default", () => {
+    const runtime = new ChatRuntime(opts());
+    expect(runtime.conversationCardFeature).toBe(DISABLED_CONVERSATION_CARD_FEATURE);
+  });
+
+  it("allocates a real controller/router/delivery graph per prepared prompt", () => {
+    const runtime = new ChatRuntime({
+      ...opts(),
+      conversationCardFeature: { v2Enabled: true },
+      lifecycleDiagnostics: new RingBufferLifecycleDiagnosticSink(),
+    });
+    const context = {
+      chatId: "oc_test",
+      threadId: null,
+      profile: null,
+    } as const;
+
+    const first = runtime.preparePrompt({ ...context, messageId: "om_first" });
+    const second = runtime.preparePrompt({ ...context, messageId: "om_second" });
+
+    expect(first.promptToken).not.toBe(second.promptToken);
+    expect(first.controller).not.toBe(second.controller);
+    expect(first.router).toBeDefined();
+    expect(first.router).not.toBe(second.router);
   });
 });
 
@@ -428,6 +458,42 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       timeout: 1_000,
       interval: 20,
     });
+  });
+
+  it("binds a distinct prepared lifecycle for each queued prompt", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const sendConversationCard = vi.fn(async () => "semantic-card");
+    const updateConversationCard = vi.fn(async () => true);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: {
+        ...recordingPresenter([]),
+        sendConversationCard,
+        updateConversationCard,
+      },
+      sessionStore: stubSessionStore(),
+      conversationCardFeature: { v2Enabled: true },
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "first" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "second" }],
+      messageId: "om_second",
+      chatId: "oc_test",
+    });
+    fake.resolvePrompt("cancelled");
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(sendConversationCard).toHaveBeenCalled());
+
+    const routes = sendConversationCard.mock.calls.map(([, view]) => view.route.c);
+    expect(routes).toEqual(expect.arrayContaining(["oc_test"]));
   });
 
   it("interrupts an in-flight prompt when a follow-up user message is queued", async () => {

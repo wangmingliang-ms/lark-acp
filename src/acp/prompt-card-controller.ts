@@ -49,6 +49,7 @@ export interface PromptCardControllerDelivery {
     correlation: DiagnosticCorrelation,
     suppliedToken: OwnershipToken,
   ): OwnershipToken;
+  adopt(owner: OwnershipToken, cardId: string): "adopted" | "skipped" | "rejected";
   deliver(owner: OwnershipToken, view: ConversationCardView): Promise<CardDeliveryResult>;
   close(
     owner: OwnershipToken,
@@ -161,6 +162,14 @@ export class PromptCardController {
       this.correlation(this.segmentSequence, this.ownerSequence),
       ownershipToken,
     );
+  }
+
+  get identity(): PromptToken {
+    return this.promptToken;
+  }
+
+  adoptCard(cardId: string): "adopted" | "skipped" | "rejected" {
+    return this.options.delivery.adopt(this.state.ownershipToken, cardId);
   }
 
   acknowledge(input: { messageId: string; reactionId?: string }): void {

@@ -13,6 +13,7 @@ import {
 } from "../lark/lifecycle-notifier.js";
 import { LarkWsConnection } from "../lark/lark-ws.js";
 import { LarkCardPresenter } from "../presenter/lark-presenter.js";
+import { LegacyConversationCardAdapter } from "../presenter/legacy-conversation-card-adapter.js";
 import {
   createWipNoticeCard,
   finalizeWipNoticeCard,
@@ -1994,8 +1995,9 @@ export class LarkBridge {
       await this.notifyUnavailableBindingFallback(messageId, binding.fallbackFrom);
     }
 
-    const progressCardId = await this.presenter
-      .sendUnifiedCard(messageId, {
+    const legacyCards = new LegacyConversationCardAdapter(this.presenter);
+    const progressCardId = await legacyCards
+      .send(messageId, {
         status: "received",
         entries: [],
         cancellable: false,
@@ -2043,7 +2045,7 @@ export class LarkBridge {
       this.logger.error({ err, chatId, threadId }, "agent bootstrap failed");
       const summary = `⚠️ Agent 启动失败: ${formatBootstrapError(err)}`;
       if (progressCardId) {
-        const updated = await this.presenter.updateUnifiedCard(progressCardId, {
+        const updated = await legacyCards.update(progressCardId, {
           status: "failed",
           entries: [{ kind: "text", text: summary }],
           cancellable: false,
