@@ -434,6 +434,20 @@ If the Response terminates while awaiting permission:
 4. Remove its Cancel.
 ```
 
+If the Permission Card cannot be sent or made visible:
+
+```text
+1. Revoke the Permission token immediately.
+2. Resolve the internal pending Permission as unavailable; do not represent it as a user denial.
+3. Stop the Agent execution for this Response.
+4. Seal the Response as terminal(failed).
+5. Update the continuation tail with a clear failure such as "Permission request could not be displayed; execution failed".
+6. Retain the continuation tail's failure Title and Metadata.
+7. Remove Cancel and release Execution Ownership.
+```
+
+The Response must not continue after an undisplayed mandatory Permission request.
+
 A permission followed immediately by another permission may leave a continuation Card with little or no Agent output. Before demotion, that Card must retain a truthful short status entry so it does not become a blank intermediate Card.
 
 ### 8.1 New Request while awaiting permission
@@ -567,6 +581,7 @@ I15. The newest message's Response is the batch carrier; every previous carrier 
 I16. A tokenized Card Cancel affects only its bound Response; `/cancel` cancels all unfinished work in the Topic.
 I17. A new Request immediately revokes any Permission authority owned by the Response it will interrupt, while Response-level Cancel remains valid until that Response stops.
 I18. Running tools in a rotated tail are sealed as continuing; their later terminal result is rendered only in the current tail.
+I19. If a mandatory Permission Card cannot be shown, its Response fails; the system must not treat the failure as a user denial or continue execution.
 ```
 
 ## 13. Conformance matrix
@@ -583,6 +598,7 @@ I18. Running tools in a rotated tail are sealed as continuing; their later termi
 | Same Response rotates                   | old tail becomes plain intermediate; running tools become "continues in next Card" | successor tail Title + Metadata; later tool result appears here | successor only if owner in progress |
 | Permission requested                    | old tail becomes plain intermediate; Permission Card shows choices                 | continuation tail waiting + Metadata                            | continuation tail                   |
 | Consecutive Permission requested        | prior continuation becomes intermediate; next Permission Card shows choices        | next continuation tail waiting + Metadata                       | next continuation tail              |
+| Permission Card send fails              | old tail remains intermediate; no user decision is fabricated                      | continuation terminal(failed) Title + Metadata                  | none                                |
 | Response ends during Permission         | Permission Card expires; prior Cards unchanged                                     | continuation terminal Title + Metadata                          | none                                |
 | New Request during Permission           | old Permission Card expires immediately; A continuation remains current until stop | B interrupting without Cancel                                   | A until stopped                     |
 | Feishu rejects old-tail seal patch      | domain treats old tail as intermediate; stale visual button may remain inert       | following tail includes patch-failure notice                    | current valid owner tail            |
