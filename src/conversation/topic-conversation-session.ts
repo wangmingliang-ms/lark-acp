@@ -13,9 +13,9 @@ import type {
   PromptToken,
 } from "../presenter/conversation-card-view.js";
 import type { LarkPresenter, PermissionCardView, SessionCardMeta } from "../presenter/presenter.js";
-import { ConversationCardViewMapper } from "./conversation-card-view-mapper.js";
+import { ConversationCardReconciler } from "./conversation-card-reconciler.js";
+import { TopicConversationStore } from "./topic-conversation-store.js";
 import {
-  ResponseCardProjector,
   TopicConversation,
   type ActionToken,
   type PermissionToken,
@@ -86,6 +86,7 @@ export interface TopicConversationSessionOptions {
   readonly showThoughts: boolean;
   readonly showTools: boolean;
   readonly showCancelButton: boolean;
+  readonly presentationEnabled?: boolean;
   readonly permissionTimeoutMs: number;
   readonly permissionMode?: () => PermissionMode;
   readonly acknowledgement?: AcknowledgementPort;
@@ -93,35 +94,60 @@ export interface TopicConversationSessionOptions {
   onPermissionDisplayFailure(responseId: ResponseId): Promise<void> | void;
 }
 
+const MAX_RETAINED_SETTLED_TERMINALS = 3;
+
 /**
  * Application service around the Topic aggregate. It is the only layer allowed
  * to translate ACP callbacks and Feishu actions into domain commands.
  */
 export class TopicConversationSession {
   private readonly aggregate = new TopicConversation();
-  private readonly projector = new ResponseCardProjector();
-  private readonly mapper = new ConversationCardViewMapper();
+  private readonly store = new TopicConversationStore(this.aggregate);
+  private readonly reconciler: ConversationCardReconciler;
   private readonly tokens: TopicConversationTokenFactory;
-  private readonly cardMessageIds = new Map<ResponseCardId, string>();
-  private readonly cardAnchors = new Map<ResponseCardId, string>();
-  private readonly renderQueues = new Map<ResponseCardId, Promise<void>>();
   private readonly accepted = new Map<ResponseId, AcceptedConversationTurn>();
   private readonly acknowledgements = new Map<
     ResponseId,
-    { messageId: string; reactionId: string }
+    { readonly messageId: string; readonly reactionId: string }
   >();
-  private readonly removedAcknowledgements = new Set<string>();
   private readonly removingAcknowledgements = new Set<string>();
   private readonly acknowledgementRetryRequested = new Set<string>();
+  private readonly settledTerminalResponses = new Set<ResponseId>();
   private currentPermission: MutablePermission | null = null;
-  private patchFailureCardId: ResponseCardId | null = null;
 
   constructor(private readonly options: TopicConversationSessionOptions) {
     this.tokens = options.tokens ?? randomConversationTokenFactory();
+    this.reconciler = new ConversationCardReconciler({
+      store: this.store,
+      presenter: options.presenter,
+      logger: options.logger,
+      route: options.route,
+      showCancelButton: options.showCancelButton,
+      enabled: options.presentationEnabled ?? true,
+      onCardVisible: (responseId) => this.removeAcknowledgement(responseId),
+      onSettledImmutable: (responseId, cardId, kind) => {
+        if (kind === "intermediate") {
+          this.store.transactionIfChanged((aggregate) =>
+            aggregate.evictSettledIntermediate(responseId, cardId),
+          );
+        } else {
+          this.settledTerminalResponses.add(responseId);
+          this.reclaimOldSettledTerminals();
+        }
+      },
+    });
   }
 
   get snapshot(): TopicConversationSnapshot {
-    return this.aggregate.snapshot();
+    return this.store.snapshot;
+  }
+
+  async flushPresentation(): Promise<void> {
+    await this.reconciler.flush();
+  }
+
+  get deliveryState() {
+    return this.store.deliveryState;
   }
 
   accept(input: {
@@ -129,8 +155,6 @@ export class TopicConversationSession {
     content: unknown;
     profile: SessionCardMeta | null;
   }): AcceptedConversationTurn {
-    const prior = this.aggregate.snapshot();
-    const previousCarrier = prior.pendingBatch?.carrierResponseId ?? null;
     const turn: AcceptedConversationTurn = {
       turnId: this.tokens.turn(),
       requestId: this.tokens.request(),
@@ -139,22 +163,22 @@ export class TopicConversationSession {
       initialCardId: this.tokens.card(),
       sourceMessageId: input.sourceMessageId,
     };
-    this.aggregate.accept({
-      turnId: turn.turnId,
-      request: {
-        id: turn.requestId,
-        sourceMessageId: input.sourceMessageId,
-        content: input.content,
-      },
-      responseId: turn.responseId,
-      responseToken: turn.responseToken,
-      initialCardId: turn.initialCardId,
-      profile: input.profile,
-    });
     this.accepted.set(turn.responseId, turn);
-    this.cardAnchors.set(turn.initialCardId, input.sourceMessageId);
-    if (previousCarrier !== null) void this.renderTail(previousCarrier);
-    void this.renderTail(turn.responseId);
+    this.reconciler.registerAnchor(turn.initialCardId, input.sourceMessageId);
+    this.store.transaction((aggregate) =>
+      aggregate.accept({
+        turnId: turn.turnId,
+        request: {
+          id: turn.requestId,
+          sourceMessageId: input.sourceMessageId,
+          content: input.content,
+        },
+        responseId: turn.responseId,
+        responseToken: turn.responseToken,
+        initialCardId: turn.initialCardId,
+        profile: input.profile,
+      }),
+    );
     this.expirePermissionIfDomainRevoked();
     return turn;
   }
@@ -167,89 +191,88 @@ export class TopicConversationSession {
     if (reactionId === null) return;
     const turn = this.acceptedTurn(responseId);
     this.acknowledgements.set(responseId, { messageId: turn.sourceMessageId, reactionId });
-    const hasVisibleCard = this.response(responseId).cards.some((card) =>
-      this.cardMessageIds.has(card.id),
-    );
+    const hasVisibleCard = this.reconciler.hasVisibleCard(responseId);
     if (hasVisibleCard) this.removeAcknowledgement(responseId);
   }
 
   async prepare(responseId: ResponseId, profile: SessionCardMeta | null): Promise<void> {
-    this.aggregate.setProfile(responseId, profile);
-    this.aggregate.prepare(responseId);
-    await this.renderTail(responseId);
+    this.store.transaction((aggregate) => {
+      aggregate.setProfile(responseId, profile);
+      aggregate.prepare(responseId);
+    });
   }
 
   async activate(responseId: ResponseId): Promise<ActionToken> {
     const token = this.tokens.action();
-    this.aggregate.activate(responseId, token);
-    const pending = this.snapshot.pendingBatch;
-    if (pending?.state === "sealed" && pending.carrierResponseId !== responseId) {
-      throw new Error("only the sealed batch carrier may activate");
-    }
-    if (pending?.state === "sealed" && pending.carrierResponseId === responseId) {
-      this.aggregate.clearSealedBatch();
-    }
-    await this.renderTail(responseId);
+    this.store.transaction((aggregate) => {
+      aggregate.activate(responseId, token);
+      const pending = aggregate.snapshot().pendingBatch;
+      if (pending?.state === "sealed" && pending.carrierResponseId !== responseId) {
+        throw new Error("only the sealed batch carrier may activate");
+      }
+      if (pending?.state === "sealed" && pending.carrierResponseId === responseId) {
+        aggregate.clearSealedBatch();
+      }
+    });
     return token;
   }
 
   async rotate(responseId: ResponseId, reason: "size" | "tool_boundary"): Promise<void> {
+    const nextCardId = this.tokens.card();
+    this.reconciler.registerAnchor(nextCardId, this.acceptedTurn(responseId).sourceMessageId);
     const token = this.options.showCancelButton ? this.tokens.action() : null;
-    this.aggregate.rotateTail(responseId, this.tokens.card(), "content_rotation", token);
-    const cards = this.response(responseId).cards;
-    const previous = cards.at(-2);
-    const tail = cards.at(-1);
-    if (previous !== undefined) await this.renderCard(responseId, previous.id);
-    if (tail !== undefined) {
-      this.cardAnchors.set(tail.id, this.acceptedTurn(responseId).sourceMessageId);
-      await this.renderCard(responseId, tail.id);
-    }
+    this.store.transaction((aggregate) =>
+      aggregate.rotateTail(responseId, nextCardId, "content_rotation", token),
+    );
   }
 
   async applyAgentUpdate(responseId: ResponseId, update: acp.SessionUpdate): Promise<void> {
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type !== "text") return;
-        await this.appendTextChunks(responseId, "text", update.content.text);
-        this.aggregate.setActivity(responseId, "responding");
-        break;
+        this.appendTextChunks(responseId, "text", update.content.text, "responding");
+        return;
       case "agent_thought_chunk":
         if (!this.options.showThoughts || update.content.type !== "text") return;
-        await this.appendTextChunks(responseId, "thought", update.content.text);
-        this.aggregate.setActivity(responseId, "thinking");
-        break;
+        this.appendTextChunks(responseId, "thought", update.content.text, "thinking");
+        return;
       case "tool_call":
         if (!this.options.showTools) return;
-        this.aggregate.append(responseId, {
-          kind: "tool",
-          toolCallId: update.toolCallId,
-          title: update.title ?? "Tool",
-          status:
-            update.status === "completed" || update.status === "failed"
-              ? update.status
-              : "in_progress",
+        this.store.transaction((aggregate) => {
+          aggregate.append(responseId, {
+            kind: "tool",
+            toolCallId: update.toolCallId,
+            title: update.title ?? "Tool",
+            status:
+              update.status === "completed" || update.status === "failed"
+                ? update.status
+                : "in_progress",
+          });
+          aggregate.setActivity(responseId, "calling_tool");
+          this.rotateIfNeededInTransaction(aggregate, responseId);
         });
-        this.aggregate.setActivity(responseId, "calling_tool");
-        break;
+        return;
       case "tool_call_update":
         if (
           !this.options.showTools ||
           (update.status !== "completed" && update.status !== "failed")
         )
           return;
-        this.aggregate.append(responseId, {
-          kind: "tool",
-          toolCallId: update.toolCallId,
-          title: update.title ?? "Tool",
-          status: update.status,
+        const terminalStatus = update.status as "completed" | "failed";
+        this.store.transaction((aggregate) => {
+          aggregate.append(responseId, {
+            kind: "tool",
+            toolCallId: update.toolCallId,
+            title: update.title ?? "Tool",
+            status: terminalStatus,
+          });
+          aggregate.setActivity(responseId, "calling_tool");
+          this.rotateIfNeededInTransaction(aggregate, responseId);
         });
-        this.aggregate.setActivity(responseId, "calling_tool");
-        break;
+        return;
       default:
         return;
     }
-    await this.rotateIfNeeded(responseId);
-    await this.renderTail(responseId);
   }
 
   async requestPermission(
@@ -267,15 +290,20 @@ export class TopicConversationSession {
     const permissionToken = this.tokens.permission();
     const requestId = this.tokens.permissionRequest();
     const continuationCardId = this.tokens.card();
-    this.cardAnchors.set(continuationCardId, this.acceptedTurn(responseId).sourceMessageId);
-    this.aggregate.requestPermission({
-      responseId,
-      permissionToken,
-      requestId,
-      allowedOptionIds: new Set(params.options.map((option) => option.optionId)),
+    this.reconciler.registerAnchor(
       continuationCardId,
-      continuationActionToken: this.tokens.action(),
-    });
+      this.acceptedTurn(responseId).sourceMessageId,
+    );
+    this.store.transaction((aggregate) =>
+      aggregate.requestPermission({
+        responseId,
+        permissionToken,
+        requestId,
+        allowedOptionIds: new Set(params.options.map((option) => option.optionId)),
+        continuationCardId,
+        continuationActionToken: this.tokens.action(),
+      }),
+    );
     const permissionResponse = new Promise<acp.RequestPermissionResponse>((resolve) => {
       const pending: MutablePermission = {
         responseId,
@@ -293,8 +321,6 @@ export class TopicConversationSession {
       }
       this.currentPermission = pending;
     });
-    await this.renderCard(responseId, oldTailId);
-
     const permissionView: PermissionCardView = {
       route: this.options.route,
       promptToken: this.response(responseId).token as unknown as PromptToken,
@@ -309,24 +335,7 @@ export class TopicConversationSession {
         kind: option.kind,
       })),
     };
-    const permissionCardId = await this.options.presenter.sendPermissionRequestCard(
-      this.acceptedTurn(responseId).sourceMessageId,
-      permissionView,
-    );
-    if (permissionCardId === null) {
-      this.aggregate.beginPermissionDisplayFailure(responseId);
-      this.expirePermission("权限请求无法显示，本次执行失败", "display_failed");
-      await this.renderTail(responseId);
-      await this.options.onPermissionDisplayFailure(responseId);
-      return permissionResponse;
-    }
-    const pending = this.currentPermission;
-    if (pending !== null && pending.token === permissionToken && !pending.settled) {
-      pending.cardMessageId = permissionCardId;
-    } else {
-      await this.options.presenter.expirePermissionCard(permissionCardId, "权限请求已失效");
-    }
-    await this.renderTail(responseId);
+    void this.observePermissionPresentation(responseId, permissionToken, requestId, permissionView);
     return permissionResponse;
   }
 
@@ -350,17 +359,15 @@ export class TopicConversationSession {
     ) {
       return "stale";
     }
-    const result = this.aggregate.resolvePermission(pending.token, input.optionId);
+    const result = this.store.transaction((aggregate) =>
+      aggregate.resolvePermission(pending.token, input.optionId),
+    );
     if (result !== "accepted") return result;
     pending.settled = true;
     if (pending.timeout !== undefined) clearTimeout(pending.timeout);
     pending.resolve({ outcome: { outcome: "selected", optionId: input.optionId } });
     this.currentPermission = null;
-    const permissionCardId = pending.cardMessageId;
-    if (permissionCardId !== null) {
-      void this.options.presenter.expirePermissionCard(permissionCardId, "权限已处理");
-    }
-    void this.renderTail(pending.responseId);
+    this.reconciler.expirePermission(pending.requestId, "权限已处理");
     return "accepted";
   }
 
@@ -373,14 +380,15 @@ export class TopicConversationSession {
       (turn) => turn.response.token === input.responseToken,
     )?.response;
     if (response === undefined) return "stale";
-    const result = this.aggregate.consumeCardCancel({
-      responseId: response.id,
-      cardId: input.cardId as ResponseCardId,
-      token: input.actionToken as ActionToken,
-    });
+    const result = this.store.transaction((aggregate) =>
+      aggregate.consumeCardCancel({
+        responseId: response.id,
+        cardId: input.cardId as ResponseCardId,
+        token: input.actionToken as ActionToken,
+      }),
+    );
     if (result === "accepted") {
       this.expirePermissionIfDomainRevoked();
-      void this.renderTail(response.id);
       void this.options.onCancelResponse(response.id);
     }
     return result;
@@ -391,13 +399,12 @@ export class TopicConversationSession {
     if (response.state.kind === "terminal") return;
     const owner = this.snapshot.executionOwnerResponseId;
     if (owner === responseId) {
-      this.aggregate.append(responseId, { kind: "notice", text });
+      this.store.transaction((aggregate) => aggregate.append(responseId, { kind: "notice", text }));
       await this.finishOwner("failed");
       return;
     }
-    this.aggregate.failWaiting(responseId, text);
+    this.store.transaction((aggregate) => aggregate.failWaiting(responseId, text));
     this.removeAcknowledgement(responseId);
-    await this.renderTail(responseId);
   }
 
   async finishOwner(
@@ -414,58 +421,99 @@ export class TopicConversationSession {
     if (owner === null) return { pendingBatch: null, carrierResponseId: null };
     const pending = this.snapshot.pendingBatch;
     if (pending?.state === "collecting") {
-      const sealed = this.aggregate.sealOwnerForPendingBatch(outcome);
-      this.aggregate.clearSealedBatch();
+      const sealed = this.store.transaction((aggregate) => {
+        const result = aggregate.sealOwnerForPendingBatch(outcome);
+        aggregate.clearSealedBatch();
+        return result;
+      });
       commit?.({ pendingBatch: sealed.messages, carrierResponseId: sealed.carrierResponseId });
       this.expirePermission("Response 已结束，权限请求已失效");
       this.removeAcknowledgement(owner);
-      await this.renderTail(owner);
       return { pendingBatch: sealed.messages, carrierResponseId: sealed.carrierResponseId };
     }
-    this.aggregate.seal(owner, outcome);
+    this.store.transaction((aggregate) => aggregate.seal(owner, outcome));
     this.expirePermission("Response 已结束，权限请求已失效");
     this.removeAcknowledgement(owner);
-    await this.renderTail(owner);
     return { pendingBatch: null, carrierResponseId: null };
   }
 
   clearSealedBatch(): void {
-    this.aggregate.clearSealedBatch();
+    this.store.transaction((aggregate) => aggregate.clearSealedBatch());
   }
 
   async interruptTopic(): Promise<void> {
-    const interrupted = this.aggregate.interruptTopic();
+    const interrupted = this.store.transaction((aggregate) => aggregate.interruptTopic());
     this.expirePermission("Session 已中断，权限请求已失效");
-    await Promise.all(
-      interrupted.map(async (responseId) => {
-        this.removeAcknowledgement(responseId);
-        await this.renderTail(responseId);
-      }),
-    );
+    for (const responseId of interrupted) this.removeAcknowledgement(responseId);
   }
 
   async beginTopicCancel(): Promise<ResponseId | null> {
     const before = this.snapshot;
-    const owner = this.aggregate.beginTopicCancel();
+    const owner = this.store.transaction((aggregate) => aggregate.beginTopicCancel());
     this.expirePermission("Topic 已取消，权限请求已失效");
-    await Promise.all(
-      before.turns
-        .filter((turn) => turn.response.id !== owner && turn.response.state.kind === "in_progress")
-        .map(async (turn) => {
-          this.removeAcknowledgement(turn.response.id);
-          await this.renderTail(turn.response.id);
-        }),
-    );
-    if (owner !== null) await this.renderTail(owner);
+    for (const turn of before.turns) {
+      if (turn.response.id !== owner && turn.response.state.kind === "in_progress") {
+        this.removeAcknowledgement(turn.response.id);
+      }
+    }
     return owner;
   }
 
   async confirmTopicCancel(): Promise<void> {
     const owner = this.snapshot.executionOwnerResponseId;
-    this.aggregate.confirmTopicCancel();
-    if (owner !== null) {
-      this.removeAcknowledgement(owner);
-      await this.renderTail(owner);
+    this.store.transaction((aggregate) => aggregate.confirmTopicCancel());
+    if (owner !== null) this.removeAcknowledgement(owner);
+  }
+
+  private async observePermissionPresentation(
+    responseId: ResponseId,
+    permissionToken: PermissionToken,
+    requestId: string,
+    permissionView: PermissionCardView,
+  ): Promise<void> {
+    const permissionCardId = await this.reconciler.presentPermission(
+      requestId,
+      this.acceptedTurn(responseId).sourceMessageId,
+      permissionView,
+    );
+    const pending = this.currentPermission;
+    const stillCurrent =
+      pending !== null &&
+      pending.token === permissionToken &&
+      !pending.settled &&
+      this.snapshot.permission?.token === permissionToken &&
+      this.snapshot.permission.status === "current";
+    if (permissionCardId === null) {
+      if (!stillCurrent) return;
+      this.store.transaction((aggregate) => aggregate.beginPermissionDisplayFailure(responseId));
+      this.expirePermission("权限请求无法显示，本次执行失败", "display_failed");
+      await this.options.onPermissionDisplayFailure(responseId);
+      return;
+    }
+    if (stillCurrent && pending !== null) {
+      pending.cardMessageId = permissionCardId;
+      return;
+    }
+    this.reconciler.expirePermission(requestId, "权限请求已失效");
+  }
+
+  private reclaimOldSettledTerminals(): void {
+    const ordered = this.snapshot.turns
+      .map((turn) => turn.response.id)
+      .filter((responseId) => this.settledTerminalResponses.has(responseId));
+    const overflow = ordered.slice(0, -MAX_RETAINED_SETTLED_TERMINALS);
+    for (const responseId of overflow) {
+      const tailId = this.snapshot.turns
+        .find((turn) => turn.response.id === responseId)
+        ?.response.cards.at(-1)?.id;
+      const evicted = this.store.transactionIfChanged((aggregate) =>
+        aggregate.evictTerminalAfterDeliverySettled(responseId),
+      );
+      if (!evicted) continue;
+      this.settledTerminalResponses.delete(responseId);
+      if (tailId !== undefined) this.reconciler.forgetSettledArtifact(tailId);
+      this.accepted.delete(responseId);
+      this.acknowledgements.delete(responseId);
     }
   }
 
@@ -481,83 +529,54 @@ export class TopicConversationSession {
     return turn;
   }
 
-  private async renderTail(responseId: ResponseId): Promise<void> {
-    const tail = this.response(responseId).cards.at(-1);
-    if (tail === undefined) throw new Error("Response has no tail Card");
-    await this.renderCard(responseId, tail.id);
-  }
-
-  private async renderCard(responseId: ResponseId, cardId: ResponseCardId): Promise<void> {
-    if (
-      this.patchFailureCardId !== null &&
-      this.patchFailureCardId !== cardId &&
-      this.snapshot.executionOwnerResponseId === responseId
-    ) {
-      this.patchFailureCardId = null;
-      this.aggregate.append(responseId, {
-        kind: "notice",
-        text: "上一张 Card 更新失败，其旧 Cancel 按钮可能仍然可见，但已经失效。",
-      });
-    }
-    const snapshot = this.snapshot;
-    const projection = this.projector.project(snapshot, responseId, cardId);
-    const mapped = this.mapper.toView(snapshot, projection, this.options.route);
-    if (!this.options.showCancelButton && mapped.kind === "active") {
-      delete (mapped as { cancelAction?: unknown }).cancelAction;
-    }
-    const prior = this.renderQueues.get(cardId) ?? Promise.resolve();
-    const render = prior.then(async () => {
-      const externalId = this.cardMessageIds.get(cardId);
-      if (externalId === undefined) {
-        const anchor =
-          this.cardAnchors.get(cardId) ?? this.acceptedTurn(responseId).sourceMessageId;
-        const send = this.options.presenter.sendConversationCard;
-        if (typeof send !== "function") return;
-        const sent = await send.call(this.options.presenter, anchor, mapped);
-        if (sent !== null) {
-          this.cardMessageIds.set(cardId, sent);
-          this.removeAcknowledgement(responseId);
-        }
-        return;
-      }
-      const update = this.options.presenter.updateConversationCard;
-      if (typeof update !== "function") return;
-      const updated = await update.call(this.options.presenter, externalId, mapped);
-      if (updated) {
-        this.removeAcknowledgement(responseId);
-      } else {
-        this.patchFailureCardId = cardId;
-        this.options.logger.warn({ responseId, cardId }, "conversation Card patch failed");
-      }
-    });
-    this.renderQueues.set(
-      cardId,
-      render.catch(() => undefined),
-    );
-    await render;
-  }
-
-  private async appendTextChunks(
+  private appendTextChunks(
     responseId: ResponseId,
     kind: "text" | "thought",
     text: string,
-  ): Promise<void> {
+    activity: "responding" | "thinking",
+  ): void {
     const chunks = splitUtf8(text, CARD_MARKDOWN_ROTATION_BYTE_LIMIT);
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
       if (chunk === undefined || chunk.length === 0) continue;
-      this.aggregate.append(responseId, { kind, text: chunk });
-      if (index < chunks.length - 1) await this.rotate(responseId, "size");
+      const needsSuccessor = index < chunks.length - 1;
+      const successorId = needsSuccessor ? this.tokens.card() : null;
+      if (successorId !== null) {
+        this.reconciler.registerAnchor(successorId, this.acceptedTurn(responseId).sourceMessageId);
+      }
+      this.store.transaction((aggregate) => {
+        aggregate.append(responseId, { kind, text: chunk });
+        aggregate.setActivity(responseId, activity);
+        if (successorId !== null) {
+          aggregate.rotateTail(
+            responseId,
+            successorId,
+            "content_rotation",
+            this.options.showCancelButton ? this.tokens.action() : null,
+          );
+        } else {
+          this.rotateIfNeededInTransaction(aggregate, responseId);
+        }
+      });
     }
   }
 
-  private async rotateIfNeeded(responseId: ResponseId): Promise<void> {
-    const tail = this.response(responseId).cards.at(-1);
-    if (tail === undefined) return;
+  private rotateIfNeededInTransaction(aggregate: TopicConversation, responseId: ResponseId): void {
+    const tail = aggregate
+      .snapshot()
+      .turns.find((turn) => turn.response.id === responseId)
+      ?.response.cards.at(-1);
+    if (tail === undefined || tail.entries.length === 0) return;
     const bytes = tail.entries.reduce((total, entry) => total + timelineEntryBytes(entry), 0);
     if (tail.entries.length < 20 && bytes <= CARD_MARKDOWN_ROTATION_BYTE_LIMIT) return;
-    if (tail.entries.length === 0) return;
-    await this.rotate(responseId, "size");
+    const successorId = this.tokens.card();
+    this.reconciler.registerAnchor(successorId, this.acceptedTurn(responseId).sourceMessageId);
+    aggregate.rotateTail(
+      responseId,
+      successorId,
+      "content_rotation",
+      this.options.showCancelButton ? this.tokens.action() : null,
+    );
   }
 
   private removeAcknowledgement(responseId: ResponseId): void {
@@ -565,7 +584,6 @@ export class TopicConversationSession {
     const port = this.options.acknowledgement;
     if (acknowledgement === undefined || port === undefined) return;
     const identity = `${acknowledgement.messageId}\u0000${acknowledgement.reactionId}`;
-    if (this.removedAcknowledgements.has(identity)) return;
     if (this.removingAcknowledgements.has(identity)) {
       this.acknowledgementRetryRequested.add(identity);
       return;
@@ -575,7 +593,6 @@ export class TopicConversationSession {
       .remove(acknowledgement.messageId, acknowledgement.reactionId)
       .then((removed) => {
         if (!removed) return;
-        this.removedAcknowledgements.add(identity);
         this.acknowledgements.delete(responseId);
       })
       .catch((error) =>
@@ -603,15 +620,14 @@ export class TopicConversationSession {
   ): void {
     const pending = this.currentPermission;
     if (pending === null || pending.settled) return;
-    if (domainStatus === "expired") this.aggregate.expirePermission(pending.token);
+    if (domainStatus === "expired") {
+      this.store.transaction((aggregate) => aggregate.expirePermission(pending.token));
+    }
     pending.settled = true;
     if (pending.timeout !== undefined) clearTimeout(pending.timeout);
     pending.resolve({ outcome: { outcome: "cancelled" } });
     this.currentPermission = null;
-    const permissionCardId = pending.cardMessageId;
-    if (permissionCardId !== null) {
-      void this.options.presenter.expirePermissionCard(permissionCardId, reason);
-    }
+    this.reconciler.expirePermission(pending.requestId, reason);
   }
 }
 

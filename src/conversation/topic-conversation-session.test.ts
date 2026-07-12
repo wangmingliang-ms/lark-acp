@@ -210,6 +210,51 @@ describe("TopicConversationSession", () => {
     expect(session.snapshot.executionOwnerResponseId).toBe(a.responseId);
   });
 
+  it("permission timeout resolves even while Permission Card send remains in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise<string | null>(() => undefined);
+      const { session } = fixture(
+        { sendPermissionRequestCard: vi.fn(() => never) },
+        { permissionTimeoutMs: 10 },
+      );
+      const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+      await session.prepare(a.responseId, profile);
+      await session.activate(a.responseId);
+      const permission = session.requestPermission(a.responseId, {
+        sessionId: "session",
+        toolCall: { toolCallId: "tool", title: "Edit", kind: "edit", status: "pending" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+      expect(session.snapshot.permission?.status).toBe("expired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a late null Permission send cannot overwrite an already expired authority", async () => {
+    let release!: (value: string | null) => void;
+    const blocked = new Promise<string | null>((resolve) => {
+      release = resolve;
+    });
+    const { session, cancel } = fixture({ sendPermissionRequestCard: vi.fn(() => blocked) });
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    const permission = session.requestPermission(a.responseId, {
+      sessionId: "session",
+      toolCall: { toolCallId: "tool", title: "Edit", kind: "edit", status: "pending" },
+      options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+    });
+    session.cancelPendingPermissions();
+    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    release(null);
+    await vi.waitFor(() => expect(session.snapshot.permission?.status).toBe("expired"));
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("permission timeout revokes domain authority and resumes the Response", async () => {
     vi.useFakeTimers();
     try {
@@ -292,25 +337,96 @@ describe("TopicConversationSession", () => {
     });
   });
 
-  it("puts a patch-failure warning on the next valid tail", async () => {
+  it("reconciles a patch-failure warning onto the current valid tail", async () => {
     const patched: unknown[] = [];
+    let failArchived = true;
     const { session } = fixture({
       updateConversationCard: vi.fn(async (_cardId, view) => {
         patched.push(view);
-        return false;
+        if ((view as { kind?: string }).kind === "archived" && failArchived) {
+          failArchived = false;
+          return false;
+        }
+        return true;
       }),
     });
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     await session.prepare(a.responseId, profile);
     await session.activate(a.responseId);
+    await session.flushPresentation();
     await session.rotate(a.responseId, "size");
+    await session.flushPresentation();
+
+    expect(
+      patched.some(
+        (view) =>
+          (view as { kind?: string }).kind === "active" &&
+          JSON.stringify(view).includes("上一张 Card 更新失败"),
+      ),
+    ).toBe(true);
     const tail = session.snapshot.turns
       .find((turn) => turn.response.id === a.responseId)
       ?.response.cards.at(-1);
-    expect(tail?.entries).toContainEqual({
-      kind: "notice",
-      text: "上一张 Card 更新失败，其旧 Cancel 按钮可能仍然可见，但已经失效。",
+    expect(tail?.entries).toEqual([]);
+  });
+
+  it("retains only the three most recent delivery-settled terminal Responses", async () => {
+    const { session } = fixture();
+    for (let index = 0; index < 5; index += 1) {
+      const response = session.accept({
+        sourceMessageId: `message-${index}`,
+        content: `request-${index}`,
+        profile,
+      });
+      await session.prepare(response.responseId, profile);
+      await session.activate(response.responseId);
+      await session.finishOwner("complete");
+      await session.flushPresentation();
+    }
+
+    expect(session.snapshot.turns).toHaveLength(3);
+    expect(Object.keys(session.deliveryState.cards)).toHaveLength(0);
+    expect(session.snapshot.turns.every((turn) => turn.response.state.kind === "terminal")).toBe(
+      true,
+    );
+  });
+
+  it("bounds terminal retention even when every final delivery exhausts retries", async () => {
+    const { session } = fixture({ sendConversationCard: vi.fn(async () => null) });
+    for (let index = 0; index < 5; index += 1) {
+      const response = session.accept({
+        sourceMessageId: `message-failed-${index}`,
+        content: `request-failed-${index}`,
+        profile,
+      });
+      await session.prepare(response.responseId, profile);
+      await session.activate(response.responseId);
+      await session.finishOwner("complete");
+      await session.flushPresentation();
+    }
+    expect(session.snapshot.turns).toHaveLength(3);
+    expect(Object.keys(session.deliveryState.cards)).toHaveLength(0);
+  });
+
+  it("bounds terminal retention when every transport Promise rejects", async () => {
+    const { session } = fixture({
+      sendConversationCard: vi.fn(async () => {
+        throw new Error("transport rejected");
+      }),
     });
+    for (let index = 0; index < 5; index += 1) {
+      const response = session.accept({
+        sourceMessageId: `message-rejected-${index}`,
+        content: `request-rejected-${index}`,
+        profile,
+      });
+      await session.prepare(response.responseId, profile);
+      await session.activate(response.responseId);
+      await session.finishOwner("complete");
+      await session.flushPresentation();
+    }
+    expect(session.snapshot.turns).toHaveLength(3);
+    expect(Object.keys(session.deliveryState.cards)).toHaveLength(0);
   });
 
   it("fails Response when mandatory Permission Card is not visible", async () => {

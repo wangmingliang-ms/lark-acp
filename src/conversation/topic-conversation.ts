@@ -69,6 +69,7 @@ export interface ResponseSnapshot {
   readonly state: ResponseState;
   readonly profile: SessionCardMeta | null;
   readonly cards: readonly ResponseCardSnapshot[];
+  readonly terminalToolCallIds: readonly string[];
 }
 
 export interface TurnSnapshot {
@@ -113,6 +114,18 @@ export interface CardProjection {
     readonly cardId: ResponseCardId;
     readonly actionToken: ActionToken;
   };
+}
+
+function cloneUnknown<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function cloneRequest(message: RequestMessage): RequestMessage {
+  return Object.freeze({
+    id: message.id,
+    sourceMessageId: message.sourceMessageId,
+    content: cloneUnknown(message.content),
+  });
 }
 
 class ResponseCard {
@@ -171,6 +184,28 @@ class ResponseLifecycle {
     this.responseCards = [new ResponseCard(initialCardId, "initial")];
   }
 
+  static fromSnapshot(snapshot: ResponseSnapshot): ResponseLifecycle {
+    const first = snapshot.cards[0];
+    if (first === undefined) throw new Error("response snapshot has no Card");
+    const response = new ResponseLifecycle(
+      snapshot.id,
+      snapshot.token,
+      snapshot.profile,
+      first.id,
+      "received",
+    );
+    response.stateValue = { ...snapshot.state };
+    response.responseCards.splice(
+      0,
+      response.responseCards.length,
+      ...snapshot.cards.map((card) => new ResponseCard(card.id, card.reason, card.entries)),
+    );
+    for (const toolCallId of snapshot.terminalToolCallIds) {
+      response.terminalToolIds.add(toolCallId);
+    }
+    return response;
+  }
+
   get state(): ResponseState {
     return this.stateValue;
   }
@@ -209,6 +244,13 @@ class ResponseLifecycle {
     return successor;
   }
 
+  evictIntermediate(cardId: ResponseCardId): boolean {
+    const index = this.responseCards.findIndex((card) => card.id === cardId);
+    if (index < 0 || index === this.responseCards.length - 1) return false;
+    this.responseCards.splice(index, 1);
+    return true;
+  }
+
   append(entry: TimelineEntry): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects updates");
     if (entry.kind === "tool" && (entry.status === "completed" || entry.status === "failed")) {
@@ -226,6 +268,7 @@ class ResponseLifecycle {
       state: Object.freeze({ ...this.stateValue }),
       profile: this.profileValue === null ? null : Object.freeze({ ...this.profileValue }),
       cards: Object.freeze(this.responseCards.map((card) => card.snapshot(card.id === tailId))),
+      terminalToolCallIds: Object.freeze([...this.terminalToolIds]),
     });
   }
 }
@@ -240,7 +283,7 @@ class Turn {
   snapshot(): TurnSnapshot {
     return Object.freeze({
       id: this.id,
-      request: Object.freeze({ ...this.request }),
+      request: cloneRequest(this.request),
       response: this.response.snapshot(),
     });
   }
@@ -268,6 +311,39 @@ export class TopicConversation {
     state: "collecting" | "sealed";
   } | null = null;
 
+  static fromSnapshot(snapshot: TopicConversationSnapshot): TopicConversation {
+    const topic = new TopicConversation();
+    topic.turns.push(
+      ...snapshot.turns.map(
+        (turn) =>
+          new Turn(
+            turn.id,
+            cloneRequest(turn.request),
+            ResponseLifecycle.fromSnapshot(turn.response),
+          ),
+      ),
+    );
+    topic.executionOwner = snapshot.executionOwnerResponseId;
+    topic.cancel = { ...snapshot.cancelAuthority };
+    topic.currentPermission =
+      snapshot.permission === null
+        ? null
+        : {
+            ...snapshot.permission,
+            allowedOptionIds: new Set(snapshot.permission.allowedOptionIds),
+          };
+    topic.pendingBatchValue =
+      snapshot.pendingBatch === null
+        ? null
+        : {
+            messages: snapshot.pendingBatch.messages.map(cloneRequest),
+            carrierResponseId: snapshot.pendingBatch.carrierResponseId,
+            state: snapshot.pendingBatch.state,
+          };
+    topic.assertInvariants();
+    return topic;
+  }
+
   accept(input: AcceptTurnInput): ResponseId {
     this.assertUnique(input);
     if (this.pendingBatchValue?.state === "collecting") {
@@ -277,6 +353,7 @@ export class TopicConversation {
       throw new Error("cannot accept a new turn while a sealed batch is committing");
     }
     const phase = this.executionOwner === null ? "received" : "interrupting";
+    const request = cloneRequest(input.request);
     const response = new ResponseLifecycle(
       input.responseId,
       input.responseToken,
@@ -284,11 +361,11 @@ export class TopicConversation {
       input.initialCardId,
       phase,
     );
-    this.turns.push(new Turn(input.turnId, input.request, response));
+    this.turns.push(new Turn(input.turnId, request, response));
     if (this.executionOwner !== null) {
       this.expireCurrentPermissionFor(this.executionOwner);
       this.pendingBatchValue = {
-        messages: [input.request],
+        messages: [request],
         carrierResponseId: input.responseId,
         state: "collecting",
       };
@@ -352,6 +429,31 @@ export class TopicConversation {
       this.cancel = { kind: "cancel", responseId, cardId, token: nextActionToken };
     }
     this.assertInvariants();
+  }
+
+  evictSettledIntermediate(responseId: ResponseId, cardId: ResponseCardId): boolean {
+    const response = this.response(responseId);
+    const evicted = response.evictIntermediate(cardId);
+    if (evicted) this.assertInvariants();
+    return evicted;
+  }
+
+  /**
+   * Compacts a terminal Response after the delivery layer has proved its final
+   * tail settled. Domain guards still reject owned, permission-bound, or batch-
+   * carrying Responses; callers must supply the delivery-settled precondition.
+   */
+  evictTerminalAfterDeliverySettled(responseId: ResponseId): boolean {
+    if (this.executionOwner === responseId) return false;
+    if (this.pendingBatchValue?.carrierResponseId === responseId) return false;
+    if (this.currentPermission?.responseId === responseId) return false;
+    const index = this.turns.findIndex((turn) => turn.response.id === responseId);
+    if (index < 0) return false;
+    const turn = this.turns[index];
+    if (turn?.response.state.kind !== "terminal") return false;
+    this.turns.splice(index, 1);
+    this.assertInvariants();
+    return true;
   }
 
   setProfile(responseId: ResponseId, profile: SessionCardMeta | null): void {
@@ -602,7 +704,7 @@ export class TopicConversation {
     state: "collecting" | "sealed";
   }): PendingRequestBatchSnapshot {
     return Object.freeze({
-      messages: Object.freeze(batch.messages.map((message) => Object.freeze({ ...message }))),
+      messages: Object.freeze(batch.messages.map(cloneRequest)),
       carrierResponseId: batch.carrierResponseId,
       state: batch.state,
     });
@@ -613,6 +715,7 @@ export class TopicConversation {
     if (batch === null || batch.state !== "collecting") throw new Error("no collecting batch");
     const previousCarrier = this.response(batch.carrierResponseId);
     previousCarrier.seal("merged");
+    const request = cloneRequest(input.request);
     const response = new ResponseLifecycle(
       input.responseId,
       input.responseToken,
@@ -620,8 +723,8 @@ export class TopicConversation {
       input.initialCardId,
       "interrupting",
     );
-    this.turns.push(new Turn(input.turnId, input.request, response));
-    batch.messages.push(input.request);
+    this.turns.push(new Turn(input.turnId, request, response));
+    batch.messages.push(request);
     batch.carrierResponseId = input.responseId;
     this.assertInvariants();
     return input.responseId;

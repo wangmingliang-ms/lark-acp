@@ -52,9 +52,10 @@ describe("conversation-card writer inventory", () => {
       "presenter/lark-presenter.ts",
       "presenter/legacy-conversation-card-adapter.ts",
       "acp/conversation-card-delivery.ts",
+      "conversation/conversation-card-reconciler.ts",
     ]);
     const writerCall =
-      /\.(?:sendUnifiedCard|updateUnifiedCard|sendConversationCard|updateConversationCard)\s*\(/;
+      /\.(?:sendUnifiedCard|updateUnifiedCard|sendConversationCard|updateConversationCard|sendPermissionRequestCard|updatePermissionRequestCard)\s*\(/;
     const violations: string[] = [];
 
     for (const file of walk(src)) {

@@ -177,6 +177,7 @@ export class ChatRuntime {
       showThoughts: opts.showThoughts,
       showTools: opts.showTools,
       showCancelButton: opts.showCancelButton,
+      presentationEnabled: this.conversationCardFeature.v2Enabled,
       permissionTimeoutMs: opts.permissionTimeoutMs,
       permissionMode: () => this.state?.client.getPermissionMode() ?? opts.permissionMode,
       acknowledgement: opts.acknowledgement,

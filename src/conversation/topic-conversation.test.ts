@@ -113,6 +113,19 @@ describe("TopicConversation canonical lifecycle", () => {
     });
   });
 
+  it("evicts a settled intermediate but never the current tail", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+    topic.rotateTail(a, id.card("card-a-2"), "content_rotation", id.action("action-a-2"));
+
+    expect(topic.evictSettledIntermediate(a, id.card("card-a-2"))).toBe(false);
+    expect(topic.evictSettledIntermediate(a, id.card("card-a-1"))).toBe(true);
+    expect(topic.snapshot().turns.find((turn) => turn.response.id === a)?.response.cards).toEqual([
+      expect.objectContaining({ id: "card-a-2", isTail: true }),
+    ]);
+  });
+
   it("keeps terminal tail Title and Metadata but removes Cancel", () => {
     const topic = new TopicConversation();
     const a = accept(topic, "a");

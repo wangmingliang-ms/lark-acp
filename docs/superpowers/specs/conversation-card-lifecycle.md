@@ -565,7 +565,150 @@ Rotation and content compaction are separate concerns.
 - Tool/thought activity must not be described as hidden response text.
 - Compaction must never create another Execution Owner or another actionable Card.
 
-## 12. Required invariants
+## 12. Reactive state, reconciliation, and bounded retention
+
+Conversation Card rendering is declarative. Business and application logic modify state; they do not choose or sequence Feishu Card API calls.
+
+The required one-way data flow is:
+
+```text
+Event / Command
+  -> atomic Domain State transition
+  -> immutable Snapshot revision
+  -> pure Card projection
+  -> Reconciler observes dirty desired projections
+  -> Feishu send / patch effect
+  -> Delivery Result transition
+  -> reconciliation continues until settled
+```
+
+### 12.1 Layer boundaries
+
+The observable application/presentation store uses **Redux Toolkit**. Redux is used as a general TypeScript state container and does not imply React or React-Redux. `configureStore`, slices, selectors, and listener middleware provide the revisioned immutable Snapshot, subscriptions, and effect wake-ups described below. The Domain Snapshot may contain immutable typed collections such as `ReadonlySet`, so Redux serializability checks may be disabled for that slice; the Delivery Slice itself must remain serializable. Promise workers, timers, abort handles, and transport clients never enter Redux State.
+
+The implementation has four distinct responsibilities:
+
+1. **Domain Aggregate + Redux Domain Slice** — the aggregate enforces Responses, tails, Execution Ownership, Cancel/Permission authority, pending batches, and semantic Card content inside one transaction; the completed immutable Snapshot is committed to Redux as the observable source of truth.
+2. **Projection selectors** — pure selectors from the current Redux State plus presentation diagnostics to a desired `ConversationCardView`.
+3. **Redux Delivery Slice** — owns Feishu message IDs, desired/delivered revisions, in-flight status, retries, and delivery diagnostics. It is not business authority.
+4. **Reconciler listener/effect** — the only writer allowed to send or patch managed V2 Conversation and Permission Cards in Feishu. Redux listener middleware wakes reconciliation after relevant actions; the Reconciler drives remote Cards toward the current desired projections and dispatches delivery results back to Redux. Gate-off legacy writers and best-effort cleanup of an orphaned, unowned legacy Permission Card are explicit compatibility boundaries; they must never write an artifact currently managed by the V2 Store.
+
+Domain commands and ACP callbacks must not call `sendConversationCard` or `updateConversationCard`, directly or through command-specific render branches. They complete after the atomic state transition has been published. A state revision is observable only after all invariants for that transition hold; rotation must never publish an intermediate snapshot with two semantic tails or two valid Cancel authorities. Transactions use copy-on-write aggregates: a command runs against a temporary aggregate hydrated from the last committed Snapshot, replaces the committed aggregate only on success, and publishes only when the resulting Snapshot is semantically different. An exception discards the temporary aggregate completely. Request payloads and other caller-owned mutable values are deeply isolated before entering a committed Snapshot.
+
+Projection must be deterministic:
+
+```text
+project(snapshotRevision, cardId, deliveryDiagnostics)
+  -> desired Card view
+```
+
+Projection does not inspect network requests, mutate the Domain Store, or decide retry timing.
+
+### 12.2 Desired state and delivered state
+
+Every retained delivery record has an explicit convergence target:
+
+```ts
+type CardDeliveryRecord = {
+  cardId: CardId;
+  externalMessageId: string | null;
+  desiredRevision: number;
+  deliveredRevision: number | null;
+  status: "dirty" | "rendering" | "retrying" | "settled" | "failed";
+};
+```
+
+Equivalent representations are allowed, but these semantics are mandatory:
+
+- state changes mark every affected Card dirty;
+- the desired view is read from the latest Snapshot when reconciliation actually runs, not captured before waiting in an effect queue;
+- each Card has at most one in-flight writer;
+- different Cards may reconcile independently;
+- after an effect returns, the Reconciler checks whether the desired revision advanced while the effect was in flight;
+- an older successful write never marks a newer desired revision settled;
+- if the desired revision advanced, reconciliation continues with a freshly projected view;
+- delivery failure does not roll back Domain State or restore authority.
+
+A transport implementation may not treat "one API call was attempted" as equivalent to "the Card is settled".
+
+### 12.3 Delivery failure diagnostics
+
+A failed old-Card patch creates presentation/delivery state, not a new business lifecycle transition. The failure record must identify at least the failed Card and its Response, and whether the current tail has successfully displayed the warning.
+
+```text
+old Card patch fails
+  -> old Card remains semantically intermediate and its old action remains stale
+  -> record a pending delivery diagnostic
+  -> mark the current legal tail dirty
+  -> project the warning onto that current tail
+  -> keep reconciling until the warning is delivered or the tail is replaced
+```
+
+The warning follows the Response's current tail across further rotations. It must not be appended to one tail while a stale render request targets another tail. Multiple failures may be represented individually or safely coalesced, but a single mutable global failed-Card slot must not allow one failure to overwrite or strand another.
+
+The visible wording must state that a prior Card could not be updated and that any stale processing title or old button is no longer authoritative.
+
+### 12.4 Bounded active working set
+
+Humming is not an in-memory replica of the complete Feishu Card history. The hot state retains only Cards or artifacts that still have semantic authority or unfinished delivery work.
+
+The retained working set consists of:
+
+- the current Response tail, while live or terminalizing;
+- the current unresolved Permission/Approval Card;
+- retiring Cards whose final immutable projection is not yet delivery-settled;
+- pending delivery diagnostics;
+- the minimum current authority and interaction tombstones needed to reject stale actions.
+
+Earlier Card content is not retained merely because it remains visible in Feishu.
+
+The canonical Card retention lifecycle is:
+
+```text
+Live
+  -> Retiring (semantically immutable, final projection still dirty/in flight)
+  -> Delivery-finalized
+       -> Settled (final projection successfully delivered)
+       OR
+       -> Exhausted (bounded retry policy ended; failure retained only as a minimal tombstone/log)
+  -> Evicted
+```
+
+Failure may compact a Retiring Card into a minimal tombstone/diagnostic after retry policy permits:
+
+```text
+Retiring
+  -> final patch failed
+  -> minimal tombstone + pending warning/retry metadata
+  -> warning delivered and no further legal operation remains
+  -> Evicted
+```
+
+The safe eviction condition is:
+
+```text
+semantically immutable
+&& final desired projection is delivery-finalized (settled or retry-exhausted)
+&& owns no Cancel or Permission authority
+&& has no pending diagnostic or retry
+```
+
+Therefore:
+
+- semantic `sealed`/`closed` alone is not sufficient for eviction;
+- retry exhaustion is not reported as successful delivery, but it may finalize retention after a minimal failure tombstone/log has been recorded;
+- having a Title is not sufficient for retention;
+- a newly demoted Card without a Title remains retained until its archived projection settles;
+- a terminal tail with a Title may be evicted after its terminal projection settles;
+- stale-action rejection normally requires only comparison against current authority; historical Card objects are not retained solely to reject old tokens.
+
+Retention must be bounded in steady state. A normal Topic should hold approximately one current tail, zero or one current Permission/Approval Card, and a small set of unsettled retiring records/diagnostics. Implementations must define retry, coalescing, or tombstone compaction so persistent Feishu failures cannot grow memory without bound.
+
+### 12.5 Restart and reconstruction
+
+Restart remains non-durable as specified in Section 10. The Reconciler need not replay arbitrary historical Cards. It reconstructs desired work only from the retained current snapshot and delivery records available in the running process. No design may require a full in-memory Card history for correctness.
+
+## 13. Required invariants
 
 These invariants are mandatory in production and tests:
 
@@ -589,35 +732,43 @@ I16. A tokenized Card Cancel affects only its bound Response; `/cancel` cancels 
 I17. A new Request immediately revokes any Permission authority owned by the Response it will interrupt, while Response-level Cancel remains valid until that Response stops.
 I18. Running tools in a rotated tail are sealed as continuing; their later terminal result is rendered only in the current tail.
 I19. If a mandatory Permission Card cannot be shown, its Response fails; the system must not treat the failure as a user denial or continue execution.
+I20. Domain/Application commands publish state transitions but never directly sequence Conversation Card send/patch effects.
+I21. The Reconciler is the only Conversation Card writer and projects from the latest observable Snapshot when an effect actually runs.
+I22. An effect for an older revision never settles a newer desired revision; reconciliation continues until desired and delivered revisions agree.
+I23. A failed old-Card patch marks the current legal tail dirty and its warning follows that tail across later rotations until successfully delivered.
+I24. A Card is evicted only after it is semantically immutable, delivery-finalized (settled or retry-exhausted), authority-free, and free of pending diagnostics/retries.
+I25. Historical Card retention is bounded; stale action rejection does not require retaining all historical Card objects or tokens.
 ```
 
-## 13. Conformance matrix
+## 14. Conformance matrix
 
-| Situation                               | Previous Response tail                                                             | New Response tail                                               | Cancel owner                        |
-| --------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------- |
-| Idle Request accepted                   | none                                                                               | received/preparing                                              | none                                |
-| Response active                         | active Title + Metadata                                                            | none                                                            | active Response                     |
-| New Request arrives                     | A active Title + Metadata                                                          | B interrupting Title + Metadata                                 | A only                              |
-| C arrives before A is sealed            | B becomes merged terminal; batch becomes [B,C]                                     | C interrupting as newest carrier                                | A only                              |
-| More messages arrive before A is sealed | each former carrier becomes merged terminal                                        | newest Response carries the growing ordered batch               | A only                              |
-| A interruption confirmed                | A interrupted Title + Metadata                                                     | B preparing Title + Metadata                                    | none                                |
-| B starts                                | A interrupted Title + Metadata                                                     | B active Title + Metadata                                       | B only                              |
-| Same Response rotates                   | old tail becomes plain intermediate; running tools become "continues in next Card" | successor tail Title + Metadata; later tool result appears here | successor only if owner in progress |
-| Permission requested                    | old tail becomes plain intermediate; Permission Card shows choices                 | continuation tail waiting + Metadata                            | continuation tail                   |
-| Consecutive Permission requested        | prior continuation becomes intermediate; next Permission Card shows choices        | next continuation tail waiting + Metadata                       | next continuation tail              |
-| Permission Card send fails              | old tail remains intermediate; no user decision is fabricated                      | continuation terminal(failed) Title + Metadata                  | none                                |
-| Response ends during Permission         | Permission Card expires; prior Cards unchanged                                     | continuation terminal Title + Metadata                          | none                                |
-| New Request during Permission           | old Permission Card expires immediately; A continuation remains current until stop | B interrupting without Cancel                                   | A until stopped                     |
-| Feishu rejects old-tail seal patch      | domain treats old tail as intermediate; stale visual button may remain inert       | following tail includes patch-failure notice                    | current valid owner tail            |
-| Response completes                      | final tail complete Title + Metadata                                               | none                                                            | none                                |
-| Response fails                          | final tail failed Title + Metadata                                                 | none                                                            | none                                |
-| Response is cancelled                   | final tail cancelled Title + Metadata                                              | none                                                            | none                                |
-| Card Cancel on A while [B,C] waits      | A cancelled Title + Metadata                                                       | carrier C continues preparing/active                            | C once active                       |
-| `/cancel` with unfinished work          | owner and waiting carrier tails become cancelled; merged tails stay merged         | no successor starts                                             | none                                |
-| Bridge restarts                         | final tail interrupted Title + Metadata                                            | optional non-actionable notice only                             | none                                |
-| Late callback arrives                   | no change                                                                          | no new Card                                                     | none                                |
+| Situation                                    | Previous Response tail                                                             | New Response tail                                                   | Cancel owner                            |
+| -------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------- |
+| Idle Request accepted                        | none                                                                               | received/preparing                                                  | none                                    |
+| Response active                              | active Title + Metadata                                                            | none                                                                | active Response                         |
+| New Request arrives                          | A active Title + Metadata                                                          | B interrupting Title + Metadata                                     | A only                                  |
+| C arrives before A is sealed                 | B becomes merged terminal; batch becomes [B,C]                                     | C interrupting as newest carrier                                    | A only                                  |
+| More messages arrive before A is sealed      | each former carrier becomes merged terminal                                        | newest Response carries the growing ordered batch                   | A only                                  |
+| A interruption confirmed                     | A interrupted Title + Metadata                                                     | B preparing Title + Metadata                                        | none                                    |
+| B starts                                     | A interrupted Title + Metadata                                                     | B active Title + Metadata                                           | B only                                  |
+| Same Response rotates                        | old tail becomes plain intermediate; running tools become "continues in next Card" | successor tail Title + Metadata; later tool result appears here     | successor only if owner in progress     |
+| Permission requested                         | old tail becomes plain intermediate; Permission Card shows choices                 | continuation tail waiting + Metadata                                | continuation tail                       |
+| Consecutive Permission requested             | prior continuation becomes intermediate; next Permission Card shows choices        | next continuation tail waiting + Metadata                           | next continuation tail                  |
+| Permission Card send fails                   | old tail remains intermediate; no user decision is fabricated                      | continuation terminal(failed) Title + Metadata                      | none                                    |
+| Response ends during Permission              | Permission Card expires; prior Cards unchanged                                     | continuation terminal Title + Metadata                              | none                                    |
+| New Request during Permission                | old Permission Card expires immediately; A continuation remains current until stop | B interrupting without Cancel                                       | A until stopped                         |
+| Feishu rejects old-tail seal patch           | domain treats old tail as intermediate; stale visual button may remain inert       | current tail is marked dirty and shows warning after reconciliation | current valid owner tail                |
+| State changes while Card effect is in flight | older effect may finish but cannot settle the newer desired revision               | Reconciler re-projects latest state and continues                   | determined only by current Domain state |
+| Retiring Card final projection settles       | Card is immutable and may be evicted from hot state                                | current tail remains retained only while live/terminalizing         | unchanged                               |
+| Response completes                           | final tail complete Title + Metadata                                               | none                                                                | none                                    |
+| Response fails                               | final tail failed Title + Metadata                                                 | none                                                                | none                                    |
+| Response is cancelled                        | final tail cancelled Title + Metadata                                              | none                                                                | none                                    |
+| Card Cancel on A while [B,C] waits           | A cancelled Title + Metadata                                                       | carrier C continues preparing/active                                | C once active                           |
+| `/cancel` with unfinished work               | owner and waiting carrier tails become cancelled; merged tails stay merged         | no successor starts                                                 | none                                    |
+| Bridge restarts                              | final tail interrupted Title + Metadata                                            | optional non-actionable notice only                                 | none                                    |
+| Late callback arrives                        | no change                                                                          | no new Card                                                         | none                                    |
 
-## 14. Change-control rule
+## 15. Change-control rule
 
 This specification is changed before implementation.
 
