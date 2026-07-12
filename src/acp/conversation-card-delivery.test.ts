@@ -164,16 +164,18 @@ describe("ConversationCardDelivery", () => {
       cardId: "successor-card",
     });
 
-    expect(sendView).toHaveBeenCalledExactlyOnceWith(startingView("fresh"));
+    expect(sendView).toHaveBeenNthCalledWith(1, archivedView());
+    expect(sendView).toHaveBeenNthCalledWith(2, startingView("fresh"));
     oldPatch.resolve(true);
     await expect(running).resolves.toEqual({ outcome: "skipped" });
     await vi.waitFor(() => expect(patchView).toHaveBeenCalledTimes(2));
     expect(patchView).toHaveBeenNthCalledWith(2, "old-card", archivedView());
-    expect(sendView).toHaveBeenCalledTimes(1);
+    expect(sendView).toHaveBeenCalledTimes(2);
   });
 
   it("submits terminal close immediately instead of waiting behind a hung queued patch", async () => {
     const hungPatch = deferred<boolean>();
+    const sendView = vi.fn(async () => "terminal-card");
     const patchView = vi
       .fn()
       .mockImplementationOnce(() => hungPatch.promise)
@@ -182,7 +184,7 @@ describe("ConversationCardDelivery", () => {
       transport(),
       diagnosticSink(),
       () => ownerToken("generated"),
-      { sendView: vi.fn(async () => "unexpected"), patchView },
+      { sendView, patchView },
     );
     const owner = delivery.createOwner({ messageSequence: 1 }, correlation(1), ownerToken("owner"));
     delivery.adopt(owner, "card");
@@ -201,11 +203,108 @@ describe("ConversationCardDelivery", () => {
     await vi.waitFor(() => expect(patchView).toHaveBeenCalledTimes(1));
 
     delivery.close(owner, archivedView("terminal wins"), correlation(2), ownerToken("next"));
-    await vi.waitFor(() => expect(patchView).toHaveBeenCalledTimes(2));
-    expect(patchView).toHaveBeenNthCalledWith(2, "card", archivedView("terminal wins"));
+    await vi.waitFor(() => expect(sendView).toHaveBeenCalledTimes(1));
+    expect(sendView).toHaveBeenCalledWith(archivedView("terminal wins"));
 
     hungPatch.resolve(true);
     await expect(waiting).resolves.toEqual({ outcome: "skipped" });
+  });
+
+  it("reasserts terminal after an older in-flight patch completes last", async () => {
+    const hungPatch = deferred<boolean>();
+    const visibleState: ConversationCardView[] = [];
+    const patchView = vi.fn(async (_cardId: string, view: ConversationCardView) => {
+      if (view.kind === "active") await hungPatch.promise;
+      visibleState.splice(0, visibleState.length, view);
+      return true;
+    });
+    const sendView = vi.fn(async (view: ConversationCardView) => {
+      visibleState.splice(0, visibleState.length, view);
+      return "terminal-card";
+    });
+    const delivery = new ConversationCardDelivery(
+      transport(),
+      diagnosticSink(),
+      () => ownerToken("generated"),
+      { sendView, patchView },
+    );
+    const owner = delivery.createOwner({ messageSequence: 1 }, correlation(1), ownerToken("owner"));
+    delivery.adopt(owner, "card");
+    const running = delivery.deliver(owner, {
+      kind: "active",
+      header: "waiting",
+      entries: [],
+      profile: null,
+      cancelAction: {
+        p: promptToken("prompt"),
+        s: segmentToken("segment"),
+        a: "action" as import("../presenter/conversation-card-view.js").ActionToken,
+      },
+      route: { c: "route" },
+    });
+    await vi.waitFor(() => expect(patchView).toHaveBeenCalledTimes(1));
+    delivery.close(owner, archivedView("terminal"), correlation(2), ownerToken("next"));
+    await vi.waitFor(() => expect(visibleState.at(-1)?.kind).toBe("archived"));
+
+    hungPatch.resolve(true);
+    await running;
+    await vi.waitFor(() => expect(patchView).toHaveBeenCalledTimes(2));
+    expect(visibleState.at(-1)?.kind).toBe("archived");
+  });
+
+  it("does not reuse a card while an old conversation patch is in flight for permission handoff", async () => {
+    const hungPatch = deferred<boolean>();
+    const patchView = vi.fn(() => hungPatch.promise);
+    const patchPermission = vi.fn(async () => true);
+    const sendPermission = vi.fn(async () => "permission-card");
+    const delivery = new ConversationCardDelivery(
+      transport(),
+      diagnosticSink(),
+      () => ownerToken("generated"),
+      { sendView: vi.fn(), patchView },
+      { patchPermission, sendPermission, reconcilePermissionArtifact: vi.fn() },
+    );
+    const owner = delivery.createOwner({ messageSequence: 1 }, correlation(1), ownerToken("owner"));
+    delivery.adopt(owner, "card");
+    const old = delivery.deliver(owner, startingView("old"));
+    await vi.waitFor(() => expect(patchView).toHaveBeenCalledOnce());
+
+    await expect(
+      delivery.handoffToPermission(owner, {
+        promptToken: promptToken("prompt"),
+        segmentToken: segmentToken("segment"),
+        permissionToken: permissionToken("permission"),
+        permission: {},
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({ outcome: "sent_fresh", permissionCardId: "permission-card" });
+    expect(patchPermission).not.toHaveBeenCalled();
+    hungPatch.resolve(true);
+    await old;
+  });
+
+  it("rejects permission handoff from an already closed owner", async () => {
+    const sendPermission = vi.fn(async () => "ghost");
+    const delivery = new ConversationCardDelivery(
+      transport(),
+      diagnosticSink(),
+      () => ownerToken("generated"),
+      { sendView: vi.fn(async () => "terminal"), patchView: vi.fn() },
+      { patchPermission: vi.fn(), sendPermission, reconcilePermissionArtifact: vi.fn() },
+    );
+    const owner = delivery.createOwner({ messageSequence: 1 }, correlation(1), ownerToken("owner"));
+    delivery.close(owner, archivedView(), correlation(2), ownerToken("next"));
+
+    await expect(
+      delivery.handoffToPermission(owner, {
+        promptToken: promptToken("prompt"),
+        segmentToken: segmentToken("segment"),
+        permissionToken: permissionToken("permission"),
+        permission: {},
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({ outcome: "failed" });
+    expect(sendPermission).not.toHaveBeenCalled();
   });
 
   it("freezes every semantic transport boundary before queued work can observe mutation", async () => {

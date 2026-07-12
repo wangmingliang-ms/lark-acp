@@ -190,6 +190,12 @@ export class ConversationCardDelivery {
     const snapshot = cardSnapshot(view);
     const sequence = ++owner.lastSequence;
     owner.closeSequence = sequence;
+    const priorQueue = owner.queue;
+    const supersededCardId = owner.pendingDeliveries > 0 ? owner.activeCardId : null;
+    if (supersededCardId !== null) {
+      this.cardOwners.delete(supersededCardId);
+      owner.activeCardId = null;
+    }
     owner.pendingDeliveries += 1;
     this.record(owner, "close", "pending");
     const closing = this.applySemanticView(owner, sequence, snapshot, true);
@@ -207,6 +213,9 @@ export class ConversationCardDelivery {
         this.record(owner, "close", "failed");
       },
     );
+    if (supersededCardId !== null) {
+      void priorQueue.then(() => this.reassertClosedView(owner, supersededCardId, snapshot));
+    }
     return nextOwner;
   }
 
@@ -215,7 +224,8 @@ export class ConversationCardDelivery {
     request: PermissionHandoffRequest,
   ): Promise<PermissionHandoffResult> {
     const owner = this.owners.get(token);
-    if (owner === undefined || this.permissionTransport === undefined) return { outcome: "failed" };
+    if (owner === undefined || !owner.accepting || this.permissionTransport === undefined)
+      return { outcome: "failed" };
     const snapshot = {
       ...immutableSnapshot({
         promptToken: request.promptToken,
@@ -227,24 +237,26 @@ export class ConversationCardDelivery {
       isCurrent: request.isCurrent,
     };
     const reusableCardId =
-      request.reuseCard === false || !owner.accepting ? null : owner.activeCardId;
+      request.reuseCard === false || owner.pendingDeliveries > 0 ? null : owner.activeCardId;
     this.closeOwnerSynchronously(owner);
 
     if (reusableCardId !== null) {
       this.cardOwners.delete(reusableCardId);
       this.record(owner, "permission_reuse", "pending");
       let accepted = false;
+      let patchFailed = false;
       try {
         accepted = await this.permissionTransport.patchPermission(reusableCardId, snapshot);
       } catch {
-        accepted = false;
+        patchFailed = true;
       }
       if (accepted) {
-        if (!request.isCurrent()) return this.supersededPermission(owner, reusableCardId, snapshot);
+        if (!request.isCurrent())
+          return this.supersededPermission(owner, reusableCardId, snapshot, "permission_reuse");
         this.record(owner, "permission_reuse", "reused");
         return { outcome: "reused", permissionCardId: reusableCardId };
       }
-      this.record(owner, "permission_reuse", "rejected");
+      this.record(owner, "permission_reuse", patchFailed ? "failed" : "rejected");
       if (!request.isCurrent()) return { outcome: "failed" };
     }
 
@@ -260,7 +272,8 @@ export class ConversationCardDelivery {
       this.record(owner, "permission_send", "failed");
       return { outcome: "failed" };
     }
-    if (!request.isCurrent()) return this.supersededPermission(owner, permissionCardId, snapshot);
+    if (!request.isCurrent())
+      return this.supersededPermission(owner, permissionCardId, snapshot, "permission_send");
     this.record(owner, "permission_send", "visible");
     return { outcome: "sent_fresh", permissionCardId };
   }
@@ -425,10 +438,11 @@ export class ConversationCardDelivery {
     const cardId = owner.activeCardId;
     this.record(owner, "patch", "pending");
     let accepted = false;
+    let patchFailed = false;
     try {
       accepted = await this.semanticTransport!.patchView(cardId, cardSnapshot(view));
     } catch {
-      accepted = false;
+      patchFailed = true;
     }
     if ((!owner.accepting && !closing) || owner.activeCardId !== cardId)
       return { outcome: "skipped" };
@@ -437,7 +451,7 @@ export class ConversationCardDelivery {
       return { outcome: "visible", cardId };
     }
 
-    this.record(owner, "patch", "rejected");
+    this.record(owner, "patch", patchFailed ? "failed" : "rejected");
     this.cardOwners.delete(cardId);
     owner.activeCardId = null;
     return this.sendSemanticAndInstall(owner, view, closing);
@@ -485,12 +499,27 @@ export class ConversationCardDelivery {
     owner.activeCardId = null;
   }
 
+  private async reassertClosedView(
+    owner: SemanticOwner,
+    cardId: string,
+    view: Extract<ConversationCardView, { kind: "archived" | "terminal" }>,
+  ): Promise<void> {
+    this.record(owner, "reconcile", "pending");
+    try {
+      const accepted = await this.semanticTransport!.patchView(cardId, cardSnapshot(view));
+      this.record(owner, "reconcile", accepted ? "visible" : "rejected");
+    } catch {
+      this.record(owner, "reconcile", "failed");
+    }
+  }
+
   private async supersededPermission(
     owner: SemanticOwner,
     cardId: string,
     request: PermissionHandoffRequest,
+    operation: "permission_reuse" | "permission_send",
   ): Promise<PermissionHandoffResult> {
-    this.record(owner, "permission_send", "superseded");
+    this.record(owner, operation, "superseded");
     this.record(owner, "reconcile", "pending");
     const reconciliation: PermissionArtifactReconciliation = {
       type: "reconcile_permission_artifact",
