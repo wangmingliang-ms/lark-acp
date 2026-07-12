@@ -52,6 +52,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       kind: "queued",
       header: "queued",
       entries: [],
+      profile,
       route: { c: "chat", th: "thread" },
     });
   });
@@ -79,6 +80,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       kind: "interrupting",
       header: "interrupting",
       entries: [],
+      profile,
       route: { c: "chat", th: "thread" },
     });
     expect(result.effects).toHaveLength(1);

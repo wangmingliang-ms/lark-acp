@@ -539,8 +539,8 @@ describe("LarkCardPresenter semantic conversation cards", () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards, [], enabled);
     const views: ConversationCardView[] = [
-      { kind: "queued", header: "queued", entries: [], route },
-      { kind: "interrupting", header: "interrupting", entries: [], route },
+      { kind: "queued", header: "queued", entries: [], profile, route },
+      { kind: "interrupting", header: "interrupting", entries: [], profile, route },
       { kind: "starting", header: "preparing", entries: [], profile, route },
       {
         kind: "orphaned",
@@ -590,8 +590,8 @@ describe("LarkCardPresenter semantic conversation cards", () => {
       "✅ 已结束",
     ]);
     const serialized = cards.map((card) => JSON.stringify(card));
-    expect(serialized[0]).not.toContain("Agent:");
-    expect(serialized[1]).not.toContain("Agent:");
+    expect(serialized[0]).toContain("Agent: Claude");
+    expect(serialized[1]).toContain("Agent: Claude");
     expect(serialized[2]).toContain("Agent: Claude");
     expect(serialized[3]).not.toContain("Agent:");
     expect(serialized[3]).not.toContain('"tag":"button"');

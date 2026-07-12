@@ -33,7 +33,8 @@ export interface CancelActionPayloadV2 {
   readonly a: string;
 }
 
-export type ToolStatus = "pending" | "in_progress" | "completed" | "failed" | "interrupted";
+export type ToolStatus =
+  "pending" | "in_progress" | "continued" | "completed" | "failed" | "interrupted";
 
 export type ConversationTimelineEntry =
   | { readonly kind: "text"; readonly text: string }
@@ -59,19 +60,30 @@ export type QueueHeader = "queued" | "interrupting";
 export type StartingHeader = "preparing";
 export type ActiveHeader = "thinking" | "waiting" | "calling_tool" | "responding";
 export type OrphanHeader = "orphaned";
-export type TerminalHeader = "complete" | "cancelled" | "failed" | "superseded" | "abandoned";
+export type TerminalHeader =
+  | "complete"
+  | "cancelled"
+  | "failed"
+  | "interrupted"
+  | "merged"
+  /** @deprecated compatibility only; new domain code must use interrupted/failed. */
+  | "superseded"
+  /** @deprecated compatibility only; new domain code must use interrupted/failed. */
+  | "abandoned";
 
 export type ConversationCardView =
   | {
       readonly kind: "queued";
       readonly header: "queued";
-      readonly entries: readonly [];
+      readonly entries: readonly ConversationTimelineEntry[];
+      readonly profile: SessionCardMeta | null;
       readonly route: CardRoute;
     }
   | {
       readonly kind: "interrupting";
       readonly header: "interrupting";
-      readonly entries: readonly [];
+      readonly entries: readonly ConversationTimelineEntry[];
+      readonly profile: SessionCardMeta | null;
       readonly route: CardRoute;
     }
   | {

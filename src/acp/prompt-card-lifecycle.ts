@@ -342,9 +342,21 @@ function summary(entries: readonly ConversationTimelineEntry[]): string {
 export function viewForPromptState(state: PromptLifecycleState): ConversationCardView | null {
   switch (state.phase) {
     case "queued":
-      return { kind: "queued", header: "queued", entries: [], route: state.route };
+      return {
+        kind: "queued",
+        header: "queued",
+        entries: [],
+        profile: state.profile,
+        route: state.route,
+      };
     case "interrupting":
-      return { kind: "interrupting", header: "interrupting", entries: [], route: state.route };
+      return {
+        kind: "interrupting",
+        header: "interrupting",
+        entries: [],
+        profile: state.profile,
+        route: state.route,
+      };
     case "starting":
       return {
         kind: "starting",

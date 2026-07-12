@@ -645,10 +645,14 @@ function semanticEmptyMessage(view: ConversationCardView): string {
         case "cancelled":
         case "failed":
           return emptyStateMessage(view.header);
+        case "interrupted":
+          return "_本轮 Response 已被中断。_";
+        case "merged":
+          return "_本条消息已合并到下一条消息，将一同发送给 Agent。_";
         case "superseded":
-          return "_本轮任务已被后续任务取代。_";
+          return "_兼容状态：本轮任务已被后续任务取代。_";
         case "abandoned":
-          return "_本轮任务未能开始或继续。_";
+          return "_兼容状态：本轮任务未能开始或继续。_";
         default:
           return "";
       }
@@ -685,6 +689,10 @@ function semanticTerminalHeader(
     case "cancelled":
     case "failed":
       return STATUS_HEADER[header];
+    case "interrupted":
+      return { content: "⏸️ 已中断", template: "grey" };
+    case "merged":
+      return { content: "🔗 已合并到下一条消息", template: "grey" };
     case "superseded":
       return { content: "⏭️ 已被后续任务取代", template: "grey" };
     case "abandoned":
@@ -736,6 +744,8 @@ function semanticEntries(view: ConversationCardView): object[] {
 
 function semanticProfile(view: ConversationCardView): object | null {
   switch (view.kind) {
+    case "queued":
+    case "interrupting":
     case "starting":
     case "active":
     case "terminal":
@@ -749,8 +759,6 @@ function semanticProfile(view: ConversationCardView): object | null {
           `Permission: ${view.profile.permission}`,
         ].join(" · ")}</font>`,
       };
-    case "queued":
-    case "interrupting":
     case "orphaned":
     case "archived":
       return null;
@@ -839,7 +847,7 @@ function isTimelineEntry(value: unknown): boolean {
         typeof value.toolCallId === "string" &&
         typeof value.title === "string" &&
         typeof value.toolKind === "string" &&
-        ["pending", "in_progress", "completed", "failed", "interrupted"].includes(
+        ["pending", "in_progress", "continued", "completed", "failed", "interrupted"].includes(
           value.status as string,
         ) &&
         (value.detail === undefined || typeof value.detail === "string")
@@ -878,6 +886,7 @@ function hasOnlyTerminalToolEntries(value: Record<string, unknown>): boolean {
       entry.kind !== "tool" ||
       entry.status === "completed" ||
       entry.status === "failed" ||
+      entry.status === "continued" ||
       entry.status === "interrupted",
   );
 }
@@ -898,17 +907,17 @@ function isConversationCardView(value: unknown): value is ConversationCardView {
   switch (value.kind) {
     case "queued":
       return (
-        hasOnlyKeys(value, ["kind", "header", "entries", "route"]) &&
+        hasOnlyKeys(value, ["kind", "header", "entries", "profile", "route"]) &&
         value.header === "queued" &&
-        Array.isArray(value.entries) &&
-        value.entries.length === 0
+        hasEntries(value) &&
+        isProfile(value.profile)
       );
     case "interrupting":
       return (
-        hasOnlyKeys(value, ["kind", "header", "entries", "route"]) &&
+        hasOnlyKeys(value, ["kind", "header", "entries", "profile", "route"]) &&
         value.header === "interrupting" &&
-        Array.isArray(value.entries) &&
-        value.entries.length === 0
+        hasEntries(value) &&
+        isProfile(value.profile)
       );
     case "starting":
       return (
@@ -951,9 +960,15 @@ function isConversationCardView(value: unknown): value is ConversationCardView {
     case "terminal":
       return (
         hasOnlyKeys(value, ["kind", "header", "entries", "profile", "body", "route"]) &&
-        ["complete", "cancelled", "failed", "superseded", "abandoned"].includes(
-          value.header as string,
-        ) &&
+        [
+          "complete",
+          "cancelled",
+          "failed",
+          "interrupted",
+          "merged",
+          "superseded",
+          "abandoned",
+        ].includes(value.header as string) &&
         hasEntries(value) &&
         hasOnlyTerminalToolEntries(value) &&
         isProfile(value.profile) &&
