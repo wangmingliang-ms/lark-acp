@@ -541,7 +541,7 @@ Tests may reference methods but production files outside the allowlist may not. 
 
 - [ ] **Step 6: Implement remaining runtime integration under injected gate**
 
-Create prompt token/lifecycle before Bridge adds reaction via a `preparePrompt(messageContext): PreparedPrompt` factory shared by Bridge and ChatRuntime. `PreparedPrompt` owns the controller and acknowledgement callbacks; Bridge adds reaction then calls `prepared.attachAcknowledgement(reactionId?)` and enqueues that same prepared object. Default gate remains disabled.
+Create prompt token/lifecycle before Bridge adds reaction through `preparePrompt(messageContext): PreparedPrompt`. The handle references the controller but owns no acknowledgement state; Bridge adds reaction, calls `prepared.attachAcknowledgement(reactionId?)` to dispatch into the reducer, and enqueues that same handle. Default gate remains disabled.
 
 - [ ] **Step 7: Verify and commit**
 
