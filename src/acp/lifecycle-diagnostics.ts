@@ -44,7 +44,13 @@ export interface TransitionLifecycleDiagnostic {
   readonly entryCount: number;
   readonly utf8Bytes: number;
   readonly actionRevoked: boolean;
-  readonly staleReason?: "stale_prompt" | "stale_segment" | "stale_timer" | "terminal_absorbed";
+  readonly staleReason?:
+    | "stale_prompt"
+    | "stale_segment"
+    | "stale_timer"
+    | "terminal_absorbed"
+    | "conflicting_terminal"
+    | "tool_regression";
 }
 
 export interface DeliveryLifecycleDiagnostic {

@@ -167,6 +167,7 @@ export type ConversationCardEvent =
       readonly reason: ArchiveReason;
       readonly nextSegmentToken: SegmentToken;
       readonly nextActionToken: ActionToken;
+      readonly nextOwnershipToken: OwnershipToken;
       readonly nextProfile: SessionCardMeta | null;
     }
   | {
@@ -176,6 +177,7 @@ export type ConversationCardEvent =
       readonly timerGeneration: number;
       readonly nextSegmentToken: SegmentToken;
       readonly nextActionToken: ActionToken;
+      readonly nextOwnershipToken: OwnershipToken;
       readonly nextProfile: SessionCardMeta | null;
     }
   | {
@@ -191,6 +193,7 @@ export type ConversationCardEvent =
       readonly permissionToken: PermissionToken;
       readonly nextSegmentToken: SegmentToken;
       readonly nextActionToken: ActionToken;
+      readonly nextOwnershipToken: OwnershipToken;
       readonly nextProfile: SessionCardMeta | null;
     }
   | {
@@ -302,14 +305,30 @@ export function createPromptLifecycle(input: CreatePromptLifecycleInput): Prompt
   };
 }
 
+function terminalToolStatus(status: ToolStatus, outcome: TerminalOutcome): ToolStatus {
+  if (status !== "pending" && status !== "in_progress") return status;
+  if (outcome === "failed" || (outcome === "abandoned" && status === "in_progress"))
+    return "failed";
+  return "interrupted";
+}
+
 function terminalEntries(
   entries: readonly ConversationTimelineEntry[],
   outcome: TerminalOutcome,
 ): readonly TerminalTimelineEntry[] {
   return entries.map((entry) =>
-    entry.kind !== "tool" || (entry.status !== "pending" && entry.status !== "in_progress")
-      ? (entry as TerminalTimelineEntry)
-      : { ...entry, status: outcome === "failed" ? "failed" : "interrupted" },
+    entry.kind !== "tool"
+      ? entry
+      : ({ ...entry, status: terminalToolStatus(entry.status, outcome) } as TerminalTimelineEntry),
+  );
+}
+
+function terminalLedger(ledger: ToolLedger, outcome: TerminalOutcome): ToolLedger {
+  return Object.fromEntries(
+    Object.entries(ledger).map(([id, entry]) => [
+      id,
+      { ...entry, status: terminalToolStatus(entry.status, outcome) },
+    ]),
   );
 }
 
@@ -428,6 +447,7 @@ function scheduleRender(state: ActiveState): { next: ActiveState; effects: CardE
     ...state.render,
     desiredGeneration: state.render.desiredGeneration + 1,
     flushScheduled: true,
+    timerGeneration: state.render.timerGeneration + 1,
   };
   return {
     next: { ...state, render },
@@ -468,16 +488,17 @@ function applyTool(
   let accepted = event.tool;
   let staleReason: StaleEventReason | undefined;
   if (current !== undefined) {
-    if (
-      current.status === "interrupted" ||
-      (TERMINAL.has(current.status) && current.status !== event.tool.status)
-    ) {
-      return { next: state, staleReason: "conflicting_terminal", changed: false };
-    }
-    if (TERMINAL.has(current.status) && current.status === event.tool.status)
+    if (TERMINAL.has(current.status)) {
+      if (RUNNING.has(event.tool.status)) {
+        return { next: state, staleReason: "tool_regression", changed: false };
+      }
+      if (current.status !== event.tool.status) {
+        return { next: state, staleReason: "conflicting_terminal", changed: false };
+      }
       accepted = { ...current, ...event.tool };
-    else if (current.status === "in_progress" && event.tool.status === "pending")
+    } else if (current.status === "in_progress" && event.tool.status === "pending") {
       return { next: state, staleReason: "tool_regression", changed: false };
+    }
   }
   const marker: ToolLedgerEntry = { ...accepted, displaySegmentToken: event.displaySegmentToken };
   let next: PromptLifecycleState = {
@@ -500,11 +521,19 @@ function applyTool(
       index < 0
         ? [...next.entries, toolEntry]
         : next.entries.map((entry, position) => (position === index ? toolEntry : entry));
+    const hasRunningTool = entries.some(
+      (entry) => entry.kind === "tool" && RUNNING.has(entry.status),
+    );
     next = {
       ...next,
       entries,
-      activity: RUNNING.has(accepted.status) ? "calling_tool" : next.activity,
+      activity: hasRunningTool
+        ? "calling_tool"
+        : next.entries.some((entry) => entry.kind === "text")
+          ? "responding"
+          : "thinking",
       display: "content",
+      render: { ...next.render, timerGeneration: next.render.timerGeneration + 1 },
     };
   }
   return { next, staleReason, changed: true };
@@ -661,6 +690,7 @@ export function reducePromptLifecycle(
       display: "content",
       segmentToken: event.nextSegmentToken,
       actionToken: event.nextActionToken,
+      ownershipToken: event.nextOwnershipToken,
       profile: event.nextProfile,
       entries: [],
       archived: [
@@ -707,6 +737,7 @@ export function reducePromptLifecycle(
       display: "idle_slot",
       segmentToken: event.nextSegmentToken,
       actionToken: event.nextActionToken,
+      ownershipToken: event.nextOwnershipToken,
       profile: event.nextProfile,
       entries: [],
       archived,
@@ -760,15 +791,35 @@ export function reducePromptLifecycle(
   if (event.type === "permission_resolved") {
     if (state.phase !== "awaiting_permission" || event.permissionToken !== state.permissionToken)
       return result(state, state, event, [], "stale_segment");
+    const resumedEntries: ConversationTimelineEntry[] = Object.values(state.toolLedger)
+      .filter((entry) => entry.displaySegmentToken === null && TERMINAL.has(entry.status))
+      .map((entry) => ({
+        kind: "tool" as const,
+        toolCallId: entry.toolCallId,
+        title: entry.title,
+        toolKind: entry.toolKind,
+        status: entry.status,
+        ...(entry.detail === undefined ? {} : { detail: entry.detail }),
+      }));
+    const resumedLedger: ToolLedger = Object.fromEntries(
+      Object.entries(state.toolLedger).map(([id, entry]) => [
+        id,
+        entry.displaySegmentToken === null && TERMINAL.has(entry.status)
+          ? { ...entry, displaySegmentToken: event.nextSegmentToken }
+          : entry,
+      ]),
+    );
     const next: ActiveState = {
       ...state,
       phase: "active",
       segmentToken: event.nextSegmentToken,
       actionToken: event.nextActionToken,
+      ownershipToken: event.nextOwnershipToken,
       profile: event.nextProfile,
       activity: "thinking",
       display: "content",
-      entries: [],
+      entries: resumedEntries,
+      toolLedger: resumedLedger,
     };
     return result(state, next, event, renderImmediately(next));
   }
@@ -782,6 +833,7 @@ export function reducePromptLifecycle(
         phase: "terminal",
         outcome: event.outcome,
         entries: [],
+        toolLedger: terminalLedger(state.toolLedger, event.outcome),
         presentation: "permission_card_only",
         acknowledgement: ack.acknowledgement,
         render: {
@@ -807,6 +859,7 @@ export function reducePromptLifecycle(
       phase: "terminal",
       outcome: event.outcome,
       entries,
+      toolLedger: terminalLedger(state.toolLedger, event.outcome),
       presentation: "conversation_card",
       acknowledgement: ack.acknowledgement,
       render: {

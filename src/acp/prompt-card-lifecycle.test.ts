@@ -189,6 +189,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       reason: "rotation",
       nextSegmentToken,
       nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
       nextProfile: profile,
     });
 
@@ -196,6 +197,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       phase: "active",
       segmentToken: nextSegmentToken,
       actionToken: nextActionToken,
+      ownershipToken: "owner-2",
       entries: [],
       archived: [{ reason: "rotation", segmentToken, entries: [{ kind: "text", text: "answer" }] }],
     });
@@ -248,10 +250,18 @@ describe("prompt lifecycle creation and queue transitions", () => {
       });
 
       expect(finished.next).toMatchObject({ phase: "terminal", outcome });
+      expect(finished.next.toolLedger.tool?.status).toBe(
+        outcome === "failed" || outcome === "abandoned" ? "failed" : "interrupted",
+      );
       expect(viewForPromptState(finished.next)).toMatchObject({
         kind: "terminal",
         header: outcome,
-        entries: [{ kind: "tool", status: outcome === "failed" ? "failed" : "interrupted" }],
+        entries: [
+          {
+            kind: "tool",
+            status: outcome === "failed" || outcome === "abandoned" ? "failed" : "interrupted",
+          },
+        ],
       });
       expect(finished.effects[0]).toEqual({ type: "revoke_action", actionToken });
       expect(late.next).toBe(finished.next);
@@ -337,6 +347,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       reason: "rotation",
       nextSegmentToken,
       nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
       nextProfile: profile,
     }).next;
     const completed = reducePromptLifecycle(rotated, {
@@ -491,12 +502,14 @@ describe("prompt lifecycle creation and queue transitions", () => {
       permissionToken,
       nextSegmentToken,
       nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
       nextProfile: profile,
     });
     expect(resumed.next).toMatchObject({
       phase: "active",
       segmentToken: nextSegmentToken,
       actionToken: nextActionToken,
+      ownershipToken: "owner-2",
       entries: [],
     });
 
@@ -575,6 +588,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
                 reason: "rotation" as const,
                 nextSegmentToken: next,
                 nextActionToken: `action-${segmentNumber}` as ActionToken,
+                nextOwnershipToken: `owner-${segmentNumber}` as OwnershipToken,
                 nextProfile: profile,
               };
               if (state.phase === "active" && state.entries.length > 0) currentSegment = next;
@@ -612,6 +626,16 @@ describe("prompt lifecycle creation and queue transitions", () => {
         const view = viewForPromptState(state);
         if (view?.kind === "active") {
           expect(view.cancelAction).toBeDefined();
+          const hasRunningTool = view.entries.some(
+            (entry) =>
+              entry.kind === "tool" &&
+              (entry.status === "pending" || entry.status === "in_progress"),
+          );
+          expect(view.header === "calling_tool").toBe(hasRunningTool);
+          if (state.phase === "active" && state.display === "idle_slot") {
+            expect(view.header).toBe("waiting");
+            expect(view.entries).toEqual([]);
+          }
         } else if (view !== null) {
           expect("cancelAction" in view).toBe(false);
         }
@@ -624,6 +648,114 @@ describe("prompt lifecycle creation and queue transitions", () => {
         }
       }
     }
+  });
+
+  it("recomputes activity when tools finish and rejects stale idle callbacks after visible content", () => {
+    const active = reducePromptLifecycle(create("starting"), {
+      type: "forwarded",
+      promptToken,
+      segmentToken,
+      actionToken,
+    }).next;
+    const running = reducePromptLifecycle(active, {
+      type: "tool_started",
+      promptToken,
+      displaySegmentToken: segmentToken,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "in_progress" },
+    }).next;
+    const completed = reducePromptLifecycle(running, {
+      type: "tool_updated",
+      promptToken,
+      displaySegmentToken: segmentToken,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "completed" },
+    }).next;
+    expect(viewForPromptState(completed)).toMatchObject({ kind: "active", header: "thinking" });
+
+    const staleIdle = reducePromptLifecycle(completed, {
+      type: "open_idle_slot",
+      promptToken,
+      segmentToken,
+      timerGeneration: 0,
+      nextSegmentToken,
+      nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
+      nextProfile: profile,
+    });
+    expect(staleIdle.next).toBe(completed);
+    expect(staleIdle.diagnostic.staleReason).toBe("stale_timer");
+  });
+
+  it("projects tools completed while awaiting permission into the resumed segment", () => {
+    const active = reducePromptLifecycle(create("starting"), {
+      type: "forwarded",
+      promptToken,
+      segmentToken,
+      actionToken,
+    }).next;
+    const running = reducePromptLifecycle(active, {
+      type: "tool_started",
+      promptToken,
+      displaySegmentToken: segmentToken,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "in_progress" },
+    }).next;
+    const waiting = reducePromptLifecycle(running, {
+      type: "permission_requested",
+      promptToken,
+      segmentToken,
+      permissionToken,
+      permission: {
+        requestId: "request",
+        title: "permission",
+        toolKind: "shell",
+        toolTitle: "run",
+        options: [{ id: "allow", label: "Allow" }],
+      },
+    }).next;
+    const completed = reducePromptLifecycle(waiting, {
+      type: "tool_updated",
+      promptToken,
+      displaySegmentToken: null,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "completed" },
+    }).next;
+    const resumed = reducePromptLifecycle(completed, {
+      type: "permission_resolved",
+      promptToken,
+      permissionToken,
+      nextSegmentToken,
+      nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
+      nextProfile: profile,
+    }).next;
+
+    expect(viewForPromptState(resumed)).toMatchObject({
+      kind: "active",
+      entries: [{ kind: "tool", toolCallId: "tool", status: "completed" }],
+    });
+    expect(resumed.toolLedger.tool?.displaySegmentToken).toBe(nextSegmentToken);
+    expect(resumed.archived[0]?.entries).toMatchObject([{ status: "interrupted" }]);
+  });
+
+  it("classifies terminal-to-running tool updates as regressions", () => {
+    const active = reducePromptLifecycle(create("starting"), {
+      type: "forwarded",
+      promptToken,
+      segmentToken,
+      actionToken,
+    }).next;
+    const completed = reducePromptLifecycle(active, {
+      type: "tool_updated",
+      promptToken,
+      displaySegmentToken: segmentToken,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "completed" },
+    }).next;
+    const regression = reducePromptLifecycle(completed, {
+      type: "tool_updated",
+      promptToken,
+      displaySegmentToken: segmentToken,
+      tool: { toolCallId: "tool", title: "run", toolKind: "shell", status: "in_progress" },
+    });
+    expect(regression.next).toBe(completed);
+    expect(regression.diagnostic.staleReason).toBe("tool_regression");
   });
 
   it("invalidates queued flush on finish and prevents a late idle Waiting view", () => {
@@ -656,6 +788,7 @@ describe("prompt lifecycle creation and queue transitions", () => {
       timerGeneration: 0,
       nextSegmentToken,
       nextActionToken,
+      nextOwnershipToken: "owner-2" as OwnershipToken,
       nextProfile: profile,
     });
 
