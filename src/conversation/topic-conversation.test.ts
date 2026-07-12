@@ -190,7 +190,7 @@ describe("TopicConversation canonical lifecycle", () => {
     });
   });
 
-  it("Card Cancel cancels only A and preserves the pending batch", () => {
+  it("Card Cancel revokes A immediately, then preserves the pending batch after A stops", () => {
     const topic = new TopicConversation();
     const a = accept(topic, "a");
     start(topic, a, "a");
@@ -206,13 +206,15 @@ describe("TopicConversation canonical lifecycle", () => {
     ).toBe("accepted");
 
     expect(topic.snapshot()).toMatchObject({
-      executionOwnerResponseId: null,
+      executionOwnerResponseId: a,
+      cancelAuthority: { kind: "none" },
       pendingBatch: { carrierResponseId: c, state: "collecting" },
     });
-    expect(response(topic, a).state).toEqual({ kind: "terminal", outcome: "cancelled" });
+    expect(response(topic, a).state).toMatchObject({ kind: "in_progress", phase: "active" });
     expect(response(topic, c).state).toMatchObject({ kind: "in_progress", phase: "interrupting" });
 
-    const batch = topic.commitPendingBatchAfterOwnerEnded();
+    const batch = topic.sealOwnerForPendingBatch("cancelled");
+    expect(response(topic, a).state).toEqual({ kind: "terminal", outcome: "cancelled" });
     expect(batch).toMatchObject({ carrierResponseId: c, state: "sealed" });
   });
 

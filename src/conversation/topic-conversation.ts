@@ -431,7 +431,8 @@ export class TopicConversation {
     ) {
       return "stale";
     }
-    this.seal(input.responseId, "cancelled");
+    this.cancel = { kind: "none" };
+    this.assertInvariants();
     return "accepted";
   }
 

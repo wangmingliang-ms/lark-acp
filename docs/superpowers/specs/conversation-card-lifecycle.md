@@ -511,14 +511,17 @@ If A owns execution while a PendingRequestBatch `[B, C]` is waiting to take over
 
 ```text
 Card Cancel on A
-  -> A terminal(cancelled)
+  -> revoke A's Cancel token immediately
+  -> request Agent cancellation
+  -> keep A as Execution Owner until the Agent actually stops
+  -> A terminal(cancelled) after stop confirmation
   -> expire any Permission owned by A
   -> release A's Execution Ownership
   -> preserve [B, C]
   -> current batch carrier C moves preparing -> active
 ```
 
-The button must not clear, cancel, or otherwise mutate B, C, or any other Response. A stale A token is inert after A ends.
+The button must not clear, cancel, or otherwise mutate B, C, or any other Response. A stale A token is inert immediately after the click. Execution ownership is released only after A actually stops; pending work must not start concurrently with a still-running A.
 
 ### 9.2 Topic-scoped `/cancel`
 
