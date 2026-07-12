@@ -509,11 +509,11 @@ preparePrompt(context: { messageId: string; chatId: string; threadId: string | n
 enqueuePrepared(prepared: PreparedPrompt, prompt: acp.ContentBlock[]): Promise<void>;
 ```
 
-`PreparedPrompt` owns the controller and acknowledgement state (`unattached | attached | removal_pending | removal_attempted`). Bridge calls `preparePrompt` before adding reaction, attaches the resulting reaction ID or null exactly once, then hydrates/enqueues. Hydrate/bootstrap/enqueue failure calls `failBeforeEnqueue`, which terminalizes the same controller and triggers terminal-without-visible cleanup. `markEnqueued` is idempotent; attaching twice or enqueueing a failed object throws in tests and logs/ignores in production.
+`PromptCardLifecycle` reducer is the sole owner of acknowledgement state. `PreparedPrompt` is only a one-shot orchestration handle around the already-created controller: it may guard its own call sequence (`created | enqueued | failed`) but must not store or migrate acknowledgement phases. Bridge calls `preparePrompt` before adding reaction; `attachAcknowledgement` only dispatches the acknowledgement event to Controller, then Bridge hydrates/enqueues the same handle. Hydrate/bootstrap/enqueue failure calls `failBeforeEnqueue`, which invokes `controller.finish("abandoned")`; the reducer's finish transition owns any required removal effect. `markEnqueued` is idempotent; duplicate attach/fail/enqueue calls are rejected or recorded diagnostically, never handled by a second reaction state machine.
 
 - [ ] **Step 1: RED/GREEN — prepare/attach/enqueue failure chain**
 
-Add and implement separately: identity exists before reaction add; attach once; enqueue same object; hydrate failure cleanup; bootstrap failure cleanup; enqueue failure cleanup; duplicate calls are inert/diagnostic.
+Add and implement separately: identity exists before reaction add; attach dispatches exactly one controller event and stores no acknowledgement phase locally; enqueue same object; hydrate failure calls controller finish; bootstrap failure calls controller finish; enqueue failure calls controller finish; duplicate calls are inert/diagnostic. Assert all removal state/effects remain observable only in reducer output.
 
 - [ ] **Step 2: RED/GREEN — first, second, and third queued prompts**
 
