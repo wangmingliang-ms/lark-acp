@@ -76,11 +76,19 @@ export interface AcknowledgementLifecycleDiagnostic {
   readonly outcome: "pending" | "attached" | "removed" | "failed" | "skipped";
 }
 
+export interface ControllerLifecycleDiagnostic {
+  readonly category: "controller";
+  readonly correlation: DiagnosticCorrelation;
+  readonly operation: "effect" | "await_effects" | "permission_timeout";
+  readonly outcome: "rejected" | "timeout";
+}
+
 export type LifecycleDiagnosticEvent =
   | TransitionLifecycleDiagnostic
   | DeliveryLifecycleDiagnostic
   | RouterLifecycleDiagnostic
-  | AcknowledgementLifecycleDiagnostic;
+  | AcknowledgementLifecycleDiagnostic
+  | ControllerLifecycleDiagnostic;
 
 export type LifecycleDiagnosticLoggerProjection = LifecycleDiagnosticEvent;
 
@@ -117,6 +125,7 @@ export function projectLifecycleDiagnostic(
     case "delivery":
     case "router":
     case "acknowledgement":
+    case "controller":
       return {
         category: event.category,
         correlation,

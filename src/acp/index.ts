@@ -34,6 +34,15 @@ export {
   RingBufferLifecycleDiagnosticSink,
 } from "./lifecycle-diagnostics.js";
 export { PromptCallbackRouter } from "./prompt-callback-router.js";
+export { PromptCardController } from "./prompt-card-controller.js";
+export type {
+  AcknowledgementPort,
+  PendingPermission,
+  PromptCardControllerDelivery,
+  PromptCardControllerOptions,
+  PromptCardTimerPort,
+  PromptCardTokenFactory,
+} from "./prompt-card-controller.js";
 export type {
   BootstrapCallbacks,
   BootstrapRouteHandle,
@@ -64,6 +73,7 @@ export {
 } from "./prompt-card-lifecycle.js";
 export type {
   AcknowledgementLifecycleDiagnostic,
+  ControllerLifecycleDiagnostic,
   DeliveryLifecycleDiagnostic,
   DiagnosticCorrelation,
   LifecycleDiagnosticEvent,
