@@ -29,7 +29,7 @@ The fix must not depend on correctly classifying Feishu's opaque rejection. It m
 `src/presenter/card-text-budget.ts` remains the single source of truth for card text measurement and splitting. Define:
 
 ```ts
-CARD_MARKDOWN_ROTATION_BYTE_LIMIT = 8192
+CARD_MARKDOWN_ROTATION_BYTE_LIMIT = 8192;
 ```
 
 The hard element ceiling remains a separate emergency guard. Business code must continue using the shared UTF-8 helpers rather than `.length` or direct byte-count implementations.

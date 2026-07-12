@@ -56,10 +56,12 @@
 ### Task 1: Legacy Cancel Compatibility Guard — COMPLETED (`4700e9d`)
 
 **Files:**
+
 - Modified: `src/bridge/bridge.ts`
 - Created: `src/bridge/bridge-card-lifecycle.test.ts`
 
 **Verified TDD evidence:**
+
 - [x] RED proved a versioned Cancel reached runtime lookup before the guard.
 - [x] GREEN rejects every Cancel payload with an own `v` field before runtime lookup.
 - [x] Legacy unversioned Cancel remains functional while v2 is disabled.
@@ -73,6 +75,7 @@
 ### Task 2: Semantic View Union, Immutable Snapshots, and Diagnostic Contract
 
 **Files:**
+
 - Create: `src/presenter/conversation-card-view.ts`
 - Create: `type-tests/conversation-card-view.test-d.ts`
 - Create: `src/acp/lifecycle-diagnostics.ts`
@@ -81,6 +84,7 @@
 - Modify: `src/presenter/index.ts`
 
 **Interfaces:**
+
 - Produces: `PromptToken`, `SegmentToken`, `ActionToken`, `PermissionToken`, `OwnershipToken`, `ConversationCardView`, `CancelActionPayloadV2`, `cloneCardView(view)`, `DiagnosticCorrelation`, `LifecycleDiagnosticEvent`, `LifecycleDiagnosticSink`, and `RingBufferLifecycleDiagnosticSink`.
 - Consumes: legacy text/thought/tool data shape for conversion, but defines new v2 `ActiveTimelineEntry`, `ArchivedTimelineEntry`, and `TerminalTimelineEntry`. V2 `ToolStatus` includes `interrupted`; it does not reuse the legacy presenter `TimelineEntry` type.
 
@@ -144,11 +148,13 @@ Commit message: `feat(cards): define semantic conversation views`.
 ### Task 3: Pure Prompt Lifecycle Reducer
 
 **Files:**
+
 - Create: `src/acp/prompt-card-lifecycle.ts`
 - Create: `src/acp/prompt-card-lifecycle.test.ts`
 - Modify: `src/acp/index.ts`
 
 **Interfaces:**
+
 - Consumes: semantic tokens/views from Task 2 and card text budget helpers.
 - Produces:
 
@@ -206,12 +212,14 @@ Commit message: `feat(cards): add prompt semantic lifecycle reducer`.
 ### Task 4: ACP Prompt Callback Router and Protocol Boundary
 
 **Files:**
+
 - Create: `src/acp/prompt-callback-router.ts`
 - Create: `src/acp/prompt-callback-router.test.ts`
 - Modify: `src/acp/agent-process.ts`
 - Modify: `src/acp/agent-process.test.ts`
 
 **Interfaces:**
+
 - `PromptCallbackRouter` is the sole `acp.Client` supplied to `ClientSideConnection`.
 - It owns session-scoped delegates and one optional active prompt route:
 
@@ -228,11 +236,16 @@ interface SessionCallbacks {
 interface PromptScopedCallbacks {
   sessionUpdate(params: acp.SessionNotification): Promise<void>;
   requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse>;
-  cancelPendingPermissions(reason: "prompt_cancelled" | "route_closed" | "connection_shutdown"): void;
+  cancelPendingPermissions(
+    reason: "prompt_cancelled" | "route_closed" | "connection_shutdown",
+  ): void;
 }
 class PromptCallbackRouter implements acp.Client {
   constructor(session: SessionCallbacks, diagnostics: LifecycleDiagnosticSink);
-  activateBootstrap(mode: "new" | "load" | "resume", callbacks: BootstrapCallbacks): BootstrapRouteHandle;
+  activateBootstrap(
+    mode: "new" | "load" | "resume",
+    callbacks: BootstrapCallbacks,
+  ): BootstrapRouteHandle;
   closeBootstrap(handle: BootstrapRouteHandle): void;
   activate(promptToken: PromptToken, callbacks: PromptScopedCallbacks): PromptRouteHandle;
   close(handle: PromptRouteHandle): void;
@@ -281,10 +294,12 @@ Commit message: `feat(acp): scope callbacks to protocol prompt turns`.
 ### Task 5: Delivery Atomic Close and Permission Handoff
 
 **Files:**
+
 - Modify: `src/acp/conversation-card-delivery.ts`
 - Modify: `src/acp/conversation-card-delivery.test.ts`
 
 **Interfaces:**
+
 - Consumes: immutable `ConversationCardView` and ownership token.
 - Produces:
 
@@ -333,10 +348,12 @@ Run delivery tests, build, Prettier. Commit: `feat(cards): add atomic lifecycle 
 ### Task 6: Prompt Card Controller
 
 **Files:**
+
 - Create: `src/acp/prompt-card-controller.ts`
 - Create: `src/acp/prompt-card-controller.test.ts`
 
 **Interfaces:**
+
 - Consumes: reducer (Task 3), router tokens (Task 4), delivery (Task 5), presenter ports.
 - Produces intent API:
 
@@ -353,7 +370,11 @@ interface PromptCardController {
   markQueued(): void;
   markInterrupting(): void;
   markPreparing(profile: SessionCardMeta | null): void;
-  markForwarded(): { promptToken: PromptToken; segmentToken: SegmentToken; actionToken: ActionToken };
+  markForwarded(): {
+    promptToken: PromptToken;
+    segmentToken: SegmentToken;
+    actionToken: ActionToken;
+  };
   applyAgentUpdate(update: acp.SessionNotification["update"]): void;
   requestPermission(input: {
     requestId: string;
@@ -370,7 +391,9 @@ interface PromptCardController {
     segmentToken: SegmentToken;
     actionToken: ActionToken;
   }): "accepted" | "stale" | "duplicate";
-  cancelPendingPermissions(reason: "prompt_cancelled" | "route_closed" | "connection_shutdown"): void;
+  cancelPendingPermissions(
+    reason: "prompt_cancelled" | "route_closed" | "connection_shutdown",
+  ): void;
   finish(outcome: TerminalOutcome): void;
   awaitEffects(timeoutMs: number): Promise<void>;
 }
@@ -407,6 +430,7 @@ Run controller/reducer/delivery tests, build, Prettier. Commit: `feat(cards): or
 ### Task 7: Disabled Gate Contract and Exhaustive Lark Presenter V2
 
 **Files:**
+
 - Create: `src/bridge/conversation-card-feature.ts`
 - Create: `src/bridge/conversation-card-feature.test.ts`
 - Modify: `src/presenter/presenter.ts`
@@ -415,6 +439,7 @@ Run controller/reducer/delivery tests, build, Prettier. Commit: `feat(cards): or
 - Modify: `src/presenter/index.ts`
 
 **Interfaces:**
+
 - Consumes: `ConversationCardView`.
 - Produces `ConversationCardFeatureGate { readonly v2Enabled: boolean }`, exported `DISABLED_CONVERSATION_CARD_FEATURE = { v2Enabled: false }`, and gated v2 presenter methods. Until Task 12 supplies persisted config, every production constructor defaults/injects the disabled contract. Tests for Tasks 7–11 explicitly inject true only into isolated fixtures; each task asserts the default live route remains legacy.
 
@@ -443,10 +468,12 @@ Run presenter + feature-gate + budget tests, build, Prettier. Commit: `feat(card
 ### Task 8: Reaction Acknowledgement Port
 
 **Files:**
+
 - Modify: `src/lark/lark-http.ts`
 - Create: `src/lark/lark-http.test.ts` if no focused HTTP test exists.
 
 **Interfaces:**
+
 - Produces:
 
 ```ts
@@ -471,10 +498,12 @@ Run HTTP tests, build, Prettier. Commit: `feat(lark): support prompt acknowledge
 ### Task 9: HummingClient Adapter Migration Behind Gate
 
 **Files:**
+
 - Modify: `src/acp/humming-client.ts`
 - Modify: `src/acp/humming-client.test.ts`
 
 **Interfaces:**
+
 - Consumes: controller and router.
 - Produces: ACP client delegate methods without mutable semantic status/timeline/card ID state in v2 mode.
 
@@ -499,6 +528,7 @@ Run HummingClient and all new ACP tests, build, Prettier. Commit: `refactor(card
 ### Task 10: ChatRuntime Per-Prompt Ownership and Legacy Writer Isolation
 
 **Files:**
+
 - Create: `src/presenter/legacy-conversation-card-adapter.ts`
 - Create: `src/presenter/legacy-conversation-card-adapter.test.ts`
 - Modify: `src/acp/humming-client.ts`
@@ -506,6 +536,7 @@ Run HummingClient and all new ACP tests, build, Prettier. Commit: `refactor(card
 - Modify: `src/bridge/chat-runtime.test.ts`
 
 **Interfaces:**
+
 - Consumes: PromptCardController, PromptCallbackRouter, explicit terminal outcome map.
 - Produces: one lifecycle per `PendingMessage`, including queued messages.
 
@@ -565,12 +596,14 @@ Run runtime + ACP tests, build, Prettier. Commit: `refactor(runtime): own cards 
 ### Task 11: Bridge Single-Writer Cutover and Stale Receipt Removal
 
 **Files:**
+
 - Modify: `src/bridge/bridge.ts`
 - Modify: `src/bridge/chat-runtime.ts`
 - Modify: `src/bridge/chat-runtime.test.ts`
 - Modify: `src/bridge/bridge-card-lifecycle.test.ts`
 
 **Interfaces:**
+
 - Bridge strict parser accepts only exact v2 Cancel `{ v:2,c,th?,cancel:true,p,s,a }` and permission `{ v:2,c,th?,p,q,r,o }` schemas; version is checked before runtime lookup.
 - ChatRuntime exposes:
 
@@ -611,6 +644,7 @@ Run all bridge/runtime/ACP/presenter tests, full `npm test`, build, fmt check. C
 ### Task 12: Feature Gate, Schema Status, and Rollback-Safe CLI
 
 **Files:**
+
 - Modify: `templates/home/settings.back.json`
 - Modify: `bin/humming.ts`
 - Modify: `bin/humming.test.ts`
@@ -620,6 +654,7 @@ Run all bridge/runtime/ACP/presenter tests, full `npm test`, build, fmt check. C
 - Modify: `src/bridge/control-server.test.ts`
 
 **Interfaces:**
+
 - CLI commands are exact:
   - `humming cards-v2 enable`: query live control status; require `cardActionSchemaVersion >= 2`; persist gate true; restart/reload.
   - `humming cards-v2 disable --offline`: build-time/deployment command; persist and reread gate false without contacting or restarting a bridge.
@@ -653,6 +688,7 @@ Run CLI/control tests, full suite, build, and format. Commit: `feat(cards): add 
 ### Task 13: Gate-Off Deployment, Explicit Enablement, and Real Verification
 
 **Files:**
+
 - Tests may add focused regression fixtures only; no feature expansion.
 
 - [ ] **Step 1: Run deterministic and full quality gates**

@@ -132,12 +132,7 @@ type ConversationCardModel =
     }
   | {
       readonly phase: "terminal";
-      readonly outcome:
-        | "complete"
-        | "cancelled"
-        | "failed"
-        | "superseded"
-        | "abandoned";
+      readonly outcome: "complete" | "cancelled" | "failed" | "superseded" | "abandoned";
       readonly promptToken: PromptToken;
       readonly segmentToken: SegmentToken | null;
       readonly entries: readonly TerminalTimelineEntry[];
@@ -212,26 +207,26 @@ Terminal absorption applies to the conversation phase and all render/action/tool
 
 Tool transitions are monotonic. Agents may omit intermediate states, so the full accepted matrix is:
 
-| Current | Incoming pending | Incoming in_progress | Incoming completed | Incoming failed |
-|---|---:|---:|---:|---:|
-| absent | create pending | create in_progress | create completed | create failed |
-| pending | no-op/metadata | advance | advance | advance |
-| in_progress | ignore regression | no-op/metadata | advance | advance |
-| completed | ignore regression | ignore regression | metadata only | ignore conflicting terminal |
-| failed | ignore regression | ignore regression | ignore conflicting terminal | metadata only |
-| interrupted | ignore | ignore | ignore | ignore |
+| Current     |  Incoming pending | Incoming in_progress |          Incoming completed |             Incoming failed |
+| ----------- | ----------------: | -------------------: | --------------------------: | --------------------------: |
+| absent      |    create pending |   create in_progress |            create completed |               create failed |
+| pending     |    no-op/metadata |              advance |                     advance |                     advance |
+| in_progress | ignore regression |       no-op/metadata |                     advance |                     advance |
+| completed   | ignore regression |    ignore regression |               metadata only | ignore conflicting terminal |
+| failed      | ignore regression |    ignore regression | ignore conflicting terminal |               metadata only |
+| interrupted |            ignore |               ignore |                      ignore |                      ignore |
 
 The lifecycle keeps a prompt-level `ToolLedger` keyed by `toolCallId`, separate from any one segment's immutable entries. Rotation or permission archive snapshots the current display entry, but a later tool update advances the ledger. When the next active segment opens, a terminal update for a tool last shown in an archived segment is represented by one compact completion marker in the new segment; archived content is never mutated.
 
 Terminal normalization is explicit:
 
-| Prompt outcome | pending/in_progress tool becomes |
-|---|---|
-| complete | interrupted (`agent ended before reporting tool completion`) |
-| cancelled | interrupted (`prompt cancelled`) |
-| failed | failed (`prompt failed`) |
-| superseded | interrupted (`runtime superseded`) |
-| abandoned/bootstrap failure | failed if tool execution started, otherwise interrupted |
+| Prompt outcome              | pending/in_progress tool becomes                             |
+| --------------------------- | ------------------------------------------------------------ |
+| complete                    | interrupted (`agent ended before reporting tool completion`) |
+| cancelled                   | interrupted (`prompt cancelled`)                             |
+| failed                      | failed (`prompt failed`)                                     |
+| superseded                  | interrupted (`runtime superseded`)                           |
+| abandoned/bootstrap failure | failed if tool execution started, otherwise interrupted      |
 
 Duplicate or conflicting terminal tool updates are logged and ignored. Terminal tool states never return to running.
 
@@ -296,11 +291,26 @@ type ConversationCardEvent =
       segmentToken: SegmentToken;
       profile: SessionCardMeta | null;
     }
-  | { type: "forwarded"; promptToken: PromptToken; segmentToken: SegmentToken; actionToken: ActionToken }
+  | {
+      type: "forwarded";
+      promptToken: PromptToken;
+      segmentToken: SegmentToken;
+      actionToken: ActionToken;
+    }
   | { type: "agent_text"; promptToken: PromptToken; segmentToken: SegmentToken; text: string }
   | { type: "agent_thought"; promptToken: PromptToken; segmentToken: SegmentToken; text: string }
-  | { type: "tool_started"; promptToken: PromptToken; displaySegmentToken: SegmentToken; tool: ToolEvent }
-  | { type: "tool_updated"; promptToken: PromptToken; displaySegmentToken: SegmentToken | null; tool: ToolEvent }
+  | {
+      type: "tool_started";
+      promptToken: PromptToken;
+      displaySegmentToken: SegmentToken;
+      tool: ToolEvent;
+    }
+  | {
+      type: "tool_updated";
+      promptToken: PromptToken;
+      displaySegmentToken: SegmentToken | null;
+      tool: ToolEvent;
+    }
   | {
       type: "archive_segment";
       promptToken: PromptToken;
@@ -401,10 +411,30 @@ type CardEffect =
       permissionToken: PermissionToken;
       permission: PermissionViewData;
     }
-  | { type: "remove_acknowledgement"; promptToken: PromptToken; messageId: string; reactionId: string }
-  | { type: "expire_permission"; promptToken: PromptToken; permissionToken: PermissionToken; reason: string }
-  | { type: "reconcile_permission_artifact"; cardId: string; promptToken: PromptToken; permissionToken: PermissionToken; reason: string }
-  | { type: "reconcile_superseded"; cardId: string; view: Extract<ConversationCardView, { kind: "orphaned" }> }
+  | {
+      type: "remove_acknowledgement";
+      promptToken: PromptToken;
+      messageId: string;
+      reactionId: string;
+    }
+  | {
+      type: "expire_permission";
+      promptToken: PromptToken;
+      permissionToken: PermissionToken;
+      reason: string;
+    }
+  | {
+      type: "reconcile_permission_artifact";
+      cardId: string;
+      promptToken: PromptToken;
+      permissionToken: PermissionToken;
+      reason: string;
+    }
+  | {
+      type: "reconcile_superseded";
+      cardId: string;
+      view: Extract<ConversationCardView, { kind: "orphaned" }>;
+    }
   | { type: "revoke_action"; actionToken: ActionToken };
 ```
 
@@ -432,8 +462,20 @@ function deriveConversationCardView(model: ConversationCardModel): ConversationC
 ```ts
 type ConversationCardView =
   | { kind: "queued" | "interrupting"; header: QueueHeader; entries: readonly []; route: CardRoute }
-  | { kind: "starting"; header: StartingHeader; entries: readonly []; profile: SessionCardMeta | null; route: CardRoute }
-  | { kind: "orphaned"; header: OrphanHeader; entries: readonly TimelineEntry[]; reason: "superseded_send" | "stale_handoff"; route: CardRoute }
+  | {
+      kind: "starting";
+      header: StartingHeader;
+      entries: readonly [];
+      profile: SessionCardMeta | null;
+      route: CardRoute;
+    }
+  | {
+      kind: "orphaned";
+      header: OrphanHeader;
+      entries: readonly TimelineEntry[];
+      reason: "superseded_send" | "stale_handoff";
+      route: CardRoute;
+    }
   | {
       kind: "active";
       header: ActiveHeader;
@@ -534,7 +576,6 @@ Removal has an explicit single-owner feedback path. Delivery emits `acknowledgem
 
 For busy follow-ups, the same `PromptCardLifecycle` creates an explicit queued/interrupting view because that message has durable queue semantics. Its delivery ownership later becomes active or terminal; the runtime must not leave it queued while creating a second authoritative terminal card.
 
-
 ```text
 queued -> interrupting -> active
                     \-> cancelled/failed
@@ -627,14 +668,14 @@ Lifecycle generations isolate new prompt/segment ownership from obsolete hung tr
 
 Outcome mapping is explicit and does not claim success for administrative replacement:
 
-| Cause | Active/starting prompt | Queued prompt | Awaiting permission |
-|---|---|---|---|
-| normal end turn | complete | n/a | permission artifact resolved/expired; complete only if the agent returned complete |
-| explicit user cancel | cancelled | cancelled | expire permission, then cancelled |
-| agent/protocol error | failed | abandoned | expire permission, then failed |
-| bridge shutdown/restart | cancelled | abandoned | expire permission, then cancelled |
-| session/repo/agent supersede | superseded | abandoned | expire permission, then superseded |
-| bootstrap failure | abandoned | abandoned | n/a |
+| Cause                        | Active/starting prompt | Queued prompt | Awaiting permission                                                                |
+| ---------------------------- | ---------------------- | ------------- | ---------------------------------------------------------------------------------- |
+| normal end turn              | complete               | n/a           | permission artifact resolved/expired; complete only if the agent returned complete |
+| explicit user cancel         | cancelled              | cancelled     | expire permission, then cancelled                                                  |
+| agent/protocol error         | failed                 | abandoned     | expire permission, then failed                                                     |
+| bridge shutdown/restart      | cancelled              | abandoned     | expire permission, then cancelled                                                  |
+| session/repo/agent supersede | superseded             | abandoned     | expire permission, then superseded                                                 |
+| bootstrap failure            | abandoned              | abandoned     | n/a                                                                                |
 
 `superseded` renders neutral administrative copy, never a success checkmark. `abandoned` renders that work did not start or could not continue. Shutdown/supersede handling:
 

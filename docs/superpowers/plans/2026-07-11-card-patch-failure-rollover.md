@@ -33,11 +33,13 @@
 ### Task 1: Fixed 8192-byte rotation budget
 
 **Files:**
+
 - Modify: `src/presenter/card-text-budget.ts:3-7`
 - Modify: `src/presenter/card-text-budget.test.ts`
 - Modify: `src/acp/humming-client.test.ts:780-845`
 
 **Interfaces:**
+
 - Produces: `CARD_MARKDOWN_ROTATION_BYTE_LIMIT: number` with value `8192`.
 - Consumes: existing `utf8ByteLength()` and conversation rotation flow.
 
@@ -48,9 +50,7 @@ Update the budget test:
 ```ts
 it("uses a fixed 8192-byte conversation rotation budget", () => {
   expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(8192);
-  expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBeLessThan(
-    CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
-  );
+  expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT);
 });
 ```
 
@@ -104,10 +104,12 @@ git commit -m "fix(cards): rotate at fixed 8192 byte budget"
 ### Task 2: Extract card delivery ownership into a focused state machine
 
 **Files:**
+
 - Create: `src/acp/conversation-card-delivery.ts`
 - Create: `src/acp/conversation-card-delivery.test.ts`
 
 **Interfaces:**
+
 - Consumes:
   - `send(state: UnifiedCardState): Promise<string | null>`
   - `patch(cardId: string, state: UnifiedCardState): Promise<boolean>`
@@ -121,9 +123,7 @@ export interface CardDeliveryTransport {
 }
 
 export type CardDeliveryResult =
-  | { outcome: "visible"; cardId: string }
-  | { outcome: "pending" }
-  | { outcome: "skipped" };
+  { outcome: "visible"; cardId: string } | { outcome: "pending" } | { outcome: "skipped" };
 
 export class ConversationCardDelivery {
   constructor(transport: CardDeliveryTransport);
@@ -154,9 +154,7 @@ it("sends the first complete state and patches the active card afterward", async
   await delivery.deliver(state("responding", "second"));
 
   expect(transport.sends).toEqual([state("thinking", "first")]);
-  expect(transport.patches).toEqual([
-    { cardId: "card-1", state: state("responding", "second") },
-  ]);
+  expect(transport.patches).toEqual([{ cardId: "card-1", state: state("responding", "second") }]);
 });
 ```
 
@@ -253,10 +251,12 @@ git commit -m "feat(cards): recover rejected patches on a new card"
 ### Task 3: Make takeover single-flight and safe under concurrent renders
 
 **Files:**
+
 - Modify: `src/acp/conversation-card-delivery.ts`
 - Modify: `src/acp/conversation-card-delivery.test.ts`
 
 **Interfaces:**
+
 - Retains the public API from Task 2.
 - `detach()` increments the epoch, clears active ownership, and leaves no reusable card id.
 - `reset()` clears active ownership, retained desired state, and in-flight state at prompt teardown.
@@ -375,10 +375,12 @@ git commit -m "fix(cards): serialize replacement card takeover"
 ### Task 4: Integrate delivery into HummingClient without growing renderCard
 
 **Files:**
+
 - Modify: `src/acp/humming-client.ts:504-522, 741-751, 859-875, 926-953, 956-1037`
 - Modify: `src/acp/humming-client.test.ts:962-990`
 
 **Interfaces:**
+
 - Consumes: `ConversationCardDelivery` from Tasks 2–3.
 - Produces: unchanged public `HummingClient` API.
 - The presenter adapter is created once in the constructor:
@@ -518,11 +520,13 @@ git commit -m "fix(cards): hand off rejected updates to replacement cards"
 ### Task 5: Diagnostics, full verification, deployment
 
 **Files:**
+
 - Modify if needed: `src/acp/conversation-card-delivery.ts`
 - Modify if needed: `src/acp/conversation-card-delivery.test.ts`
 - Modify: `docs/superpowers/specs/2026-07-11-card-patch-failure-rollover-design.md` only if implementation names differ from the approved design.
 
 **Interfaces:**
+
 - Diagnostics callback receives structured metadata only; no timeline body text.
 
 - [ ] **Step 1: Add a failing diagnostic deduplication test**
