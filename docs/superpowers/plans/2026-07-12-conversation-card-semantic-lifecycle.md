@@ -211,12 +211,24 @@ Commit message: `feat(cards): add prompt semantic lifecycle reducer`.
 - It owns session-scoped delegates and one optional active prompt route:
 
 ```ts
+interface SessionCallbacks {
+  readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse>;
+  writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse>;
+  onSessionInfo(update: acp.SessionInfoUpdate): void;
+  onMode(update: acp.CurrentModeUpdate): void;
+  onConfig(update: acp.ConfigOptionUpdate): void;
+  onCommands(update: acp.AvailableCommandsUpdate): void;
+  onUsage(update: acp.UsageUpdate): void;
+}
 class PromptCallbackRouter implements acp.Client {
+  constructor(session: SessionCallbacks, diagnostics: LifecycleDiagnosticSink);
   activateBootstrap(mode: "new" | "load" | "resume", callbacks: BootstrapCallbacks): BootstrapRouteHandle;
   closeBootstrap(handle: BootstrapRouteHandle): void;
   activate(promptToken: PromptToken, callbacks: PromptScopedCallbacks): PromptRouteHandle;
   close(handle: PromptRouteHandle): void;
   isConnectionHealthy(): boolean;
+  readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse>;
+  writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse>;
   requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse>;
   sessionUpdate(params: acp.SessionNotification): Promise<void>;
 }
@@ -226,7 +238,7 @@ class PromptCallbackRouter implements acp.Client {
 
 - [ ] **Step 1: RED/GREEN — bootstrap replay isolation and session metadata**
 
-Add `loadSession` history replay tests first: user/agent/thought/plan/tool updates under `bootstrap/load` go only to `BootstrapCallbacks` and never to a PromptCardController; session-info/mode/config/commands/usage go to SessionCallbacks. Implement bootstrap activate/close and classification, rerunning after each update class. Add new/resume setup route tests.
+Add `loadSession` history replay tests first: user/agent/thought/plan/tool updates under `bootstrap/load` go only to `BootstrapCallbacks` and never to a PromptCardController; session-info/mode/config/commands/usage go to SessionCallbacks. Add exact readTextFile/writeTextFile forwarding tests and verify Router is the object supplied at initialize while advertised FS capabilities remain true. Implement bootstrap activate/close and classification, rerunning after each update class. Add new/resume setup route tests.
 
 - [ ] **Step 2: RED/GREEN — entry-time active route capture**
 
@@ -266,11 +278,11 @@ Commit message: `feat(acp): scope callbacks to protocol prompt turns`.
 
 ```ts
 interface DeliveryDiagnostic {
-  readonly ownerSequence: number;
+  readonly correlation: DiagnosticCorrelation;
   readonly operation: "adopt" | "send" | "patch" | "close" | "permission_reuse" | "permission_send" | "reconcile";
   readonly outcome: "pending" | "visible" | "rejected" | "failed" | "superseded" | "reused";
 }
-createOwner(context: CardDeliveryContext): OwnershipToken
+createOwner(context: CardDeliveryContext, correlation: DiagnosticCorrelation): OwnershipToken
 adopt(owner: OwnershipToken, cardId: string): void
 deliver(owner: OwnershipToken, view: ConversationCardView): Promise<DeliveryResult>
 close(owner: OwnershipToken, view: NonActionableView): OwnershipToken
@@ -278,11 +290,11 @@ handoffToPermission(owner: OwnershipToken, request: PermissionHandoffRequest): P
 reconcileSuperseded(cardId: string, view: OrphanedView): Promise<void>
 ```
 
-`createOwner` is called when one `PromptCardLifecycle` is allocated. `adopt` attaches an already-created queued card to that same owner; transition to starting/active preserves owner identity until close. Every operation reports a real `DeliveryDiagnostic` through an injected bounded diagnostics port.
+`createOwner` is called when one `PromptCardLifecycle` is allocated. `adopt` attaches an already-created queued card to that same owner; transition to starting/active preserves owner identity until close. One runtime-owned `LifecycleDiagnosticSink` (256-event ring buffer) is injected into controller, router, Delivery, and acknowledgement runner. Controller allocates non-sensitive runtime/prompt/segment/owner sequence correlation; Delivery reports real outcomes through the same sink. Tests join transition and delivery records by correlation and reject tokens, contents, IDs, paths, and secrets.
 
 - [ ] **Step 1: RED/GREEN — owner creation, adoption, and delivery diagnostics**
 
-Add createOwner/adopt tests, run RED, implement them, rerun. Then add one diagnostic outcome at a time (`pending`, `visible`, `rejected`, `failed`, `superseded`, `reused`) and minimally implement/report it before the next.
+Add createOwner/adopt tests, run RED, implement them, rerun. Then add one diagnostic outcome at a time (`pending`, `visible`, `rejected`, `failed`, `superseded`, `reused`) and minimally implement/report it before the next. Assert transition and delivery records share runtime/prompt correlation, the ring keeps only the newest 256 events, and serialization contains no sensitive fields.
 
 - [ ] **Step 2: RED/GREEN — atomic close ordering**
 
@@ -317,6 +329,13 @@ Run delivery tests, build, Prettier. Commit: `feat(cards): add atomic lifecycle 
 - Produces intent API:
 
 ```ts
+interface PendingPermission {
+  readonly promptToken: PromptToken;
+  readonly permissionToken: PermissionToken;
+  readonly requestId: string;
+  readonly allowedOptionIds: ReadonlySet<string>;
+  readonly response: Promise<acp.RequestPermissionResponse>;
+}
 interface PromptCardController {
   acknowledge(input: { messageId: string; reactionId?: string }): void;
   markQueued(): void;
@@ -327,7 +346,7 @@ interface PromptCardController {
   requestPermission(input: {
     requestId: string;
     params: acp.RequestPermissionRequest;
-  }): { promptToken: PromptToken; permissionToken: PermissionToken };
+  }): PendingPermission;
   consumePermission(input: {
     promptToken: PromptToken;
     permissionToken: PermissionToken;
@@ -346,6 +365,8 @@ interface PromptCardController {
 }
 ```
 
+The controller is the sole owner of each pending permission resolver. `requestPermission` creates one deferred response and immutable allowed-option set. `consumePermission` validates prompt/permission/request/option and resolves it exactly once with selected outcome. Duplicate/stale/invalid actions never resolve it. Handoff failure, timeout, explicit cancel, finish, shutdown, and supersede resolve any still-pending response exactly once as cancelled before terminal completion. Tests assert one settlement under every race.
+
 - [ ] **Step 1: RED/GREEN — active/archive/terminal screenshot regressions**
 
 Add delayed-running-patch+archive RED, implement minimal effect orchestration, rerun. Then separately add terminal+late-update and exactly-one-action-token cases, implementing each before the next.
@@ -356,7 +377,7 @@ Add multiple-chunks-one-delivery RED, implement timer wiring, rerun; then add te
 
 - [ ] **Step 3: RED/GREEN — permission, actions, and ToolLedger integration**
 
-Add separately and implement after each RED: content boundary, empty reuse, failed handoff, cross-boundary tool completion, finish awaiting permission, consumePermission request/option membership, duplicate/stale permission, consumeCancel duplicate/stale.
+Add separately and implement after each RED: content boundary, empty reuse, failed handoff, cross-boundary tool completion, selected permission resolves response once, invalid/stale/duplicate action leaves response pending, and handoff failure/timeout/finish/cancel/shutdown/supersede each resolves cancelled exactly once. Then add consumeCancel duplicate/stale.
 
 - [ ] **Step 4: RED/GREEN — acknowledgement lifecycle callbacks**
 
@@ -422,13 +443,13 @@ addMessageReaction(messageId, emojiType): Promise<string>
 removeMessageReaction(messageId, reactionId): Promise<void>
 ```
 
-- [ ] **Step 1: RED — SDK request shape**
+- [ ] **Step 1: RED/GREEN — reaction create request**
 
-Assert create calls `im.v1.messageReaction.create` with `{ reaction_type: { emoji_type } }` and returns `reaction_id`; delete uses message and reaction IDs.
+Add create request-shape/returned-ID test, run RED, implement only `addMessageReaction`, rerun.
 
-- [ ] **Step 2: Implement methods**
+- [ ] **Step 2: RED/GREEN — reaction delete request**
 
-Methods throw transport errors; bridge/controller decides best-effort behavior.
+Add delete path/message/reaction IDs test, run RED, implement only `removeMessageReaction`, rerun. Methods throw transport errors; controller decides best-effort behavior.
 
 - [ ] **Step 3: Verify and commit**
 
@@ -446,17 +467,17 @@ Run HTTP tests, build, Prettier. Commit: `feat(lark): support prompt acknowledge
 - Consumes: controller and router.
 - Produces: ACP client delegate methods without mutable semantic status/timeline/card ID state in v2 mode.
 
-- [ ] **Step 1: RED — delegate behavior**
+- [ ] **Step 1: RED/GREEN — routed update delegation**
 
-Assert v2 session updates enter controller with router-provided token; permission request uses PermissionToken; finalization is absorbing; late callback during drain does not reach controller.
+Add one active routed update test, run RED, implement delegation, rerun. Then add terminal absorption and late-closed-route tests individually.
 
-- [ ] **Step 2: RED — no parallel v2 state**
+- [ ] **Step 2: RED/GREEN — permission Promise bridge**
 
-Add source-level/behavior test proving v2 path does not own free `status`, `cancellable`, `idleStatusCardPending`, `permissionBoundaryThisPrompt`, or `flushing` state.
+Add a Router requestPermission test that receives Controller's `PendingPermission.response`, run RED, implement exact forwarding, rerun. Then add selected, invalid, timeout, finish, and cancellation settlement cases individually.
 
-- [ ] **Step 3: Implement gated adapter**
+- [ ] **Step 3: RED/GREEN — no parallel v2 state**
 
-Legacy path remains unchanged when gate is false. V2 path delegates semantic behavior; file read/write and session metadata remain session-scoped.
+Add the source/behavior guard, run RED, move one free v2 field at a time behind controller ownership and rerun after each. Gate-off legacy fields stay inside the isolated legacy adapter.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -477,19 +498,38 @@ Run HummingClient and all new ACP tests, build, Prettier. Commit: `refactor(card
 - Consumes: PromptCardController, PromptCallbackRouter, explicit terminal outcome map.
 - Produces: one lifecycle per `PendingMessage`, including queued messages.
 
-- [ ] **Step 1: RED — first, second, and third queued prompts**
+```ts
+interface PreparedPrompt {
+  readonly promptToken: PromptToken;
+  readonly controller: PromptCardController;
+  readonly messageId: string;
+  attachAcknowledgement(reactionId: string | null): void;
+  markEnqueued(): void;
+  failBeforeEnqueue(reason: "hydrate_failed" | "bootstrap_failed" | "enqueue_failed"): void;
+}
+preparePrompt(context: { messageId: string; chatId: string; threadId: string | null; profile: SessionCardMeta | null }): PreparedPrompt;
+enqueuePrepared(prepared: PreparedPrompt, prompt: acp.ContentBlock[]): Promise<void>;
+```
+
+`PreparedPrompt` owns the controller and acknowledgement state (`unattached | attached | removal_pending | removal_attempted`). Bridge calls `preparePrompt` before adding reaction, attaches the resulting reaction ID or null exactly once, then hydrates/enqueues. Hydrate/bootstrap/enqueue failure calls `failBeforeEnqueue`, which terminalizes the same controller and triggers terminal-without-visible cleanup. `markEnqueued` is idempotent; attaching twice or enqueueing a failed object throws in tests and logs/ignores in production.
+
+- [ ] **Step 1: RED/GREEN — prepare/attach/enqueue failure chain**
+
+Add and implement separately: identity exists before reaction add; attach once; enqueue same object; hydrate failure cleanup; bootstrap failure cleanup; enqueue failure cleanup; duplicate calls are inert/diagnostic.
+
+- [ ] **Step 2: RED/GREEN — first, second, and third queued prompts**
 
 Assert first follow-up may transition queued->interrupting->starting; later queued prompts transition queued->starting directly; each retains one card ownership.
 
-- [ ] **Step 2: RED — prompt drain barrier**
+- [ ] **Step 3: RED/GREEN — prompt response boundary and quarantine**
 
 After prompt response, close the route. Send a protocol-violating late update and permission request; assert the update is rejected, permission returns cancelled, the connection is quarantined/restarted, and neither is assigned to the next prompt.
 
-- [ ] **Step 3: RED — terminal reason table**
+- [ ] **Step 4: RED/GREEN — terminal reason table**
 
 Cover normal complete, explicit cancel, agent error, shutdown, supersede, bootstrap failure, permission-pending termination. Assert supersede is not success.
 
-- [ ] **Step 4: RED/GREEN — isolate every legacy writer**
+- [ ] **Step 5: RED/GREEN — isolate every legacy writer**
 
 Add a full-`src/` inventory test for direct `sendUnifiedCard`/`updateUnifiedCard` references. Move production legacy calls from bridge/runtime/HummingClient behind `legacy-conversation-card-adapter.ts`, preserving behavior after each move. The temporary allowlist becomes exactly:
 
@@ -501,11 +541,11 @@ src/acp/conversation-card-delivery.ts
 
 Tests may reference methods but production files outside the allowlist may not. Include new v2 `sendConversationCard`/`updateConversationCard` names in the scanner.
 
-- [ ] **Step 5: Implement remaining runtime integration under injected gate**
+- [ ] **Step 6: Implement remaining runtime integration under injected gate**
 
 Create prompt token/lifecycle before Bridge adds reaction via a `preparePrompt(messageContext): PreparedPrompt` factory shared by Bridge and ChatRuntime. `PreparedPrompt` owns the controller and acknowledgement callbacks; Bridge adds reaction then calls `prepared.attachAcknowledgement(reactionId?)` and enqueues that same prepared object. Default gate remains disabled.
 
-- [ ] **Step 6: Verify and commit**
+- [ ] **Step 7: Verify and commit**
 
 Run runtime + ACP tests, build, Prettier. Commit: `refactor(runtime): own cards per prompt lifecycle`.
 
@@ -531,25 +571,25 @@ consumePermissionAction(input: { promptToken: string; permissionToken: string; r
 - Bridge passes decoded tokens/request/option into these methods. Controller verifies current token, request ID, allowed option membership, and one-shot consumption before ACP resolve/cancel.
 - Produces complete v2 single-writer route when injected gate is true; production default remains false until Task 12 persistence/enablement.
 
-- [ ] **Step 1: RED — no standalone receipt card and correct reaction lifetime**
+- [ ] **Step 1: RED/GREEN — acknowledgement happy path and lifetime**
 
-For a normal short prompt, assert bridge adds a fixed receipt-only emoji reaction, never directly calls v2 conversation-card send/update, and the runtime creates one authoritative card. Remove the reaction only after the first authoritative send returns a visible card ID, or after terminal when no card was created. Cover first send throwing and returning null: no durable processing card exists and the reaction is removed at terminal. Reaction add/remove failure must not abort the prompt.
+Add one short-prompt test, run RED, wire prepare->reaction->attach->enqueue and first-visible removal, rerun. Then add send throw, send null, removal failure, and pre-enqueue failure one at a time, minimally implementing each before the next.
 
-- [ ] **Step 2: RED — token-safe Cancel**
+- [ ] **Step 2: RED/GREEN — strict v2 Cancel parser and consumption**
 
-Current tokens cancel exactly once. Previous prompt, previous segment, duplicate, legacy tokenless, and unknown-version buttons do not cancel current work and are best-effort neutralized.
+Add parser-shape RED, implement only strict decode/version-before-lookup, rerun. Add current/stale/previous/duplicate/tokenless/unknown-version cases one at a time and implement runtime/controller consumption incrementally.
 
-- [ ] **Step 3: RED — token-safe permission actions**
+- [ ] **Step 3: RED/GREEN — strict permission parser and Promise settlement**
 
-Current prompt+permission token resolves exactly once. Previous prompt, previous permission request, duplicate, legacy tokenless, and unknown-version permission actions never resolve the current ACP permission and are best-effort expired.
+Add strict payload decode RED, implement parser, rerun. Then add current selection, invalid option, previous prompt/request, duplicate, tokenless, unknown version, timeout/finish cases individually; verify the original ACP response settles exactly once.
 
-- [ ] **Step 4: RED — no direct conversation-card bypass**
+- [ ] **Step 4: RED/GREEN — full source writer allowlist**
 
-A source-level assertion scans all `src/` production files and requires the exact temporary allowlist established in Task 10: presenter transport, legacy adapter, and lifecycle Delivery only. Bridge, ChatRuntime, and HummingClient are never file-level exceptions.
+Add the full-src scanner RED, isolate each violating production call one file at a time, and rerun after every move until only the Task 10 allowlist remains.
 
-- [ ] **Step 5: Implement cutover code with gate defaulting off**
+- [ ] **Step 5: Complete cutover code with gate defaulting off**
 
-Switch the complete v2 route to reaction acknowledgement and lifecycle effects, remove v2 direct patches, but leave `features.conversationCardLifecycleV2` default false. Do not enable the persisted gate in this code commit.
+Connect the already-green pieces for injected-gate v2 integration, run full tests, and assert production default false still uses legacy. Do not persist/enable true in this commit.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -576,19 +616,23 @@ Run all bridge/runtime/ACP/presenter tests, full `npm test`, build, fmt check. C
 - Persists `features.conversationCardLifecycleV2`, default false.
 - Live status reports `cardActionSchemaVersion: 2` and effective gate state.
 
-- [ ] **Step 1: RED — default-off and compatibility schema**
+- [ ] **Step 1: RED/GREEN — default-off parsing and live schema**
 
-Assert missing setting means false; status reports schema 2; persisted true is effective only on a schema-2 binary; gate-off keeps legacy behavior.
+Add missing-setting=false RED, implement parser, rerun. Add status schema/effective-state RED, implement control response, rerun. Add persisted-true/schema mismatch case and implement refusal.
 
-- [ ] **Step 2: RED — deployment and rollback command ordering**
+- [ ] **Step 2: RED/GREEN — enable/disable ordering**
 
-With fake process control, prove enable refuses unless the running bridge reports schema >= 2. Prove rollback validates the target contains commit/guard `4700e9d` behavior, then records calls in this exact order: `writeGate(false)`, `readGate() === false`, `stopCurrent()`, `startCheckout(target, launchDescriptor)`. Cover invalid target, persist/reread failure before stop, and target-start failure after stop.
+Add enable-without-schema RED, implement refusal; add disable call-order RED and implement exact write->reread->restart sequence. Rerun after each.
 
-- [ ] **Step 3: Implement configuration and CLI**
+- [ ] **Step 3: RED/GREEN — rollback target validation and process order**
 
-Add the minimal settings merge preserving unrelated keys. Gate remains false in templates and existing installations until an explicit command.
+Add invalid target RED, implement guard/build validation. Add exact false->reread->stop->start order RED, implement process control. Then add persist failure, reread failure, and target-start failure one at a time.
 
-- [ ] **Step 4: Verify and commit**
+- [ ] **Step 4: Complete settings/CLI plumbing**
+
+Merge only the feature key while preserving unrelated settings. Templates and existing installations default false.
+
+- [ ] **Step 5: Verify and commit**
 
 Run CLI/control tests, full suite, build, and format. Commit: `feat(cards): add rollback-safe lifecycle gate`.
 
@@ -615,9 +659,9 @@ Expected: all pass with no skipped tests or attributable warnings.
 
 Review one semantic writer, callback protocol attribution, action authority, terminal absorption, immutable snapshots, permission ownership, ToolLedger, receipt removal, schema gate, and rollback ordering. Fix/re-review before deployment.
 
-- [ ] **Step 3: Deploy new binary with gate OFF**
+- [ ] **Step 3: Force-disable before first new-binary startup**
 
-Build and restart. Confirm linked checkout, bridge health, `cardActionSchemaVersion: 2`, and effective gate false. Exercise one legacy short prompt to prove gate-off behavior remains functional.
+Before starting the schema-2 binary, run the new CLI's offline disable operation against settings: persist `features.conversationCardLifecycleV2=false` and reread it successfully. Only then build/restart. Confirm linked checkout, health, schema 2, and effective gate false; exercise one legacy short prompt.
 
 - [ ] **Step 4: Simulate rollback ordering while gate is off**
 

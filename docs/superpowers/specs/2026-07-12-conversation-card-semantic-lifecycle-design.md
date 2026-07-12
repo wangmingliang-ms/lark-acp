@@ -652,6 +652,24 @@ Rules:
 
 Each implementation commit remains independently testable, but only the compatibility guard and final gated cutover are independently deployable behavior changes.
 
+### Diagnostics correlation contract
+
+A single runtime-owned `LifecycleDiagnosticSink` is injected into reducer controller, delivery, router, and acknowledgement runner:
+
+```ts
+interface DiagnosticCorrelation {
+  readonly runtimeSequence: number;
+  readonly promptSequence: number;
+  readonly segmentSequence: number | null;
+  readonly ownerSequence: number | null;
+}
+interface LifecycleDiagnosticSink {
+  record(event: LifecycleDiagnosticEvent): void;
+}
+```
+
+It keeps at most 256 structured events per runtime in a ring buffer and streams the same bounded fields to the logger. Transition and delivery events share `runtimeSequence + promptSequence`; segment/owner sequence are local monotonically allocated integers, never tokens or IDs. The controller owns allocation and passes correlation into state/effects/Delivery. Tests join transition and delivery records by these fields and assert no token, card content, chat/thread/message/card ID, path, or secret appears.
+
 ## Observability
 
 Add structured, non-sensitive diagnostics for every semantic transition and rejected transition:
