@@ -64,6 +64,7 @@ terminal:
   - failed
   - interrupted
   - cancelled
+  - merged
 ```
 
 Implementation-only substates may exist, but they must not change the rules in this document.
@@ -129,6 +130,7 @@ The final tail Card retains Title and Metadata for every terminal outcome:
 | failed      |                   retained as failure/error | retained |     no |
 | interrupted | retained as interrupted/neutral error state | retained |     no |
 | cancelled   |         retained as cancelled/neutral state | retained |     no |
+| merged      |  retained as merged-into-next-message state | retained |     no |
 
 A terminal tail is the final status of the Response. It must not be stripped into a plain content Card.
 
@@ -308,13 +310,76 @@ A interrupted / B active:
   Cancel owner = B
 ```
 
-### 7.5 Additional Requests during handoff
+### 7.5 Additional Requests during handoff: merge and transfer the carrier Response
 
-If C arrives while B is interrupting A, C may have a received/queued tail Card, but it has no Cancel and no execution ownership. The scheduling policy for B and C is separate from Card projection. Regardless of scheduling policy:
+Suppose A still owns execution, B is already `interrupting` A, and C arrives before A has been sealed.
 
-- only the current Execution Owner's active tail may show Cancel;
-- waiting Responses never show Cancel;
-- a Response cannot receive Agent callbacks before it owns execution.
+B and C must be sent to the Agent together after A is interrupted because C may supplement or correct B. However, every user message still receives immediate visual feedback beneath that message. Therefore the pending input has two related but distinct concepts:
+
+```text
+PendingRequestBatch
+  messages: ordered [B, C, ...]
+  carrierResponseId: the Response associated with the newest message
+```
+
+When B first arrives:
+
+```text
+batch.messages = [B]
+batch.carrierResponseId = Response B
+Response B = interrupting
+B tail = "message received; interrupting the previous Response"
+```
+
+When C arrives before A's interruption completes:
+
+```text
+1. Append C to the same ordered batch: [B, C].
+2. Seal Response B as terminal(merged).
+3. Update B's final tail:
+   - keep Title and Metadata;
+   - show "merged into the next message";
+   - no Cancel.
+4. Create Turn C and Response C.
+5. Move batch carrier ownership from Response B to Response C.
+6. Render C's tail beneath message C:
+   - "2 messages received; interrupting the previous Response";
+   - Title and Metadata retained;
+   - no Cancel.
+```
+
+A remains the Execution Owner throughout this collection window. Neither B nor C has Cancel.
+
+If D arrives before A's interruption completes, repeat the same carrier transfer:
+
+```text
+batch = [B, C, D]
+Response C -> terminal(merged)
+Response D -> interrupting and becomes carrier
+```
+
+When A is finally sealed:
+
+```text
+1. A -> terminal(interrupted); revoke A's Cancel.
+2. executionOwner = null.
+3. Atomically seal PendingRequestBatch against further appends.
+4. Move the current carrier Response (C in [B,C], D in [B,C,D]) to preparing.
+5. Forward every batch message to the Agent once, preserving order and message boundaries.
+6. Acquire execution ownership for the carrier Response.
+7. Move the carrier Response to active and grant Cancel to its tail.
+```
+
+The batch collection window closes at the handoff boundary where A has been sealed and the batch is committed for Agent forwarding. A message arriving after that boundary creates a new Turn/Response and follows the normal busy-follow-up rule against the new Execution Owner; it is not appended to the sealed batch.
+
+Required consequences:
+
+- B and C are not independently executed.
+- Their message ordering and boundaries are retained when forwarded.
+- Every user message has its own Turn, Response, and visible feedback.
+- Only the latest Response is the carrier of the still-pending batch.
+- Every previous carrier ends as `merged`, not failed, cancelled, or interrupted.
+- A `merged` Response never becomes Execution Owner and never shows Cancel.
 
 ## 8. Permission boundary
 
@@ -431,27 +496,31 @@ I10. A new Request's interrupting Card is reused for preparing/active; no duplic
 I11. Terminal final tails retain Title and Metadata for success, failure, interruption, and cancellation.
 I12. Every Permission Card is immediately followed by a continuation Response tail; Permission Cards do not participate in Response-tail position.
 I13. Failed external patches do not roll back domain state; their stale action tokens remain invalid.
+I14. During interrupt handoff, all messages collected before the handoff boundary form one ordered PendingRequestBatch and are forwarded to the Agent once.
+I15. The newest message's Response is the batch carrier; every previous carrier terminates as merged.
 ```
 
 ## 13. Conformance matrix
 
-| Situation                          | Previous Response tail                                                       | New Response tail                            | Cancel owner                        |
-| ---------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------- | ----------------------------------- |
-| Idle Request accepted              | none                                                                         | received/preparing                           | none                                |
-| Response active                    | active Title + Metadata                                                      | none                                         | active Response                     |
-| New Request arrives                | A active Title + Metadata                                                    | B interrupting Title + Metadata              | A only                              |
-| A interruption confirmed           | A interrupted Title + Metadata                                               | B preparing Title + Metadata                 | none                                |
-| B starts                           | A interrupted Title + Metadata                                               | B active Title + Metadata                    | B only                              |
-| Same Response rotates              | old tail becomes plain intermediate                                          | successor tail Title + Metadata              | successor only if owner in progress |
-| Permission requested               | old tail becomes plain intermediate; Permission Card shows choices           | continuation tail waiting + Metadata         | continuation tail                   |
-| Consecutive Permission requested   | prior continuation becomes intermediate; next Permission Card shows choices  | next continuation tail waiting + Metadata    | next continuation tail              |
-| Response ends during Permission    | Permission Card expires; prior Cards unchanged                               | continuation terminal Title + Metadata       | none                                |
-| Feishu rejects old-tail seal patch | domain treats old tail as intermediate; stale visual button may remain inert | following tail includes patch-failure notice | current valid owner tail            |
-| Response completes                 | final tail complete Title + Metadata                                         | none                                         | none                                |
-| Response fails                     | final tail failed Title + Metadata                                           | none                                         | none                                |
-| Response is cancelled              | final tail cancelled Title + Metadata                                        | none                                         | none                                |
-| Bridge restarts                    | final tail interrupted Title + Metadata                                      | optional non-actionable notice only          | none                                |
-| Late callback arrives              | no change                                                                    | no new Card                                  | none                                |
+| Situation                               | Previous Response tail                                                       | New Response tail                                 | Cancel owner                        |
+| --------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------- | ----------------------------------- |
+| Idle Request accepted                   | none                                                                         | received/preparing                                | none                                |
+| Response active                         | active Title + Metadata                                                      | none                                              | active Response                     |
+| New Request arrives                     | A active Title + Metadata                                                    | B interrupting Title + Metadata                   | A only                              |
+| C arrives before A is sealed            | B becomes merged terminal; batch becomes [B,C]                               | C interrupting as newest carrier                  | A only                              |
+| More messages arrive before A is sealed | each former carrier becomes merged terminal                                  | newest Response carries the growing ordered batch | A only                              |
+| A interruption confirmed                | A interrupted Title + Metadata                                               | B preparing Title + Metadata                      | none                                |
+| B starts                                | A interrupted Title + Metadata                                               | B active Title + Metadata                         | B only                              |
+| Same Response rotates                   | old tail becomes plain intermediate                                          | successor tail Title + Metadata                   | successor only if owner in progress |
+| Permission requested                    | old tail becomes plain intermediate; Permission Card shows choices           | continuation tail waiting + Metadata              | continuation tail                   |
+| Consecutive Permission requested        | prior continuation becomes intermediate; next Permission Card shows choices  | next continuation tail waiting + Metadata         | next continuation tail              |
+| Response ends during Permission         | Permission Card expires; prior Cards unchanged                               | continuation terminal Title + Metadata            | none                                |
+| Feishu rejects old-tail seal patch      | domain treats old tail as intermediate; stale visual button may remain inert | following tail includes patch-failure notice      | current valid owner tail            |
+| Response completes                      | final tail complete Title + Metadata                                         | none                                              | none                                |
+| Response fails                          | final tail failed Title + Metadata                                           | none                                              | none                                |
+| Response is cancelled                   | final tail cancelled Title + Metadata                                        | none                                              | none                                |
+| Bridge restarts                         | final tail interrupted Title + Metadata                                      | optional non-actionable notice only               | none                                |
+| Late callback arrives                   | no change                                                                    | no new Card                                       | none                                |
 
 ## 14. Change-control rule
 
