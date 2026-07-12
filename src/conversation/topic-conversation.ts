@@ -417,6 +417,17 @@ export class TopicConversation {
     return "accepted";
   }
 
+  commitPendingBatchAfterOwnerEnded(): PendingRequestBatchSnapshot {
+    if (this.executionOwner !== null) throw new Error("execution owner has not ended");
+    const batch = this.pendingBatchValue;
+    if (batch === null || batch.state !== "collecting") {
+      throw new Error("collecting batch is not pending");
+    }
+    batch.state = "sealed";
+    this.assertInvariants();
+    return this.batchSnapshot(batch);
+  }
+
   sealOwnerForPendingBatch(outcome: "interrupted" | "cancelled"): PendingRequestBatchSnapshot {
     const owner = this.executionOwner;
     const batch = this.pendingBatchValue;
@@ -424,9 +435,7 @@ export class TopicConversation {
       throw new Error("interrupt handoff is not pending");
     }
     this.seal(owner, outcome);
-    batch.state = "sealed";
-    this.assertInvariants();
-    return this.batchSnapshot(batch);
+    return this.commitPendingBatchAfterOwnerEnded();
   }
 
   clearSealedBatch(): void {

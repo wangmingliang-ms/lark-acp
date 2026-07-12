@@ -211,6 +211,9 @@ describe("TopicConversation canonical lifecycle", () => {
     });
     expect(response(topic, a).state).toEqual({ kind: "terminal", outcome: "cancelled" });
     expect(response(topic, c).state).toEqual({ kind: "in_progress", phase: "interrupting" });
+
+    const batch = topic.commitPendingBatchAfterOwnerEnded();
+    expect(batch).toMatchObject({ carrierResponseId: c, state: "sealed" });
   });
 
   it("topic /cancel cancels every unfinished Response but preserves merged history", () => {
