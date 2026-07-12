@@ -1376,6 +1376,17 @@ export class LarkBridge {
     const messageId = message.message_id;
     const chatId = message.chat_id;
     if (!userId || !messageId || !chatId) return;
+    if (!this.started) {
+      this.logger.warn({ chatId, messageId }, "message arrived while bridge was stopping");
+      this.presenter
+        .replyNoticeCard(messageId, {
+          title: "🔄 Humming 正在重启",
+          body: "这条消息没有进入任务队列，请在服务恢复后重新发送。",
+          template: "orange",
+        })
+        .catch((err) => this.logger.warn({ err, chatId }, "restart-window notice failed"));
+      return;
+    }
 
     // Feishu "topic" (话题) id. Absent for ordinary messages → null, which
     // routes to the chat's "main" conversation (identical to pre-topic

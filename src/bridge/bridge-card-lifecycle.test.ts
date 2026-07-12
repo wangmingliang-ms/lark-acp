@@ -37,6 +37,41 @@ function dispatchCardAction(bridge: LarkBridge, value: object): void {
   testable.handleCardAction({ action: { value }, messageId: "message" });
 }
 
+function dispatchMessage(bridge: LarkBridge): void {
+  const testable = bridge as unknown as {
+    handleMessage(event: object): void;
+  };
+  testable.handleMessage({
+    sender: { sender_type: "user", sender_id: { open_id: "user" } },
+    message: {
+      message_id: "message",
+      chat_id: "chat",
+      message_type: "text",
+      chat_type: "p2p",
+      content: JSON.stringify({ text: "hello" }),
+    },
+  });
+}
+
+describe("LarkBridge restart-window intake", () => {
+  it("does not route a message received after shutdown begins", async () => {
+    const replyNoticeCard = vi.fn(async () => {});
+    const bridge = makeBridge(false, { replyNoticeCard } as unknown as LarkPresenter);
+    const routeMessage = vi.fn(async () => {});
+    (bridge as unknown as { routeMessage: typeof routeMessage }).routeMessage = routeMessage;
+
+    dispatchMessage(bridge);
+
+    expect(routeMessage).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(replyNoticeCard).toHaveBeenCalledWith(
+        "message",
+        expect.objectContaining({ title: expect.stringContaining("正在重启") }),
+      ),
+    );
+  });
+});
+
 describe("LarkBridge Cancel card compatibility", () => {
   it("rejects a versioned Cancel action before runtime lookup", () => {
     const bridge = makeBridge();
