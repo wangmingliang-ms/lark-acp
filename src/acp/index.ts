@@ -16,3 +16,19 @@ export type {
   ProbeAgentSessionCapabilitiesResult,
   SpawnAgentOptions,
 } from "./agent-process.js";
+export {
+  projectLifecycleDiagnostic,
+  RingBufferLifecycleDiagnosticSink,
+} from "./lifecycle-diagnostics.js";
+export type {
+  AcknowledgementLifecycleDiagnostic,
+  DeliveryLifecycleDiagnostic,
+  DiagnosticCorrelation,
+  LifecycleDiagnosticEvent,
+  LifecycleDiagnosticLoggerProjection,
+  LifecycleDiagnosticSink,
+  LifecycleTransitionName,
+  RouterLifecycleDiagnostic,
+  SemanticPhase,
+  TransitionLifecycleDiagnostic,
+} from "./lifecycle-diagnostics.js";
