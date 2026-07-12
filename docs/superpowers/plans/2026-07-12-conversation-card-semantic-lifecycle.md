@@ -394,9 +394,9 @@ Add separately and implement after each RED: content boundary, empty reuse, fail
 
 Add first-visible feedback RED: `attached -> removal_pending` and exactly one remove effect; implement and rerun. Add finish-before-visible RED: finish itself emits the same one removal while semantic phase becomes terminal; implement. Add deletion-in-flight-then-finish, late-visible-after-terminal, removal-success-after-terminal, and removal-failure-after-terminal one at a time. Assert semantic terminal never changes, feedback never renders, and every ordering invokes removal at most once.
 
-- [ ] **Step 5: Complete effect runner**
+- [ ] **Step 5: RED/GREEN — effect tracking and bounded await**
 
-Semantic calls return immediately after reducer commit; effect promises are tracked only for bounded `awaitEffects` and never block reducer events.
+Add an in-flight deferred effect test: semantic methods return before it settles while `awaitEffects(timeoutMs)` waits; run RED, implement tracking, rerun. Add timeout RED and implement bounded return/report without cancelling semantic state. Add rejected-effect RED and implement all-settled cleanup/diagnostic so later `awaitEffects` does not remain poisoned. Then verify a finish event still commits while an earlier transport effect hangs.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -488,7 +488,7 @@ Add a Router requestPermission test that receives Controller's `PendingPermissio
 
 - [ ] **Step 3: RED/GREEN — no parallel v2 state**
 
-Add the source/behavior guard, run RED, move one free v2 field at a time behind controller ownership and rerun after each. Gate-off legacy fields stay inside the isolated legacy adapter.
+Add the source/behavior guard, run RED, move one v2 semantic field at a time behind controller ownership and rerun after each. Gate-off legacy fields may remain in the existing isolated HummingClient legacy branch during Task 9; Task 10 creates `legacy-conversation-card-adapter.ts` and moves them without changing behavior. Task 9 must not reference or import a file that does not yet exist.
 
 - [ ] **Step 4: Verify and commit**
 
