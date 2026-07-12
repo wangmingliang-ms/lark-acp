@@ -19,13 +19,14 @@ The design must make these states unrepresentable, preserve chronological card r
 ## Goals
 
 1. Make the semantic lifecycle the single source of truth for card phase, actionability, header, footer, summary, and empty-state rendering.
-2. Make terminal and archived states monotonic and irreversible.
-3. Serialize semantic events so timers, ACP updates, rotation, permission boundaries, cancellation, and finalization cannot race each other.
-4. Bind every actionable card to the exact prompt and segment that owns the action.
-5. Keep transport ownership and semantic state as separate, focused responsibilities.
-6. Route bridge-created progress cards and queued-message cards through explicit lifecycle ownership rather than ad hoc presenter patches.
-7. Preserve the current 8192-byte rotation policy and complete-state replay after patch rejection.
-8. Add deterministic deferred-transport tests for all previously untested races.
+2. Never create a durable standalone “message received / processing” card that depends on a later patch to become truthful. Use a transient acknowledgement reaction before the first authoritative lifecycle-owned card.
+3. Make terminal and archived states monotonic and irreversible.
+4. Serialize semantic events so timers, ACP updates, rotation, permission boundaries, cancellation, and finalization cannot race each other.
+5. Bind every actionable card to the exact prompt and segment that owns the action.
+6. Keep transport ownership and semantic state as separate, focused responsibilities.
+7. Route bridge-created starting cards and queued-message cards through explicit lifecycle ownership rather than ad hoc presenter patches.
+8. Preserve the current 8192-byte rotation policy and complete-state replay after patch rejection.
+9. Add deterministic deferred-transport tests for all previously untested races.
 
 ## Non-goals
 
@@ -47,10 +48,13 @@ All semantic transitions for one topic runtime are reduced through one ordered e
 
 ### Monotonic lifecycle
 
+Before lifecycle bootstrap completes, Humming may add a transient acknowledgement reaction to the user's message. This is not a card, has no action, and is removed best-effort after the first authoritative card is created or the prompt terminates.
+
 Within one prompt generation, the current segment moves forward while previously archived segments remain immutable historical artifacts:
 
 ```text
-receipt(segment 1)
+transient acknowledgement reaction
+  -> preparing(segment 1 authoritative card)
   -> active(segment 1)
   -> archive(segment 1) + active(segment 2)
   -> archive(segment 2) + active(segment 3)
@@ -84,9 +88,11 @@ Tokens are never displayed. Logs may include short, non-reversible sequence numb
 ```ts
 type ConversationCardModel =
   | {
-      readonly phase: "receipt";
-      readonly step: "received" | "queued" | "interrupting" | "preparing";
+      readonly phase: "starting";
+      readonly step: "preparing";
       readonly promptToken: PromptToken;
+      readonly segmentToken: SegmentToken;
+      readonly profile: SessionCardMeta | null;
     }
   | {
       readonly phase: "active";
@@ -123,13 +129,13 @@ The lifecycle aggregate stores the current prompt state separately from immutabl
 
 ### State invariants
 
-#### Receipt
+#### Starting
 
-- Empty timeline.
-- No Cancel action.
-- No profile footer.
-- Has a status header.
-- May transition only forward within receipt steps or into active/terminal.
+- This is the first authoritative conversation card for a prompt.
+- Empty timeline, `preparing` header, and profile snapshot.
+- No Cancel action until the prompt is actually forwarded to the Agent.
+- It is created by the lifecycle controller, not by a bridge-side standalone receipt path.
+- If its first send returns no card ID or fails, the lifecycle retries only on a later semantic transition; there is no stale “processing” card because no prior durable receipt card exists.
 
 #### Active
 
@@ -179,9 +185,18 @@ All semantic changes enter one per-runtime queue:
 
 ```ts
 type ConversationCardEvent =
-  | { type: "prompt_received"; promptToken: PromptToken; progressCardId?: string }
-  | { type: "preparing"; promptToken: PromptToken }
-  | { type: "prompt_started"; promptToken: PromptToken; profile: SessionCardMeta | null }
+  | {
+      type: "prompt_acknowledged";
+      promptToken: PromptToken;
+      messageId: string;
+      acknowledgementReactionId?: string;
+    }
+  | {
+      type: "preparing";
+      promptToken: PromptToken;
+      segmentToken: SegmentToken;
+      profile: SessionCardMeta | null;
+    }
   | { type: "agent_text"; promptToken: PromptToken; text: string }
   | { type: "agent_thought"; promptToken: PromptToken; text: string }
   | { type: "tool_started"; promptToken: PromptToken; tool: ToolEvent }
@@ -349,15 +364,26 @@ A stale successful send returning a card ID is an external side effect. The life
 
 A patch-rejected card may remain visibly stale because Feishu no longer accepts updates. Its action token is nevertheless revoked, so it is visually stale but operationally inert. The replacement becomes authoritative.
 
-## Bridge-created progress and queued cards
+### Initial acknowledgement and authoritative first card
 
-The bridge may create an initial receipt card before runtime bootstrap, but it must immediately transfer the returned ID and prompt token to the lifecycle controller. After transfer, the bridge does not patch that card directly.
+The initial acknowledgement must not be a durable card with the text “message received / processing”. Such a card can become permanently misleading when Feishu returns no message ID or rejects its first patch.
 
-Queued and interrupting cards use a lightweight `PendingPromptCardLifecycle` with the same token and monotonic principles:
+The accepted flow is:
+
+1. allocate the prompt token before any user-visible side effect;
+2. add a lightweight acknowledgement reaction to the user's message and retain its reaction ID when available;
+3. hydrate the prompt and acquire/bootstrap the runtime;
+4. let `ConversationCardLifecycle` create the first authoritative `starting/preparing` card;
+5. remove the acknowledgement reaction best-effort after the first authoritative card becomes visible or after the prompt reaches terminal without a card.
+
+A failed reaction add/remove is logged but does not affect prompt execution. A leaked reaction is inert and does not state that processing is still active. The bridge never creates a standalone receipt/progress card and never patches a conversation card directly.
+
+For busy follow-ups, a `PendingPromptCardLifecycle` may still create an explicit queued/interrupting card because that message has durable queue semantics. That card must be the same ownership that later becomes active or terminal; the runtime must not leave it queued while creating a second authoritative terminal card.
+
 
 ```text
-received -> queued -> interrupting -> active
-                               \-> cancelled/failed
+queued -> interrupting -> active
+                    \-> cancelled/failed
 ```
 
 It uses the same transport ownership primitive and replacement takeover. When the queued prompt becomes active, ownership is explicitly handed to `ConversationCardLifecycle`; no second component may patch the same ID.
@@ -460,11 +486,11 @@ Test every legal transition and assert every illegal transition is rejected:
 
 For every generated view:
 
+- starting views have an empty timeline, a preparing header, and no actions;
 - only active views can have a Cancel action;
 - archived views have no header, footer, or actions;
 - terminal conversation-card views always have a header and no actions;
 - permission-card-only terminal states produce no conversation-card view;
-- receipt views have an empty timeline and no actions;
 - active activity matches timeline content;
 - empty-output is possible only for terminal complete;
 - archived timeline is non-empty.
@@ -506,8 +532,10 @@ Expected invariant: an externally observed card may be stale after an unrecovera
 
 Cover:
 
-- bootstrap receipt -> preparing -> active -> terminal;
-- queued follow-up -> interrupting -> active;
+- acknowledgement reaction -> lifecycle-owned starting card -> active -> terminal, with no standalone receipt card;
+- first authoritative card send fails or returns no ID without leaving any durable “processing” card;
+- acknowledgement reaction removal fails without affecting card authority;
+- queued follow-up -> interrupting -> active on the same owned card;
 - queued cancellation and bootstrap failure;
 - long output rotation across multiple archived cards;
 - permission before any visible content;
@@ -522,12 +550,14 @@ Cover:
 After automated checks:
 
 1. restart the linked development runtime;
-2. run a long, multi-tool prompt that forces several card rotations;
-3. verify every historical card has no Cancel button;
-4. verify exactly one current card is actionable while the prompt runs;
-5. click an old/expired action fixture and verify the current task continues;
-6. finish/cancel and verify no later Waiting or processing card appears;
-7. inspect logs for rejected transitions, stale events, patch takeover, and unexpected direct presenter calls.
+2. run both a short prompt and a long, multi-tool prompt that forces several card rotations;
+3. verify no standalone “message received / processing” Card exists after either prompt;
+4. verify the short prompt has exactly one authoritative Humming Card;
+5. verify every historical rotated card has no Cancel button;
+6. verify exactly one current card is actionable while the long prompt runs;
+7. click an old/expired action fixture and verify the current task continues;
+8. finish/cancel and verify no later Waiting or processing card appears;
+9. inspect logs for rejected transitions, stale events, patch takeover, and unexpected direct presenter calls.
 
 ## Migration plan
 
@@ -556,11 +586,13 @@ After automated checks:
 - Replace idle and permission parallel booleans with explicit states/transitions.
 - Preserve current size and permission behavior with deterministic tests.
 
-### Slice 5: Bridge/runtime progress lifecycle
+### Slice 5: Initial acknowledgement and pending-prompt lifecycle
 
-- Introduce pending-prompt lifecycle.
+- Replace the standalone initial receipt/progress card with a transient message reaction.
+- Let the conversation lifecycle create the first authoritative starting card.
+- Introduce pending-prompt lifecycle for queued/interrupting follow-ups.
 - Remove direct bridge/runtime conversation-card patches.
-- Hand ownership explicitly from receipt/queued cards into the active conversation lifecycle.
+- Hand queued-card ownership explicitly into the active conversation lifecycle.
 
 ### Slice 6: Superseded/orphan reconciliation and diagnostics
 
@@ -579,11 +611,13 @@ Each slice requires a failing test first, targeted tests, full tests, build, for
 ## Acceptance criteria
 
 1. The code cannot construct an archived or terminal card with a Cancel action.
-2. Exactly zero or one card action token is valid per topic runtime; never more than one.
-3. A stale Card button cannot cancel a newer prompt or segment.
-4. Archived and terminal states cannot regress after delayed ACP, timer, or transport completion.
-5. Every card state snapshot is immutable after entering delivery.
-6. All conversation-card presenter updates originate from lifecycle infrastructure.
-7. Patch rejection preserves replacement takeover without retaining stale authority.
-8. All deterministic race, routing, integration, full-suite, build, and formatting checks pass.
-9. A real multi-rotation Feishu run shows historical cards without Cancel and no post-terminal Waiting card.
+2. A normal non-busy prompt never creates a standalone durable “message received / processing” card; its first card is the lifecycle-owned authoritative starting/active card.
+3. A short completed prompt leaves exactly one authoritative Humming Card unless a documented permission or rotation boundary required more.
+4. Exactly zero or one card action token is valid per topic runtime; never more than one.
+5. A stale Card button cannot cancel a newer prompt or segment.
+6. Archived and terminal states cannot regress after delayed ACP, timer, or transport completion.
+7. Every card state snapshot is immutable after entering delivery.
+8. All conversation-card presenter updates originate from lifecycle infrastructure.
+9. Patch rejection preserves replacement takeover without retaining stale authority.
+10. All deterministic race, routing, integration, full-suite, build, and formatting checks pass.
+11. A real short and multi-rotation Feishu run shows no stale receipt Card, historical cards without Cancel, and no post-terminal Waiting card.
