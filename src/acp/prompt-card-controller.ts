@@ -182,7 +182,7 @@ export class PromptCardController {
       this.options.acknowledgement.add(input.messageId).then((reactionId) => {
         this.recordAcknowledgement("add", reactionId === null ? "failed" : "attached");
         if (reactionId !== null) {
-          if (this.state.phase === "terminal") {
+          if (this.visibleCardObserved || this.state.phase === "terminal") {
             this.removeAcknowledgement(input.messageId, reactionId);
           } else {
             this.dispatch({

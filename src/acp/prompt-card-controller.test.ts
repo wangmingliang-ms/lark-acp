@@ -406,6 +406,21 @@ describe("PromptCardController", () => {
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
+  it("removes an asynchronously added ACK when visibility wins the race", async () => {
+    const reaction = deferred<string | null>();
+    const remove = vi.fn(async () => true);
+    const subject = controller({
+      acknowledge: { add: vi.fn(() => reaction.promise), remove },
+    });
+    subject.acknowledge({ messageId: "message" });
+    subject.markForwarded();
+    await subject.awaitEffects(0);
+
+    reaction.resolve("reaction");
+    await subject.awaitEffects(100);
+    expect(remove).toHaveBeenCalledExactlyOnceWith("message", "reaction");
+  });
+
   it("settles and resumes when permission handoff rejects", async () => {
     const failedPort = delivery({
       handoffToPermission: vi.fn(async () => {
