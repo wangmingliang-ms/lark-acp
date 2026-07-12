@@ -19,8 +19,14 @@ export type ResponsePhase =
 
 export type TerminalOutcome = "complete" | "failed" | "interrupted" | "cancelled" | "merged";
 
+export type ResponseActivity = "thinking" | "waiting" | "calling_tool" | "responding";
+
 export type ResponseState =
-  | { readonly kind: "in_progress"; readonly phase: ResponsePhase }
+  | {
+      readonly kind: "in_progress";
+      readonly phase: ResponsePhase;
+      readonly activity: ResponseActivity;
+    }
   | { readonly kind: "terminal"; readonly outcome: TerminalOutcome };
 
 export type ResponseCardReason =
@@ -37,7 +43,8 @@ export type TimelineEntry =
       readonly kind: "tool";
       readonly toolCallId: string;
       readonly title: string;
-      readonly status: "pending" | "in_progress" | "continued" | "completed" | "failed";
+      readonly status:
+        "pending" | "in_progress" | "continued" | "completed" | "failed" | "interrupted";
     }
   | { readonly kind: "notice"; readonly text: string };
 
@@ -153,7 +160,7 @@ class ResponseLifecycle {
     initialCardId: ResponseCardId,
     phase: "received" | "interrupting",
   ) {
-    this.stateValue = { kind: "in_progress", phase };
+    this.stateValue = { kind: "in_progress", phase, activity: "thinking" };
     this.responseCards = [new ResponseCard(initialCardId, "initial")];
   }
 
@@ -169,7 +176,12 @@ class ResponseLifecycle {
 
   transition(phase: ResponsePhase): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response is absorbing");
-    this.stateValue = { kind: "in_progress", phase };
+    this.stateValue = { kind: "in_progress", phase, activity: "thinking" };
+  }
+
+  setActivity(activity: ResponseActivity): void {
+    if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects activity");
+    this.stateValue = { ...this.stateValue, activity };
   }
 
   seal(outcome: TerminalOutcome): void {
@@ -313,6 +325,12 @@ export class TopicConversation {
     ) {
       this.cancel = { kind: "cancel", responseId, cardId, token: nextActionToken };
     }
+    this.assertInvariants();
+  }
+
+  setActivity(responseId: ResponseId, activity: ResponseActivity): void {
+    if (this.executionOwner !== responseId) throw new Error("only execution owner has activity");
+    this.response(responseId).setActivity(activity);
     this.assertInvariants();
   }
 

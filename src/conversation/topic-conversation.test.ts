@@ -158,7 +158,7 @@ describe("TopicConversation canonical lifecycle", () => {
     const snapshot = topic.snapshot();
 
     expect(response(topic, b).state).toEqual({ kind: "terminal", outcome: "merged" });
-    expect(response(topic, c).state).toEqual({ kind: "in_progress", phase: "interrupting" });
+    expect(response(topic, c).state).toMatchObject({ kind: "in_progress", phase: "interrupting" });
     expect(snapshot.pendingBatch).toMatchObject({
       messages: [{ content: "b" }, { content: "c" }],
       carrierResponseId: c,
@@ -210,7 +210,7 @@ describe("TopicConversation canonical lifecycle", () => {
       pendingBatch: { carrierResponseId: c, state: "collecting" },
     });
     expect(response(topic, a).state).toEqual({ kind: "terminal", outcome: "cancelled" });
-    expect(response(topic, c).state).toEqual({ kind: "in_progress", phase: "interrupting" });
+    expect(response(topic, c).state).toMatchObject({ kind: "in_progress", phase: "interrupting" });
 
     const batch = topic.commitPendingBatchAfterOwnerEnded();
     expect(batch).toMatchObject({ carrierResponseId: c, state: "sealed" });
@@ -288,7 +288,7 @@ describe("TopicConversation canonical lifecycle", () => {
     expect(snapshot.permission).toMatchObject({ status: "expired" });
     expect(snapshot.executionOwnerResponseId).toBe(a);
     expect(snapshot.cancelAuthority).toMatchObject({ kind: "cancel", responseId: a });
-    expect(response(topic, b).state).toEqual({ kind: "in_progress", phase: "interrupting" });
+    expect(response(topic, b).state).toMatchObject({ kind: "in_progress", phase: "interrupting" });
   });
 
   it("fails the Response when its mandatory Permission Card cannot be displayed", () => {
