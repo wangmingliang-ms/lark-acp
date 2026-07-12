@@ -43,6 +43,7 @@ import {
 import { DEFAULT_INBOUND_DIR, sweepInboundDir } from "./inbound-store.js";
 import { hydratePrompt } from "./prompt-hydrator.js";
 import type { PermissionMode } from "../acp/humming-client.js";
+import type { AcknowledgementPort } from "../acp/prompt-card-controller.js";
 import {
   AgentAuthError,
   probeAgentSessionCapabilities,
@@ -531,6 +532,7 @@ export class LarkBridge {
   private readonly lifecycleCodeRevision: LifecycleCodeRevision | undefined;
   private readonly lifecycleNoticeTimeoutMs: number | undefined;
   private readonly conversationCardFeature: ConversationCardFeatureGate;
+  private readonly acknowledgement: AcknowledgementPort;
 
   private readonly chats = new Map<string, ChatRuntime>();
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
@@ -588,6 +590,25 @@ export class LarkBridge {
     this.lifecycleNoticeTimeoutMs = opts.lifecycle?.noticeTimeoutMs;
     this.conversationCardFeature =
       opts.conversationCardFeature ?? DISABLED_CONVERSATION_CARD_FEATURE;
+    this.acknowledgement = {
+      add: async (messageId) => {
+        try {
+          return await this.http.addMessageReaction(messageId, "OnIt");
+        } catch (err) {
+          this.logger.debug({ err }, "prompt acknowledgement reaction failed");
+          return null;
+        }
+      },
+      remove: async (messageId, reactionId) => {
+        try {
+          await this.http.removeMessageReaction(messageId, reactionId);
+          return true;
+        } catch (err) {
+          this.logger.debug({ err }, "prompt acknowledgement removal failed");
+          return false;
+        }
+      },
+    };
   }
 
   /**
@@ -2361,6 +2382,7 @@ export class LarkBridge {
       onTurnComplete: (messageId) => this.handleRuntimeTurnComplete(chatId, threadId, messageId),
       presenter: this.presenter,
       conversationCardFeature: this.conversationCardFeature,
+      acknowledgement: this.acknowledgement,
       sessionStore: this.sessionStore,
       logger: this.logger,
     });

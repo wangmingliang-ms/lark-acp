@@ -13,7 +13,7 @@ const logger: LarkLogger = {
   child: () => logger,
 };
 
-function makeBridge(v2Enabled = false): LarkBridge {
+function makeBridge(v2Enabled = false, presenter: LarkPresenter = {} as LarkPresenter): LarkBridge {
   return new LarkBridge({
     lark: { appId: "test", appSecret: "test" },
     agent: {
@@ -21,7 +21,7 @@ function makeBridge(v2Enabled = false): LarkBridge {
     },
     bindingStore: {} as BindingStore,
     sessionStore: {} as SessionStore,
-    presenter: {} as LarkPresenter,
+    presenter,
     logger,
     conversationCardFeature: { v2Enabled },
   });
@@ -121,6 +121,28 @@ describe("LarkBridge semantic card actions", () => {
       dispatchCardAction(bridge, invalid);
     }
     expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("wires production acknowledgement removal as best effort", async () => {
+    const bridge = makeBridge(true);
+    const removeMessageReaction = vi.fn(async () => {});
+    (bridge as unknown as { http: { removeMessageReaction: typeof removeMessageReaction } }).http =
+      {
+        removeMessageReaction,
+      };
+    const acknowledgement = (
+      bridge as unknown as {
+        acknowledgement: {
+          remove(messageId: string, reactionId: string): Promise<boolean>;
+        };
+      }
+    ).acknowledgement;
+
+    await expect(acknowledgement.remove("message", "reaction")).resolves.toBe(true);
+    expect(removeMessageReaction).toHaveBeenCalledExactlyOnceWith("message", "reaction");
+    removeMessageReaction.mockRejectedValueOnce(new Error("transport"));
+    await expect(acknowledgement.remove("message", "reaction-2")).resolves.toBe(false);
+    expect(removeMessageReaction).toHaveBeenCalledTimes(2);
   });
 
   it("keeps semantic routing disabled by default", () => {
