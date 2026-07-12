@@ -21,6 +21,27 @@ export {
   RingBufferLifecycleDiagnosticSink,
 } from "./lifecycle-diagnostics.js";
 export type {
+  AcknowledgementState,
+  ArchiveReason,
+  CardEffect,
+  ConversationCardEvent,
+  CreatePromptLifecycleInput,
+  PermissionViewData,
+  PromptLifecycleState,
+  StaleEventReason,
+  TerminalOutcome,
+  ToolEvent,
+  ToolLedger,
+  ToolLedgerEntry,
+  TransitionDiagnostic,
+  TransitionResult,
+} from "./prompt-card-lifecycle.js";
+export {
+  createPromptLifecycle,
+  reducePromptLifecycle,
+  viewForPromptState,
+} from "./prompt-card-lifecycle.js";
+export type {
   AcknowledgementLifecycleDiagnostic,
   DeliveryLifecycleDiagnostic,
   DiagnosticCorrelation,
