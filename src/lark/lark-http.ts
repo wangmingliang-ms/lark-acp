@@ -9,6 +9,37 @@ import type { LarkLogger } from "../logger/logger.js";
 // as a typed method (it has no `client.bot` namespace), so we hit it raw.
 // All other endpoints below go through the SDK's typed clients.
 const BOT_INFO_URL = "/open-apis/bot/v3/info";
+const LARK_SUCCESS_CODE = 0;
+
+type LarkApiResponse = {
+  readonly code?: number;
+  readonly msg?: string;
+};
+
+export class LarkApiError extends Error {
+  override readonly name = "LarkApiError";
+
+  constructor(
+    readonly operation: string,
+    readonly code: number,
+    readonly apiMessage: string | undefined,
+  ) {
+    super(
+      `${operation} failed with Lark API code ${String(code)}${apiMessage ? `: ${apiMessage}` : ""}`,
+    );
+  }
+}
+
+export class LarkMalformedResponseError extends Error {
+  override readonly name = "LarkMalformedResponseError";
+
+  constructor(
+    readonly operation: string,
+    response: unknown,
+  ) {
+    super(`${operation} returned a malformed response (payload: ${JSON.stringify(response)})`);
+  }
+}
 
 export interface LarkHttpOptions {
   appId: string;
@@ -199,6 +230,40 @@ export class LarkHttpClient {
   }
 
   /**
+   * Add an emoji reaction to a message and return the new reaction id.
+   *
+   * @throws {LarkApiError} when Lark returns a non-zero API code.
+   * @throws {LarkMalformedResponseError} when Lark returns no reaction id.
+   * @throws when the underlying SDK transport rejects.
+   */
+  async addMessageReaction(messageId: string, emojiType: string): Promise<string> {
+    const operation = "messageReaction.create";
+    const res = await this.client.im.v1.messageReaction.create({
+      path: { message_id: messageId },
+      data: { reaction_type: { emoji_type: emojiType } },
+    });
+    throwForLarkApiError(operation, res);
+    const reactionId = res.data?.reaction_id;
+    if (typeof reactionId !== "string" || reactionId.length === 0) {
+      throw new LarkMalformedResponseError(operation, res);
+    }
+    return reactionId;
+  }
+
+  /**
+   * Remove a reaction previously added to a message.
+   *
+   * @throws {LarkApiError} when Lark returns a non-zero API code.
+   * @throws when the underlying SDK transport rejects.
+   */
+  async removeMessageReaction(messageId: string, reactionId: string): Promise<void> {
+    const res = await this.client.im.v1.messageReaction.delete({
+      path: { message_id: messageId, reaction_id: reactionId },
+    });
+    throwForLarkApiError("messageReaction.delete", res);
+  }
+
+  /**
    * Download a user-sent image attached to a message and return its raw
    * bytes plus content-type.
    *
@@ -250,6 +315,12 @@ export class LarkHttpClient {
     await pipeline(res.getReadableStream(), createWriteStream(destPath));
     const stat = await fs.stat(destPath);
     return { mimeType: parseContentType(res.headers), size: stat.size };
+  }
+}
+
+function throwForLarkApiError(operation: string, response: LarkApiResponse): void {
+  if (response.code !== undefined && response.code !== LARK_SUCCESS_CODE) {
+    throw new LarkApiError(operation, response.code, response.msg);
   }
 }
 
