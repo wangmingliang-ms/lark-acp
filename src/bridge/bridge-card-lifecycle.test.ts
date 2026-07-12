@@ -37,6 +37,43 @@ function dispatchCardAction(bridge: LarkBridge, value: object): void {
   testable.handleCardAction({ action: { value }, messageId: "message" });
 }
 
+describe("LarkBridge prompt ingress ordering", () => {
+  it("serializes hydration and enqueue per topic while keeping topics independent", async () => {
+    const bridge = makeBridge(true);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const calls: string[] = [];
+    const testable = bridge as unknown as {
+      enqueueWithContext(
+        event: unknown,
+        chatId: string,
+        threadId: string | null,
+        userId: string,
+        messageId: string,
+        segments: unknown[],
+      ): Promise<void>;
+      enqueueWithContextSerial: ReturnType<typeof vi.fn>;
+    };
+    testable.enqueueWithContextSerial = vi.fn(async (_event, _chat, _thread, _user, messageId) => {
+      calls.push(`start:${messageId}`);
+      if (messageId === "b") await firstBlocked;
+      calls.push(`end:${messageId}`);
+    });
+
+    const event = {};
+    const b = testable.enqueueWithContext(event, "chat", "topic", "user", "b", []);
+    const c = testable.enqueueWithContext(event, "chat", "topic", "user", "c", []);
+    const other = testable.enqueueWithContext(event, "chat", "other", "user", "x", []);
+    await vi.waitFor(() => expect(calls).toContain("end:x"));
+    expect(calls).not.toContain("start:c");
+    releaseFirst();
+    await Promise.all([b, c, other]);
+    expect(calls.indexOf("end:b")).toBeLessThan(calls.indexOf("start:c"));
+  });
+});
+
 describe("LarkBridge Cancel card compatibility", () => {
   it("rejects a versioned Cancel action before runtime lookup", () => {
     const bridge = makeBridge();

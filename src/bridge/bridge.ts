@@ -537,6 +537,7 @@ export class LarkBridge {
   private readonly chats = new Map<string, ChatRuntime>();
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
   private readonly pendingPostTurnAgentSwitches = new Map<string, PendingPostTurnAgentSwitch>();
+  private readonly promptIngress = new Map<string, Promise<void>>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private ws: LarkWsConnection | null = null;
   private controlServer: BridgeControlServer | null = null;
@@ -2078,7 +2079,29 @@ export class LarkBridge {
 
   // ----- Prompt routing ---------------------------------------------------
 
-  private async enqueueWithContext(
+  private enqueueWithContext(
+    event: Lark.RawMessageEvent,
+    chatId: string,
+    threadId: string | null,
+    userId: string,
+    messageId: string,
+    segments: PromptSegment[],
+  ): Promise<void> {
+    const key = runtimeKey(chatId, threadId);
+    const prior = this.promptIngress.get(key) ?? Promise.resolve();
+    const current = prior
+      .catch(() => undefined)
+      .then(() =>
+        this.enqueueWithContextSerial(event, chatId, threadId, userId, messageId, segments),
+      );
+    const tracked = current.finally(() => {
+      if (this.promptIngress.get(key) === tracked) this.promptIngress.delete(key);
+    });
+    this.promptIngress.set(key, tracked);
+    return tracked;
+  }
+
+  private async enqueueWithContextSerial(
     event: Lark.RawMessageEvent,
     chatId: string,
     threadId: string | null,
