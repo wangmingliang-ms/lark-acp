@@ -69,6 +69,17 @@ A permission boundary may temporarily place the prompt in a non-renderable `awai
 - `ConversationCardDelivery` owns active card IDs, serialized patch/send operations, replacement takeover, and stale transport completion handling.
 - `LarkCardPresenter` renders an already-valid view model and performs no lifecycle decisions.
 
+## One per-prompt lifecycle
+
+There is one `PromptCardLifecycle` aggregate per accepted user message. It owns that prompt's semantic state from acknowledgement through queued/interrupting/starting/active/awaiting-permission/terminal phases. `ConversationCardModel` variants describe its currently renderable artifact; they are not separate competing controllers.
+
+- A prompt accepted while the runtime is idle skips queued states and moves from transient acknowledgement to starting.
+- A prompt accepted while another prompt is active owns one queued card, may move to interrupting if it is the message that triggered acceleration, and later hands the same card ownership into starting/active.
+- Second and later queued prompts remain queued; when they reach the head they move directly `queued -> starting -> active` without requiring an interrupting step.
+- Exactly one component owns a given card ID. Ownership transfer is an atomic delivery operation, never two controllers patching the same ID.
+
+Queued-state handling is therefore an implementation facet/helper of `PromptCardLifecycle`, not an independent state machine or writer.
+
 ## Semantic model
 
 ### Prompt and segment identity
@@ -77,9 +88,11 @@ A permission boundary may temporarily place the prompt in a non-renderable `awai
 type PromptToken = string & { readonly __brand: "PromptToken" };
 type SegmentToken = string & { readonly __brand: "SegmentToken" };
 type ActionToken = string & { readonly __brand: "ActionToken" };
+type PermissionToken = string & { readonly __brand: "PermissionToken" };
+type OwnershipToken = string & { readonly __brand: "OwnershipToken" };
 ```
 
-A prompt receives a fresh `PromptToken`. Every rotated or resumed conversation segment receives a fresh `SegmentToken`. An active segment receives a fresh unguessable `ActionToken` that is revoked before the segment is archived or terminal.
+A prompt receives a fresh `PromptToken`. Every rotated or resumed conversation segment receives a fresh `SegmentToken`. An active segment receives a fresh unguessable `ActionToken` that is revoked before the segment is archived or terminal. Every permission request receives a fresh `PermissionToken`. Every delivery ownership generation receives a fresh `OwnershipToken`.
 
 Tokens are never displayed. Logs may include short, non-reversible sequence numbers, but not full chat, thread, or token values.
 
@@ -87,6 +100,10 @@ Tokens are never displayed. Logs may include short, non-reversible sequence numb
 
 ```ts
 type ConversationCardModel =
+  | {
+      readonly phase: "queued" | "interrupting";
+      readonly promptToken: PromptToken;
+    }
   | {
       readonly phase: "starting";
       readonly step: "preparing";
@@ -113,13 +130,19 @@ type ConversationCardModel =
     }
   | {
       readonly phase: "terminal";
-      readonly outcome: "complete" | "cancelled" | "failed";
+      readonly outcome:
+        | "complete"
+        | "cancelled"
+        | "failed"
+        | "superseded"
+        | "abandoned";
       readonly promptToken: PromptToken;
       readonly segmentToken: SegmentToken | null;
       readonly entries: readonly TerminalTimelineEntry[];
       readonly profile: SessionCardMeta | null;
-      readonly emptyOutput: boolean;
-      readonly presentation: "conversation_card" | "permission_card_only";
+      readonly presentation:
+        | { readonly kind: "conversation_card"; readonly body: "content" | "empty_complete" }
+        | { readonly kind: "permission_card_only" };
     };
 ```
 
@@ -128,6 +151,13 @@ The runtime also has internal, non-renderable `idle` and `awaiting_permission` s
 The lifecycle aggregate stores the current prompt state separately from immutable archived-segment records. `ConversationCardModel` describes one renderable card snapshot; the aggregate may retain archived snapshots for diagnostics but never mutates or re-renders them through the active ownership.
 
 ### State invariants
+
+#### Queued / Interrupting
+
+- Empty timeline, explicit queue/interrupt header, no profile footer, and no Cancel action.
+- Own one card ID from first queued render through ownership handoff or terminal failure/cancellation.
+- `queued -> interrupting` is optional and only applies to the follow-up that triggered acceleration.
+- `queued -> starting` and `interrupting -> starting` are both legal.
 
 #### Starting
 
@@ -160,24 +190,64 @@ The lifecycle aggregate stores the current prompt state separately from immutabl
 
 - Absorbing state for its prompt generation.
 - Never has actions.
-- With `presentation === "conversation_card"`, it has a terminal header, a non-null segment token, and a profile snapshot.
-- With `presentation === "permission_card_only"`, the permission artifact is expired/resolved and no extra empty conversation card is created; the segment token is null.
+- With `presentation.kind === "conversation_card"`, it has a terminal header, a non-null segment token, and a profile snapshot. `body === "empty_complete"` is legal only for `outcome === "complete"` with no entries.
+- With `presentation.kind === "permission_card_only"`, the permission artifact is expired/resolved and no extra empty conversation card is created; the segment token is null.
 - Any pending or in-progress tool is normalized to `interrupted` or `failed` according to the terminal outcome.
 - Late renderable ACP events for the same prompt token are ignored and recorded only as bounded diagnostics.
 
 ## Timeline model
 
-Tool transitions are monotonic:
+Tool transitions are monotonic. Agents may omit intermediate states, so the full accepted matrix is:
 
-```text
-pending -> in_progress -> completed
-                       -> failed
-                       -> interrupted
+| Current | Incoming pending | Incoming in_progress | Incoming completed | Incoming failed |
+|---|---:|---:|---:|---:|
+| absent | create pending | create in_progress | create completed | create failed |
+| pending | no-op/metadata | advance | advance | advance |
+| in_progress | ignore regression | no-op/metadata | advance | advance |
+| completed | ignore regression | ignore regression | metadata only | ignore conflicting terminal |
+| failed | ignore regression | ignore regression | ignore conflicting terminal | metadata only |
+| interrupted | ignore | ignore | ignore | ignore |
+
+The lifecycle keeps a prompt-level `ToolLedger` keyed by `toolCallId`, separate from any one segment's immutable entries. Rotation or permission archive snapshots the current display entry, but a later tool update advances the ledger. When the next active segment opens, a terminal update for a tool last shown in an archived segment is represented by one compact completion marker in the new segment; archived content is never mutated.
+
+Terminal normalization is explicit:
+
+| Prompt outcome | pending/in_progress tool becomes |
+|---|---|
+| complete | interrupted (`agent ended before reporting tool completion`) |
+| cancelled | interrupted (`prompt cancelled`) |
+| failed | failed (`prompt failed`) |
+| superseded | interrupted (`runtime superseded`) |
+| abandoned/bootstrap failure | failed if tool execution started, otherwise interrupted |
+
+Duplicate or conflicting terminal tool updates are logged and ignored. Terminal tool states never return to running.
+
+Snapshots entering delivery are produced by `structuredClone`, recursively frozen in development/tests, and treated as immutable in production. This includes timeline arrays, every timeline entry, profile metadata, route/action payloads, tool details, and nested permission view data. Delivery tests mutate the source objects after submission and assert that the captured transport snapshot does not change.
+
+### ACP prompt attribution and turn barrier
+
+ACP `session/update` and `session/request_permission` identify only the ACP session, not the prompt turn. Humming therefore cannot manufacture trustworthy prompt tokens by reading “whatever prompt is current” at callback time.
+
+The implementation uses a connection-scoped `PromptUpdateRouter` between `ClientSideConnection` and the lifecycle controller:
+
+```ts
+type PromptRoute =
+  | { phase: "idle" }
+  | { phase: "active"; promptToken: PromptToken; sink: PromptEventSink }
+  | { phase: "draining"; completedPromptToken: PromptToken };
 ```
 
-Terminal tool states never return to a running state. Duplicate tool events update metadata only when they do not violate status monotonicity.
+Rules:
 
-All state snapshots sent to delivery are deeply immutable at the application boundary. Timeline arrays and entries are copied before enqueueing transport work. No later ACP event can mutate an already-enqueued snapshot.
+1. `ChatRuntime` installs the active route immediately before `connection.prompt()`.
+2. Notifications received while active are synchronously stamped with that route's prompt token before entering the semantic reducer.
+3. The prompt response is the ACP turn boundary. Humming atomically changes the router from active to draining before terminal reduction.
+4. Notifications received while idle or draining are rejected as stale. Session metadata updates use a separate session-scoped sink because they are not prompt-renderable.
+5. Before starting the next queued prompt, Humming waits for one bounded quiescence barrier: at least one event-loop turn with no prompt-renderable notification, resetting the short barrier whenever a stale notification arrives. The barrier has a configured maximum so a broken adapter cannot block the queue forever.
+6. Only after the barrier closes does Humming install the next active route and call `prompt()`.
+7. A notification delayed beyond the response and the completed quiescence barrier violates ACP turn ordering and cannot be perfectly attributed because ACP exposes no turn ID. Humming logs this protocol limitation explicitly. Agent adapters that exhibit it must be isolated by restarting the connection before the next prompt; a per-adapter compatibility flag may select that stronger policy.
+
+Tests use a fake router to prove: updates before the response reach the current prompt; updates during draining are rejected; the next prompt cannot install until the barrier closes; stale updates extend the barrier; metadata updates remain session-scoped. Humming never labels an unscoped notification by simply reading the latest prompt token.
 
 ## Event model
 
@@ -203,10 +273,11 @@ type ConversationCardEvent =
   | { type: "tool_updated"; promptToken: PromptToken; tool: ToolEvent }
   | { type: "archive_segment"; promptToken: PromptToken; reason: ArchiveReason }
   | { type: "open_idle_slot"; promptToken: PromptToken; timerGeneration: number }
-  | { type: "permission_requested"; promptToken: PromptToken }
-  | { type: "permission_resolved"; promptToken: PromptToken }
+  | { type: "permission_requested"; promptToken: PromptToken; permissionToken: PermissionToken }
+  | { type: "permission_resolved"; promptToken: PromptToken; permissionToken: PermissionToken }
   | { type: "queued"; promptToken: PromptToken }
   | { type: "interrupting"; promptToken: PromptToken }
+  | { type: "flush_due"; promptToken: PromptToken; segmentToken: SegmentToken; renderGeneration: number }
   | { type: "finish"; promptToken: PromptToken; outcome: TerminalOutcome };
 ```
 
@@ -259,10 +330,19 @@ type CardEffect =
   | { type: "adopt"; cardId: string; owner: OwnershipToken }
   | { type: "render"; view: ConversationCardView; owner: OwnershipToken }
   | { type: "close"; view: ArchivedOrTerminalView; owner: OwnershipToken }
-  | { type: "handoff_to_permission"; owner: OwnershipToken }
-  | { type: "reconcile_superseded"; cardId: string; fallback: NonActionableView }
+  | {
+      type: "begin_permission_handoff";
+      owner: OwnershipToken;
+      promptToken: PromptToken;
+      segmentToken: SegmentToken;
+      permissionToken: PermissionToken;
+      permission: PermissionViewData;
+    }
+  | { type: "reconcile_superseded"; cardId: string; view: Extract<ConversationCardView, { kind: "orphaned" }> }
   | { type: "revoke_action"; actionToken: ActionToken };
 ```
+
+`reconcile_superseded` always carries the dedicated non-actionable `orphaned` view.
 
 `close` is not expressed as separate `render` and `detach` effects. The effect runner atomically captures the old delivery owner, queues the final non-actionable view on that owner, and immediately installs a new detached owner for future effects. Therefore:
 
@@ -285,7 +365,9 @@ function deriveConversationCardView(model: ConversationCardModel): ConversationC
 
 ```ts
 type ConversationCardView =
-  | { kind: "receipt"; header: ReceiptHeader; entries: readonly []; route: CardRoute }
+  | { kind: "queued" | "interrupting"; header: QueueHeader; entries: readonly []; route: CardRoute }
+  | { kind: "starting"; header: StartingHeader; entries: readonly []; profile: SessionCardMeta | null; route: CardRoute }
+  | { kind: "orphaned"; header: OrphanHeader; entries: readonly TimelineEntry[]; reason: "superseded_send" | "stale_handoff"; route: CardRoute }
   | {
       kind: "active";
       header: ActiveHeader;
@@ -305,13 +387,14 @@ type ConversationCardView =
       header: TerminalHeader;
       entries: readonly TimelineEntry[];
       profile: SessionCardMeta | null;
-      emptyOutput: boolean;
+      body: "content" | "empty_complete";
       route: CardRoute;
     };
 ```
 
 Presenter behavior is exhaustive by `kind`:
 
+- queued, interrupting, starting, and orphaned views never contain a Cancel action;
 - only `active` can contain `cancelAction`;
 - `archived` has no header/profile/action fields in its type;
 - terminal conversation-card views have no action field;
@@ -322,10 +405,11 @@ During migration, the presenter boundary must assert invariants in development/t
 
 ## Cancel action safety
 
-The callback payload includes:
+The callback payload includes a versioned shape:
 
 ```ts
-interface CancelActionPayload {
+interface CancelActionPayloadV2 {
+  readonly v: 2;
   readonly cancel: true;
   readonly chat: string;
   readonly thread?: string;
@@ -349,7 +433,7 @@ Action revocation is semantic and immediate. Even if Feishu rejects the patch th
 
 `ConversationCardDelivery` remains a transport collaborator. It must not inspect semantic phases. It receives immutable `ConversationCardView` snapshots and owns:
 
-- adopted bridge progress-card ID;
+- lifecycle-created starting-card ID or queued-card ID;
 - active send/patch serialization;
 - patch-rejection abandonment;
 - replacement single-flight creation;
@@ -360,7 +444,7 @@ Action revocation is semantic and immediate. Even if Feishu rejects the patch th
 
 ### Superseded sends and abandoned cards
 
-A stale successful send returning a card ID is an external side effect. The lifecycle effect runner must consume `superseded` results and make the returned card non-actionable using a terminal/archived fallback view. It must never silently ignore the ID.
+A stale successful send returning a card ID is an external side effect. The lifecycle effect runner must consume `superseded` results and patch the returned ID with the dedicated non-actionable `orphaned` view. It must never silently ignore the ID or ambiguously reuse an archived/terminal view.
 
 A patch-rejected card may remain visibly stale because Feishu no longer accepts updates. Its action token is nevertheless revoked, so it is visually stale but operationally inert. The replacement becomes authoritative.
 
@@ -378,7 +462,7 @@ The accepted flow is:
 
 A failed reaction add/remove is logged but does not affect prompt execution. A leaked reaction is inert and does not state that processing is still active. The bridge never creates a standalone receipt/progress card and never patches a conversation card directly.
 
-For busy follow-ups, a `PendingPromptCardLifecycle` may still create an explicit queued/interrupting card because that message has durable queue semantics. That card must be the same ownership that later becomes active or terminal; the runtime must not leave it queued while creating a second authoritative terminal card.
+For busy follow-ups, the same `PromptCardLifecycle` creates an explicit queued/interrupting view because that message has durable queue semantics. Its delivery ownership later becomes active or terminal; the runtime must not leave it queued while creating a second authoritative terminal card.
 
 
 ```text
@@ -386,34 +470,48 @@ queued -> interrupting -> active
                     \-> cancelled/failed
 ```
 
-It uses the same transport ownership primitive and replacement takeover. When the queued prompt becomes active, ownership is explicitly handed to `ConversationCardLifecycle`; no second component may patch the same ID.
+It uses the same transport ownership primitive and replacement takeover. When the queued prompt starts, its existing ownership token and card ID remain attached to the same `PromptCardLifecycle`; no second component may patch the ID.
 
 Bootstrap failure, queued cancellation, runtime replacement, and shutdown also go through these lifecycle controllers. Direct `presenter.updateUnifiedCard()` calls from bridge/runtime business logic are removed.
 
-## Permission boundary
+## Permission ownership handoff
 
-Permission cards remain separate interactive artifacts because their action model differs from conversation cancellation.
+Permission cards remain separate interactive artifacts because their action model differs from conversation cancellation. Each request receives a `PermissionToken` stored in the prompt lifecycle; a resolution must match the current prompt and permission token.
 
-At a permission request:
+The reducer never reads or emits a card ID. It emits a semantic `begin_permission_handoff` effect containing the prompt/segment/permission tokens and permission view data. The effect runner performs the transport-owned atomic operation:
 
-1. revoke the active Cancel action synchronously;
-2. for a non-empty segment, atomically close it with an archived view;
-3. for an empty status slot, explicitly hand its card ownership to the permission presenter instead of archiving an empty segment;
-4. enter the non-renderable `awaiting_permission` phase;
-5. after approval/rejection resolution, create a fresh active segment or terminal state through a semantic event;
-6. if the prompt terminates while still awaiting permission, expire/resolve the permission artifact and use `terminal/presentation=permission_card_only`; do not create a phantom empty conversation card.
+```ts
+type PermissionHandoffResult =
+  | { outcome: "reused"; permissionCardId: string }
+  | { outcome: "sent_fresh"; permissionCardId: string }
+  | { outcome: "failed" };
+```
 
-No `idleStatusCardPending` or `permissionBoundaryThisPrompt` parallel booleans remain. The current phase and explicit handoff result encode the same information.
+Protocol:
+
+1. synchronously revoke the active Cancel action and transition the prompt to `awaiting_permission(permissionToken)`;
+2. for a non-empty segment, atomically close it with an archived view and send a fresh permission card;
+3. for an empty idle/status slot, Delivery atomically takes the active card ID, detaches conversation ownership, and asks the permission presenter to patch that ID;
+4. if the reuse patch fails, the ID is abandoned and one fresh permission card is sent; conversation ownership is never restored to that ID;
+5. if fresh send also fails, resolve the ACP permission as cancelled and terminalize the prompt according to the resulting agent outcome; do not reopen the old conversation owner;
+6. concurrent finish/cancel wins semantically by revoking the permission token. A later handoff completion is stale; any newly returned card ID is expired best-effort through orphan reconciliation;
+7. approval/rejection callbacks validate prompt token and permission token before resolving the pending ACP request;
+8. termination while awaiting permission expires/resolves the permission artifact and uses `terminal/presentation=permission_card_only`; it creates no phantom conversation card.
+
+The prompt-level ToolLedger continues across the boundary. A terminal tool update after permission resolution advances the ledger and appears as a compact completion marker in the newly opened active segment; the archived segment is never modified.
+
+No `idleStatusCardPending` or `permissionBoundaryThisPrompt` parallel booleans remain. The semantic phase plus `PermissionToken` and the handoff result encode the same information.
 
 ## Idle status behavior
 
 Idle rotation is represented as a scheduled semantic event, not a direct timer callback mutation.
 
 - Scheduling captures prompt token, segment token, and timer generation.
-- Visible content, archive, permission, cancel, and finish invalidate that generation.
-- When the timer fires, the event queue revalidates the captured generation.
+- Visible content, archive, permission, cancel, and finish invalidate that generation synchronously in semantic state.
+- When the timer fires, the reducer revalidates the captured generation before it can create any render effect.
+- If the idle event reduced first and its Waiting effect is already queued or hung in transport, a later finish still synchronously closes that ownership generation, revokes authority, and submits terminal on the close barrier. The Waiting effect cannot migrate to the fresh owner or appear after a successfully delivered terminal view.
 - A non-empty active segment is archived first, then a fresh `active/waiting/idle_slot` segment is created.
-- An initial empty progress card is never rotated merely due to silence.
+- No empty starting card is rotated merely due to silence.
 - A terminal or archived generation cannot open an idle slot.
 
 ## Rotation and size budgeting
@@ -426,6 +524,18 @@ The existing shared UTF-8 budget remains authoritative:
 - start a new active segment with a new segment/action token;
 - emergency hard-limit compaction remains a render guard;
 - business paths do not add independent byte or element calculations.
+
+## Render coalescing
+
+Semantic reduction is immediate, but visible active-card rendering remains coalesced to avoid one Feishu patch per text chunk.
+
+- Each open ownership generation keeps `desiredView`, `submittedView`, and a monotonic `renderGeneration`.
+- Active text/thought/tool events update `desiredView` synchronously and schedule one `flush_due(promptToken, segmentToken, renderGeneration)` event after the existing 100 ms debounce.
+- Another active update replaces `desiredView` and advances the generation without adding another timer.
+- `flush_due` revalidates prompt, segment, ownership, and generation before submitting one immutable snapshot.
+- Archive/permission/terminal synchronously invalidate pending flush generations and submit their close/handoff effects immediately; they never wait for the debounce.
+- A timer already queued before terminal becomes a stale event and cannot render Waiting or active state afterward.
+- Delivery may coalesce queued active renders to newest-state wins, but it must never coalesce across close, ownership handoff, or terminal barriers.
 
 ## Failure handling
 
@@ -441,13 +551,43 @@ The existing shared UTF-8 budget remains authoritative:
 
 Lifecycle generations isolate new prompt/segment ownership from obsolete hung transport. Finalization and shutdown use bounded waits, but action revocation occurs synchronously before waiting. A timed-out external update may leave stale pixels, never stale authority.
 
-### Runtime shutdown or supersede
+### Runtime shutdown, supersede, and abandonment
 
-- enqueue one terminal event for the current prompt;
-- revoke actions immediately;
-- finalize queued prompt lifecycles;
-- reject all later ACP events for obsolete prompt tokens;
-- terminate the agent after bounded card delivery.
+Outcome mapping is explicit and does not claim success for administrative replacement:
+
+| Cause | Active/starting prompt | Queued prompt | Awaiting permission |
+|---|---|---|---|
+| normal end turn | complete | n/a | permission artifact resolved/expired; complete only if the agent returned complete |
+| explicit user cancel | cancelled | cancelled | expire permission, then cancelled |
+| agent/protocol error | failed | abandoned | expire permission, then failed |
+| bridge shutdown/restart | cancelled | abandoned | expire permission, then cancelled |
+| session/repo/agent supersede | superseded | abandoned | expire permission, then superseded |
+| bootstrap failure | abandoned | abandoned | n/a |
+
+`superseded` renders neutral administrative copy, never a success checkmark. `abandoned` renders that work did not start or could not continue. Shutdown/supersede handling:
+
+- synchronously commit terminal state and revoke actions;
+- invalidate pending renders and timers;
+- finalize queued prompt lifecycles using the mapping above;
+- reject all later ACP events for obsolete prompt routes;
+- allow a bounded best-effort card delivery wait;
+- terminate the agent without waiting indefinitely for transport.
+
+## Migration and rollback safety
+
+The state-machine migration is not deployed as partially active slices. Implementation may be committed in reviewed steps, but production routing remains behind one `conversationCardLifecycleV2` gate until the complete single-writer path is ready.
+
+Rules:
+
+1. Gate off: all current legacy behavior remains byte-compatible; no v2 action payload is emitted.
+2. Gate on: initial acknowledgement, queued/active/terminal rendering, permission handoff, direct bridge/runtime updates, and Cancel routing all switch together to v2 ownership.
+3. The v2 Cancel payload includes `v: 2` plus prompt/segment/action tokens. The bridge checks payload version before any runtime lookup. A missing/unknown version is stale and never falls through to topic-level cancellation.
+4. `/cancel` remains the explicit topic-level operation and is unaffected by card payload versioning.
+5. Old bridge rollback safety: enablement requires a persisted minimum-compatible bridge schema version. Deployment writes the gate only after the new binary is running; rollback tooling clears the gate before starting an old binary. A new v2 card clicked after rollback is ignored by the old binary because the old binary must receive a compatibility patch that rejects any Cancel payload containing an unknown version before v2 enablement.
+6. No intermediate commit may have two semantic writers for the same card. Adapter code can construct v2 types for tests, but live presenter calls stay entirely legacy until the cutover task removes all direct bypasses and flips the gate.
+7. The cutover commit includes a codebase assertion/test that only lifecycle infrastructure calls conversation-card send/update methods.
+
+Each implementation commit remains independently testable, but only the compatibility guard and final gated cutover are independently deployable behavior changes.
 
 ## Observability
 
