@@ -1,5 +1,12 @@
-import { describe, it, expect } from "vitest";
-import { AgentAuthError, buildAgentSpawnOptions, sanitizeChildEnv } from "./agent-process.js";
+import type { ChildProcess } from "node:child_process";
+import { describe, it, expect, vi } from "vitest";
+import type { AgentProcess, SpawnAgentOptions } from "./agent-process.js";
+import {
+  AgentAuthError,
+  buildAgentSpawnOptions,
+  restartAgentAfterResumeFailure,
+  sanitizeChildEnv,
+} from "./agent-process.js";
 
 describe("AgentAuthError", () => {
   it("builds an actionable message carrying label + hint", () => {
@@ -79,5 +86,26 @@ describe("buildAgentSpawnOptions", () => {
     expect(opts.env.PATH).toBe("C:\\Windows");
     expect(opts.env.EXTRA).toBe("1");
     expect(opts.env).not.toHaveProperty("CLAUDECODE");
+  });
+});
+
+describe("restartAgentAfterResumeFailure", () => {
+  it("starts a fresh agent process instead of reusing a resume-rejected connection", async () => {
+    const staleProcess = {
+      kill: vi.fn(),
+      killed: false,
+      exitCode: null,
+    } as unknown as ChildProcess;
+    const freshAgent = { sessionId: "fresh-session" } as unknown as AgentProcess;
+    const spawnFresh = vi.fn<(opts: SpawnAgentOptions) => Promise<AgentProcess>>();
+    spawnFresh.mockResolvedValue(freshAgent);
+    const opts = { command: "npx", args: ["-y", "@github/copilot", "--acp"] } as SpawnAgentOptions;
+
+    const result = await restartAgentAfterResumeFailure(opts, staleProcess, spawnFresh);
+
+    expect(staleProcess.kill).toHaveBeenCalledOnce();
+    expect(spawnFresh).toHaveBeenCalledOnce();
+    expect(spawnFresh).toHaveBeenCalledWith(opts);
+    expect(result).toEqual({ agent: freshAgent, resumed: false });
   });
 });

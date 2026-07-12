@@ -322,10 +322,24 @@ export async function probeAgentSessionCapabilities(
   }
 }
 
+export async function restartAgentAfterResumeFailure(
+  opts: SpawnAgentOptions,
+  staleProcess: ChildProcess,
+  spawnFresh: (opts: SpawnAgentOptions) => Promise<AgentProcess> = spawnAgent,
+): Promise<{ agent: AgentProcess; resumed: false }> {
+  killAgent(staleProcess);
+  return { agent: await spawnFresh(opts), resumed: false };
+}
+
 /**
  * Spawn an agent and try to resume an existing session. Falls back to
- * `loadSession` if `unstable_resumeSession` is unavailable, then to a
- * fresh session if neither resume mechanism works.
+ * `loadSession` if `unstable_resumeSession` is unavailable, then starts a new
+ * agent process with a fresh session if resume/load fails.
+ *
+ * A failed resume may leave the adapter connection unusable. In particular,
+ * Copilot ACP can reject resume with "Authentication required" while a newly
+ * spawned CLI process can create a session successfully. Never reuse that
+ * rejected connection for `newSession`.
  *
  * @throws on unrecoverable spawn / init failures (same conditions as
  *         {@link spawnAgent}).
@@ -388,6 +402,7 @@ export async function spawnAndResumeAgent(
       };
     } catch (err) {
       opts.logger.warn({ err, previousSessionId }, "resume failed, will start fresh");
+      return restartAgentAfterResumeFailure(opts, proc);
     }
   }
 
