@@ -48,6 +48,9 @@ export type TimelineEntry =
     }
   | { readonly kind: "notice"; readonly text: string };
 
+type TextTimelineEntry = Extract<TimelineEntry, { readonly kind: "text" | "thought" }>;
+type ToolTimelineEntry = Extract<TimelineEntry, { readonly kind: "tool" }>;
+
 export interface PermissionArtifact {
   readonly token: PermissionToken;
   readonly responseId: ResponseId;
@@ -154,11 +157,44 @@ class ResponseCard {
     this.timeline.push(entry);
   }
 
+  replaceLastText(kind: TextTimelineEntry["kind"], text: string): void {
+    const index = this.timeline.length - 1;
+    const last = this.timeline[index];
+    if (last?.kind !== kind) throw new Error(`tail does not end with ${kind}`);
+    this.timeline[index] = { kind, text };
+  }
+
+  updateTool(
+    toolCallId: string,
+    update: {
+      readonly title?: string;
+      readonly status?: ToolTimelineEntry["status"];
+    },
+  ): boolean {
+    const index = this.timeline.findIndex(
+      (entry) => entry.kind === "tool" && entry.toolCallId === toolCallId,
+    );
+    if (index < 0) return false;
+    const current = this.timeline[index];
+    if (current?.kind !== "tool") throw new Error("tool index no longer references a tool");
+    this.timeline[index] = {
+      ...current,
+      ...(update.title === undefined ? {} : { title: update.title }),
+      ...(update.status === undefined ? {} : { status: update.status }),
+    };
+    return true;
+  }
+
   sealRunningTools(status: "continued" | "interrupted" = "continued"): void {
     for (let index = 0; index < this.timeline.length; index += 1) {
       const entry = this.timeline[index];
       if (entry?.kind !== "tool") continue;
-      if (entry.status !== "pending" && entry.status !== "in_progress") continue;
+      if (
+        entry.status !== "pending" &&
+        entry.status !== "in_progress" &&
+        entry.status !== "continued"
+      )
+        continue;
       this.timeline[index] = { ...entry, status };
     }
   }
@@ -240,7 +276,7 @@ class ResponseLifecycle {
 
   seal(outcome: TerminalOutcome): void {
     if (this.stateValue.kind === "terminal") return;
-    this.tail.sealRunningTools("interrupted");
+    for (const card of this.responseCards) card.sealRunningTools("interrupted");
     this.stateValue = { kind: "terminal", outcome };
   }
 
@@ -266,6 +302,31 @@ class ResponseLifecycle {
       this.terminalToolIds.add(entry.toolCallId);
     }
     this.tail.append(entry);
+  }
+
+  replaceTailText(kind: TextTimelineEntry["kind"], text: string): void {
+    if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects updates");
+    this.tail.replaceLastText(kind, text);
+  }
+
+  updateTool(
+    toolCallId: string,
+    update: {
+      readonly title?: string;
+      readonly status?: ToolTimelineEntry["status"];
+    },
+  ): boolean {
+    if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects updates");
+    for (let index = this.responseCards.length - 1; index >= 0; index -= 1) {
+      const card = this.responseCards[index];
+      if (card === undefined) continue;
+      if (!card.updateTool(toolCallId, update)) continue;
+      if (update.status === "completed" || update.status === "failed") {
+        this.terminalToolIds.add(toolCallId);
+      }
+      return true;
+    }
+    return this.terminalToolIds.has(toolCallId);
   }
 
   snapshot(): ResponseSnapshot {
@@ -497,6 +558,23 @@ export class TopicConversation {
   append(responseId: ResponseId, entry: TimelineEntry): void {
     if (this.executionOwner !== responseId) throw new Error("only execution owner accepts updates");
     this.response(responseId).append(entry);
+  }
+
+  replaceTailText(responseId: ResponseId, kind: TextTimelineEntry["kind"], text: string): void {
+    if (this.executionOwner !== responseId) throw new Error("only execution owner accepts updates");
+    this.response(responseId).replaceTailText(kind, text);
+  }
+
+  updateTool(
+    responseId: ResponseId,
+    toolCallId: string,
+    update: {
+      readonly title?: string;
+      readonly status?: ToolTimelineEntry["status"];
+    },
+  ): boolean {
+    if (this.executionOwner !== responseId) throw new Error("only execution owner accepts updates");
+    return this.response(responseId).updateTool(toolCallId, update);
   }
 
   requestPermission(input: {

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LarkLogger } from "../logger/logger.js";
+import { utf8ByteLength } from "../presenter/card-text-budget.js";
+import { conversationCardBudget } from "./conversation-card-budget.js";
 import type { LarkPresenter, PermissionCardView } from "../presenter/presenter.js";
 import type {
   ActionToken,
@@ -315,26 +317,227 @@ describe("TopicConversationSession", () => {
     expect(acknowledgement.remove).toHaveBeenCalledTimes(1);
   });
 
-  it("rotates an oversized tail and keeps only the new tail authoritative", async () => {
+  it("keeps every oversized text Card within the 20 KB hard limit", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    const text = "x".repeat(60_000);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+    });
+    const response = session.snapshot.turns.find(
+      (turn) => turn.response.id === a.responseId,
+    )?.response;
+    expect(response?.cards).toHaveLength(3);
+    expect(response?.cards.at(-1)).toMatchObject({ isTail: true });
+    const entries = response?.cards.flatMap((card) => card.entries) ?? [];
+    expect(entries).toHaveLength(3);
+    expect(
+      entries.every(
+        (entry) =>
+          entry.kind === "text" &&
+          utf8ByteLength(entry.text) <= conversationCardBudget.maxContentBytes,
+      ),
+    ).toBe(true);
+    expect(entries.map((entry) => (entry.kind === "text" ? entry.text : "")).join("")).toBe(text);
+    expect(session.snapshot.cancelAuthority).toMatchObject({
+      kind: "cancel",
+      responseId: a.responseId,
+      cardId: response?.cards.at(-1)?.id,
+    });
+  });
+
+  it("rotates before a new complete text element without splitting streamed prose", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    for (let index = 0; index < 18; index += 1) {
+      await session.applyAgentUpdate(a.responseId, {
+        sessionUpdate: "tool_call",
+        toolCallId: `tool-${index}`,
+        title: `Tool ${index}`,
+        kind: "read",
+        status: "pending",
+      });
+      await session.applyAgentUpdate(a.responseId, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: `tool-${index}`,
+        status: "completed",
+      });
+    }
+
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "共享" },
+    });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "库代码已完成首轮实现。" },
+    });
+
+    const cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(2);
+    expect(cards?.[0]?.entries).toHaveLength(18);
+    expect(cards?.[1]?.entries).toEqual([{ kind: "text", text: "共享库代码已完成首轮实现。" }]);
+  });
+
+  it("does not rotate at 8 KiB until the 20 KB hard limit requires a split", async () => {
     const { session } = fixture();
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     await session.prepare(a.responseId, profile);
     await session.activate(a.responseId);
     await session.applyAgentUpdate(a.responseId, {
       sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "x".repeat(60_000) },
+      content: { type: "text", text: "x".repeat(8_000) },
     });
-    const response = session.snapshot.turns.find(
-      (turn) => turn.response.id === a.responseId,
-    )?.response;
-    expect(response?.cards.length).toBeGreaterThan(2);
-    expect(response?.cards.slice(0, -1).every((card) => !card.isTail)).toBe(true);
-    expect(response?.cards.at(-1)).toMatchObject({ isTail: true });
-    expect(session.snapshot.cancelAuthority).toMatchObject({
-      kind: "cancel",
-      responseId: a.responseId,
-      cardId: response?.cards.at(-1)?.id,
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "y".repeat(1_000) },
     });
+
+    let cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(1);
+    expect(cards?.[0]?.entries).toEqual([
+      { kind: "text", text: `${"x".repeat(8_000)}${"y".repeat(1_000)}` },
+    ]);
+
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-after-text",
+      title: "Run tests",
+      kind: "execute",
+      status: "pending",
+    });
+
+    cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(1);
+    expect(cards?.[0]?.entries).toEqual([
+      { kind: "text", text: `${"x".repeat(8_000)}${"y".repeat(1_000)}` },
+      {
+        kind: "tool",
+        toolCallId: "tool-after-text",
+        title: "Run tests",
+        status: "in_progress",
+      },
+    ]);
+  });
+
+  it("splits a long text after the last sentence before the Card reaches 20 KB", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "prefix",
+      title: "x".repeat(7_988),
+      kind: "read",
+      status: "pending",
+    });
+    const firstSentence = `${"a".repeat(10_000)}。`;
+    const secondSentence = `${"b".repeat(12_000)}。`;
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: firstSentence + secondSentence },
+    });
+
+    const cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(2);
+    expect(cards?.[0]?.entries.at(-1)).toEqual({ kind: "text", text: firstSentence });
+    expect(cards?.[1]?.entries).toEqual([{ kind: "text", text: secondSentence }]);
+    expect(
+      cards?.every(
+        (card) =>
+          card.entries.reduce(
+            (total, entry) =>
+              total +
+              (entry.kind === "tool"
+                ? utf8ByteLength(`**tool**: ${entry.title}`)
+                : utf8ByteLength(entry.text)),
+            0,
+          ) <= conversationCardBudget.maxContentBytes,
+      ),
+    ).toBe(true);
+  });
+
+  it("updates one tool element in place and preserves its title", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-1",
+      title: "Viewing AccountActions.java",
+      kind: "read",
+      status: "pending",
+    });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-1",
+      status: "completed",
+    });
+
+    expect(
+      session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response.cards[0]
+        ?.entries,
+    ).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool-1",
+        title: "Viewing AccountActions.java",
+        status: "completed",
+      },
+    ]);
+  });
+
+  it("retains an archived running tool until its terminal update is delivered", async () => {
+    const { session, patched } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "slow-tool",
+      title: "Long-running check",
+      kind: "execute",
+      status: "pending",
+    });
+    await session.rotate(a.responseId, "tool_boundary");
+    await session.flushPresentation();
+
+    let cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(2);
+    expect(cards?.[0]?.entries).toContainEqual(
+      expect.objectContaining({ toolCallId: "slow-tool", status: "continued" }),
+    );
+
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "slow-tool",
+      status: "completed",
+    });
+    await session.flushPresentation();
+
+    expect(
+      patched.some(
+        (view) =>
+          (view as { kind?: string }).kind === "archived" &&
+          JSON.stringify(view).includes('"toolCallId":"slow-tool"') &&
+          JSON.stringify(view).includes('"status":"completed"'),
+      ),
+    ).toBe(true);
+    cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
+      .cards;
+    expect(cards).toHaveLength(1);
   });
 
   it("reconciles a patch-failure warning onto the current valid tail", async () => {

@@ -556,6 +556,10 @@ export class ConversationCardReconciler {
     )?.response;
     if (response === undefined) return;
     if (kind === "intermediate") {
+      const card = response.cards.find((candidate) => candidate.id === record.cardId);
+      if (card?.entries.some((entry) => entry.kind === "tool" && entry.status === "continued")) {
+        return;
+      }
       const diagnosticStillAttached = [...this.diagnostics.values()].some(
         (diagnostic) => diagnostic.displayedOnCardId === record.cardId,
       );
@@ -640,6 +644,13 @@ export class ConversationCardReconciler {
   private maybeEvictFailedCard(cardId: ResponseCardId): void {
     const record = this.records.get(cardId);
     if (record?.status !== "failed") return;
+    const response = this.snapshotValue.turns.find(
+      (turn) => turn.response.id === record.responseId,
+    )?.response;
+    const card = response?.cards.find((candidate) => candidate.id === cardId);
+    if (card?.entries.some((entry) => entry.kind === "tool" && entry.status === "continued")) {
+      return;
+    }
     const pending = [...this.diagnostics.values()].some(
       (diagnostic) => diagnostic.failedCardId === cardId && diagnostic.status === "pending",
     );

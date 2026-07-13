@@ -2,17 +2,13 @@ import crypto from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { PermissionMode } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
-import {
-  CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
-  splitUtf8,
-  utf8PartsByteLength,
-} from "../presenter/card-text-budget.js";
 import type {
   CardRoute,
   PermissionToken as WirePermissionToken,
   PromptToken,
 } from "../presenter/conversation-card-view.js";
 import type { LarkPresenter, PermissionCardView, SessionCardMeta } from "../presenter/presenter.js";
+import { conversationCardBudget } from "./conversation-card-budget.js";
 import { ConversationCardReconciler } from "./conversation-card-reconciler.js";
 import { TopicConversationStore } from "./topic-conversation-store.js";
 import {
@@ -218,6 +214,11 @@ export class TopicConversationSession {
   }
 
   async rotate(responseId: ResponseId, reason: "size" | "tool_boundary"): Promise<void> {
+    void reason;
+    this.rotateConversationCard(responseId);
+  }
+
+  private rotateConversationCard(responseId: ResponseId): void {
     const nextCardId = this.tokens.card();
     this.reconciler.registerAnchor(nextCardId, this.acceptedTurn(responseId).sourceMessageId);
     const token = this.options.showCancelButton ? this.tokens.action() : null;
@@ -238,37 +239,59 @@ export class TopicConversationSession {
         return;
       case "tool_call":
         if (!this.options.showTools) return;
-        this.store.transaction((aggregate) => {
-          aggregate.append(responseId, {
+        if (!this.hasTool(responseId, update.toolCallId)) {
+          this.rotateBeforeElement(responseId, {
             kind: "tool",
             toolCallId: update.toolCallId,
-            title: update.title ?? "Tool",
+            title: update.title,
             status:
               update.status === "completed" || update.status === "failed"
                 ? update.status
                 : "in_progress",
           });
+        }
+        this.store.transaction((aggregate) => {
+          const status =
+            update.status === "completed" || update.status === "failed"
+              ? update.status
+              : "in_progress";
+          const updated = aggregate.updateTool(responseId, update.toolCallId, {
+            title: update.title,
+            status,
+          });
+          if (!updated) {
+            aggregate.append(responseId, {
+              kind: "tool",
+              toolCallId: update.toolCallId,
+              title: update.title,
+              status,
+            });
+          }
           aggregate.setActivity(responseId, "calling_tool");
-          this.rotateIfNeededInTransaction(aggregate, responseId);
         });
         return;
       case "tool_call_update":
-        if (
-          !this.options.showTools ||
-          (update.status !== "completed" && update.status !== "failed")
-        )
-          return;
-        const terminalStatus = update.status as "completed" | "failed";
-        this.store.transaction((aggregate) => {
-          aggregate.append(responseId, {
-            kind: "tool",
-            toolCallId: update.toolCallId,
-            title: update.title ?? "Tool",
-            status: terminalStatus,
+        if (!this.options.showTools) return;
+        const status =
+          update.status === "completed" || update.status === "failed"
+            ? update.status
+            : update.status === "pending" || update.status === "in_progress"
+              ? "in_progress"
+              : undefined;
+        const updated = this.store.transaction((aggregate) => {
+          const found = aggregate.updateTool(responseId, update.toolCallId, {
+            ...(update.title === null || update.title === undefined ? {} : { title: update.title }),
+            ...(status === undefined ? {} : { status }),
           });
-          aggregate.setActivity(responseId, "calling_tool");
-          this.rotateIfNeededInTransaction(aggregate, responseId);
+          if (found) aggregate.setActivity(responseId, "calling_tool");
+          return found;
         });
+        if (!updated) {
+          this.options.logger.debug(
+            { responseId, toolCallId: update.toolCallId },
+            "ignoring update for an unknown tool call",
+          );
+        }
         return;
       default:
         return;
@@ -541,47 +564,60 @@ export class TopicConversationSession {
     text: string,
     activity: "responding" | "thinking",
   ): void {
-    const chunks = splitUtf8(text, CARD_MARKDOWN_ROTATION_BYTE_LIMIT);
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index];
-      if (chunk === undefined || chunk.length === 0) continue;
-      const needsSuccessor = index < chunks.length - 1;
-      const successorId = needsSuccessor ? this.tokens.card() : null;
-      if (successorId !== null) {
-        this.reconciler.registerAnchor(successorId, this.acceptedTurn(responseId).sourceMessageId);
+    if (text.length === 0) return;
+    const initialTail = this.response(responseId).cards.at(-1);
+    const initialLast = initialTail?.entries.at(-1);
+    let remaining = (initialLast?.kind === kind ? initialLast.text : "") + text;
+    let replacing = initialLast?.kind === kind;
+
+    while (remaining.length > 0) {
+      if (!replacing) {
+        this.rotateBeforeElement(responseId, { kind, text: "" });
+      }
+      const tail = this.response(responseId).cards.at(-1);
+      if (tail === undefined) throw new Error("Response has no tail Card");
+      const baseEntries = replacing ? tail.entries.slice(0, -1) : tail.entries;
+      const [part, remainder] = conversationCardBudget.splitText(
+        remaining,
+        conversationCardBudget.contentBytes(baseEntries),
+      );
+      if (part.length === 0) {
+        this.rotateConversationCard(responseId);
+        replacing = false;
+        continue;
       }
       this.store.transaction((aggregate) => {
-        aggregate.append(responseId, { kind, text: chunk });
+        if (replacing) aggregate.replaceTailText(responseId, kind, part);
+        else aggregate.append(responseId, { kind, text: part });
         aggregate.setActivity(responseId, activity);
-        if (successorId !== null) {
-          aggregate.rotateTail(
-            responseId,
-            successorId,
-            "content_rotation",
-            this.options.showCancelButton ? this.tokens.action() : null,
-          );
-        } else {
-          this.rotateIfNeededInTransaction(aggregate, responseId);
-        }
       });
+      remaining = remainder;
+      if (remaining.length > 0) this.rotateConversationCard(responseId);
+      replacing = false;
     }
   }
 
-  private rotateIfNeededInTransaction(aggregate: TopicConversation, responseId: ResponseId): void {
-    const tail = aggregate
-      .snapshot()
-      .turns.find((turn) => turn.response.id === responseId)
-      ?.response.cards.at(-1);
+  private rotateBeforeElement(responseId: ResponseId, entry: TimelineEntry): void {
+    const response = this.response(responseId);
+    const tail = response.cards.at(-1);
     if (tail === undefined || tail.entries.length === 0) return;
-    const bytes = tail.entries.reduce((total, entry) => total + timelineEntryBytes(entry), 0);
-    if (tail.entries.length < 20 && bytes <= CARD_MARKDOWN_ROTATION_BYTE_LIMIT) return;
-    const successorId = this.tokens.card();
-    this.reconciler.registerAnchor(successorId, this.acceptedTurn(responseId).sourceMessageId);
-    aggregate.rotateTail(
-      responseId,
-      successorId,
-      "content_rotation",
-      this.options.showCancelButton ? this.tokens.action() : null,
+    if (
+      conversationCardBudget.accepts(tail.entries, entry, {
+        showCancelButton: this.options.showCancelButton,
+        profile: response.profile,
+      })
+    )
+      return;
+    this.rotateConversationCard(responseId);
+  }
+
+  private hasTool(responseId: ResponseId, toolCallId: string): boolean {
+    const response = this.response(responseId);
+    return (
+      response.terminalToolCallIds.includes(toolCallId) ||
+      response.cards.some((card) =>
+        card.entries.some((entry) => entry.kind === "tool" && entry.toolCallId === toolCallId),
+      )
     );
   }
 
@@ -634,17 +670,6 @@ export class TopicConversationSession {
     pending.resolve({ outcome: { outcome: "cancelled" } });
     this.currentPermission = null;
     this.reconciler.expirePermission(pending.requestId, reason);
-  }
-}
-
-function timelineEntryBytes(entry: TimelineEntry): number {
-  switch (entry.kind) {
-    case "text":
-    case "thought":
-    case "notice":
-      return utf8PartsByteLength([entry.text]);
-    case "tool":
-      return utf8PartsByteLength([entry.toolCallId, entry.title, entry.status]);
   }
 }
 

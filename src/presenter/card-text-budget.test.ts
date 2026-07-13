@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeConversationCardElementCount,
   CARD_MARKDOWN_ELEMENT_BYTE_LIMIT,
   CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
+  conversationTimelineElementCount,
   splitUtf8,
   truncateUtf8,
   utf8ByteLength,
@@ -13,6 +15,20 @@ describe("card text byte budget", () => {
   it("uses a fixed 8192-byte rotation budget below the hard element limit", () => {
     expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBe(8_192);
     expect(CARD_MARKDOWN_ROTATION_BYTE_LIMIT).toBeLessThan(CARD_MARKDOWN_ELEMENT_BYTE_LIMIT);
+  });
+
+  it("budgets actual top-level conversation elements below Feishu's hard limit", () => {
+    const entries = Array.from({ length: 18 }, () => ({ kind: "tool" }));
+    expect(conversationTimelineElementCount(entries)).toBe(35);
+    expect(activeConversationCardElementCount(entries, { hasCancel: true, hasProfile: true })).toBe(
+      39,
+    );
+    expect(
+      activeConversationCardElementCount([...entries, { kind: "text" }], {
+        hasCancel: true,
+        hasProfile: true,
+      }),
+    ).toBe(41);
   });
 
   it("measures all card text with UTF-8 bytes", () => {

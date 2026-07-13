@@ -4,7 +4,12 @@ import type { LarkHttpClient } from "../lark/lark-http.js";
 
 import type { ConversationCardView, ConversationTimelineEntry } from "./conversation-card-view.js";
 import { markdownToPost, splitMarkdown } from "./lark-markdown.js";
-import { CARD_MARKDOWN_ROTATION_BYTE_LIMIT, splitUtf8, truncateUtf8 } from "./card-text-budget.js";
+import {
+  CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
+  conversationEntryHasLeadingDivider,
+  splitUtf8,
+  truncateUtf8,
+} from "./card-text-budget.js";
 import type {
   AgentStatus,
   AgentSwitchWarningCardSpec,
@@ -528,7 +533,7 @@ function semanticEntries(view: ConversationCardView): object[] {
     return elements;
   }
   view.entries.forEach((entry: ConversationTimelineEntry, index: number) => {
-    if (index > 0 && entry.kind !== "thought") elements.push({ tag: "hr" });
+    if (conversationEntryHasLeadingDivider(entry, index)) elements.push({ tag: "hr" });
     elements.push(semanticEntryToCardElement(entry));
   });
   return elements;

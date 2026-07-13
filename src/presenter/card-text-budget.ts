@@ -5,6 +5,42 @@ export const CARD_MARKDOWN_ELEMENT_BYTE_LIMIT = 30_000;
 /** Fixed product safety budget for rotating conversation cards before the hard ceiling. */
 export const CARD_MARKDOWN_ROTATION_BYTE_LIMIT = 8_192;
 
+const AUXILIARY_SECTION_ELEMENT_COUNT = 2;
+
+type ConversationElementLike = {
+  readonly kind: string;
+};
+
+export function conversationEntryHasLeadingDivider(
+  entry: ConversationElementLike,
+  index: number,
+): boolean {
+  return index > 0 && entry.kind !== "thought";
+}
+
+export function conversationTimelineElementCount(
+  entries: readonly ConversationElementLike[],
+): number {
+  return entries.reduce(
+    (count, entry, index) => count + 1 + (conversationEntryHasLeadingDivider(entry, index) ? 1 : 0),
+    0,
+  );
+}
+
+export function activeConversationCardElementCount(
+  entries: readonly ConversationElementLike[],
+  options: {
+    readonly hasCancel: boolean;
+    readonly hasProfile: boolean;
+  },
+): number {
+  return (
+    conversationTimelineElementCount(entries) +
+    (options.hasCancel ? AUXILIARY_SECTION_ELEMENT_COUNT : 0) +
+    (options.hasProfile ? AUXILIARY_SECTION_ELEMENT_COUNT : 0)
+  );
+}
+
 export function utf8ByteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
 }
@@ -61,4 +97,29 @@ export function splitUtf8(
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+/**
+ * @throws {Error} When `maxBytes` is not positive.
+ */
+export function splitUtf8AtPreferredBoundary(
+  text: string,
+  maxBytes: number,
+  minPreferredBytes: number,
+  preferredBreaks: readonly string[] = ["\n", "。", "."],
+): readonly [prefix: string, remainder: string] {
+  if (maxBytes <= 0) throw new Error("maxBytes must be positive");
+  if (utf8ByteLength(text) <= maxBytes) return [text, ""];
+
+  const hardEnd = utf8PrefixEnd(text, maxBytes);
+  let splitAt = 0;
+  for (const boundary of preferredBreaks) {
+    const candidate = text.lastIndexOf(boundary, hardEnd - 1);
+    if (candidate < 0) continue;
+    const afterBoundary = candidate + boundary.length;
+    if (utf8ByteLength(text.slice(0, afterBoundary)) < minPreferredBytes) continue;
+    splitAt = Math.max(splitAt, afterBoundary);
+  }
+  if (splitAt === 0) splitAt = hardEnd;
+  return [text.slice(0, splitAt), text.slice(splitAt)];
 }

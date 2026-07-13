@@ -143,6 +143,29 @@ describe("TopicConversation canonical lifecycle", () => {
     ]);
   });
 
+  it("normalizes continued tools on archived Cards when the Response terminates", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+    topic.append(a, {
+      kind: "tool",
+      toolCallId: "tool-running",
+      title: "Run",
+      status: "in_progress",
+    });
+    topic.rotateTail(a, id.card("card-a-2"), "content_rotation", id.action("action-a-2"));
+    topic.seal(a, "failed");
+
+    expect(response(topic, a).cards[0]?.entries).toEqual([
+      {
+        kind: "tool",
+        toolCallId: "tool-running",
+        title: "Run",
+        status: "interrupted",
+      },
+    ]);
+  });
+
   it("coalesces consecutive streaming text and thought chunks", () => {
     const topic = new TopicConversation();
     const a = accept(topic, "a");
