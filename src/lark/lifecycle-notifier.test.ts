@@ -34,7 +34,7 @@ function bodyMarkdown(card: object): string | undefined {
 describe("buildLifecycleNoticeCard", () => {
   it.each([
     ["started", "✅ Humming 已启动"],
-    ["stopping", "⛔ Humming 正在停止"],
+    ["stopped", "⏹️ Humming 已停止"],
     ["restarting", "🔄 Humming 正在重启"],
     ["restarted", "✅ Humming 已重启"],
     ["restartFailed", "❌ Humming 重启失败"],
@@ -63,8 +63,8 @@ describe("buildLifecycleNoticeCard", () => {
     },
   );
 
-  it("does not include code revision on stopping notices", () => {
-    const card = buildLifecycleNoticeCard("stopping", {
+  it("does not include code revision on stopped notices", () => {
+    const card = buildLifecycleNoticeCard("stopped", {
       pid: 123,
       now: new Date("2026-07-05T10:00:00Z"),
       codeRevision: { commit: "abc1234", message: "feat: show revision" },

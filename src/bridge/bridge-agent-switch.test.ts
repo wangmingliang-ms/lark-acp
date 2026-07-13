@@ -297,11 +297,11 @@ describe("LarkBridge shutdown", () => {
     const testable = bridge as unknown as {
       started: boolean;
       chats: Map<string, typeof runtime>;
-      sendLifecycleStoppingNotice: () => Promise<void>;
+      sendLifecycleTerminalNotice: () => Promise<void>;
     };
     testable.started = true;
     testable.chats.set("oc_A\u0000omt_1", runtime);
-    testable.sendLifecycleStoppingNotice = async () => {
+    testable.sendLifecycleTerminalNotice = async () => {
       events.push("lifecycle");
     };
 

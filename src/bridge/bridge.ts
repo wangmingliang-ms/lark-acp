@@ -694,7 +694,7 @@ export class LarkBridge {
     } else if (this.lifecycleState.kind === "running") {
       await this.shutdownAllRuntimes("cancelled");
       this.chats.clear();
-      await this.sendLifecycleStoppingNotice();
+      await this.sendLifecycleTerminalNotice();
     } else {
       this.chats.clear();
     }
@@ -710,9 +710,9 @@ export class LarkBridge {
     await this.sendLifecycleNotice(restart ? "restarted" : "started", restart?.deliveries);
   }
 
-  private async sendLifecycleStoppingNotice(intent?: LifecycleIntent): Promise<void> {
+  private async sendLifecycleTerminalNotice(intent?: LifecycleIntent): Promise<void> {
     const restarting = intent === "restart" || (intent === undefined && this.hasRestartMarker());
-    const deliveries = await this.sendLifecycleNotice(restarting ? "restarting" : "stopping");
+    const deliveries = await this.sendLifecycleNotice(restarting ? "restarting" : "stopped");
     if (restarting) this.persistRestartNoticeDeliveries(deliveries);
   }
 
@@ -769,7 +769,7 @@ export class LarkBridge {
           agentClose: "timed-out",
         };
       });
-      await this.sendLifecycleStoppingNotice(transaction.intent);
+      await this.sendLifecycleTerminalNotice(transaction.intent);
       this.lifecycleState = {
         kind: "readyToExit",
         intent: transaction.intent,

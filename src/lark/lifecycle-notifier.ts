@@ -8,7 +8,7 @@ const DEFAULT_SEND_TIMEOUT_MS = 3_000;
 
 export const LIFECYCLE_NOTICE_KINDS = [
   "started",
-  "stopping",
+  "stopped",
   "restarting",
   "restarted",
   "restartFailed",
@@ -35,10 +35,10 @@ const LIFECYCLE_NOTICE_SPECS: Readonly<Record<LifecycleNoticeKind, LifecycleNoti
     body: "Bridge 进程已启动，可以继续使用。",
     template: "green",
   },
-  stopping: {
-    title: "⛔ Humming 正在停止",
-    body: "Bridge 进程正在停止，期间 bot 暂时不会响应消息。",
-    template: "grey",
+  stopped: {
+    title: "⏹️ Humming 已停止",
+    body: "Bridge 进程已停止，bot 当前不会响应消息。",
+    template: "blue",
   },
   restarting: {
     title: "🔄 Humming 正在重启",
