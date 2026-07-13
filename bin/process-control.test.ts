@@ -13,6 +13,7 @@ import {
   buildSystemdServiceProperties,
   clearBridgeRestartMarker,
   isAlive,
+  isUserSystemdAvailable,
   managedCheckoutDir,
   readCodeRevision,
   markBridgeRestart,
@@ -63,6 +64,10 @@ describe("path helpers", () => {
 });
 
 describe("systemd supervision policy", () => {
+  it("exports the systemd capability probe for coordinator selection", () => {
+    expect(typeof isUserSystemdAvailable()).toBe("boolean");
+  });
+
   it("restarts the bridge after a process-requested failure exit", () => {
     expect(buildSystemdServiceProperties()).toContain("Restart=on-failure");
   });

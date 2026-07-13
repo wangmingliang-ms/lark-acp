@@ -746,6 +746,9 @@ export class LarkBridge {
       socketPath: this.controlSocketPath,
       logger: this.logger,
       handlers: {
+        beginLifecycle: async () => {
+          throw new Error("coordinated bridge lifecycle is not available yet");
+        },
         shutdown: async () => {
           if (!this.onShutdownRequested) throw new Error("bridge shutdown is unavailable");
           this.onShutdownRequested();

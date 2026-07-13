@@ -250,6 +250,62 @@ describe("BridgeControlServer", () => {
     });
   });
 
+  it("validates and routes beginLifecycle transactions", async () => {
+    const socketPath = path.join(dir, "control.sock");
+    const statePath = path.join(dir, "lifecycle.json");
+    const transaction = {
+      id: "lifecycle-123",
+      intent: "restart" as const,
+      home: dir,
+      oldPid: 4242,
+      launch: {
+        spawnArgv: ["proxy", "--agent", "copilot"],
+        workingDirectory: "/repo",
+        savedAt: "2026-07-13T10:00:00.000Z",
+      },
+      deadlines: { readyToExitAt: 1_000, oldPidExitAt: 2_000, restartReadyAt: 3_000 },
+      statePath,
+    };
+    let received: unknown;
+    const handlers = {
+      shutdown: async () => ({ accepted: true }),
+      restart: async () => ({ accepted: true }),
+      beginLifecycle: async (value: typeof transaction) => {
+        received = value;
+        return { accepted: true, transactionId: transaction.id, readyToExit: true };
+      },
+      capabilities: async () => {
+        throw new Error("not used");
+      },
+      setControls: async () => ({ applied: true }),
+      setPendingTask: async () => ({ queued: true }),
+      setPendingTargetProfile: async () => ({ queued: true }),
+      bindSession: async () => ({ bound: true }),
+      setAgent: async () => ({ switched: true }),
+      agentProbeFailed: async () => ({ notified: true }),
+    };
+    server = new BridgeControlServer({ socketPath, logger: createPinoLogger(), handlers });
+    await server.start();
+
+    const response = await sendControlRequest(socketPath, {
+      method: "beginLifecycle",
+      params: { transaction },
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: { accepted: true, transactionId: "lifecycle-123", readyToExit: true },
+    });
+    expect(received).toEqual(transaction);
+
+    await expect(
+      sendControlRequest(socketPath, {
+        method: "beginLifecycle",
+        params: { transaction: { ...transaction, intent: "reload" } },
+      } as never),
+    ).resolves.toMatchObject({ ok: false, error: "invalid control request" });
+  });
+
   it("routes a restart request through the production bridge callback", async () => {
     const socketPath = path.join(dir, "control.sock");
     let restartRequested = false;

@@ -713,7 +713,7 @@ export async function tailLog(opts: LogsOptions): Promise<void> {
 
 // ---------- internals -----------------------------------------------------
 
-function isUserSystemdAvailable(): boolean {
+export function isUserSystemdAvailable(): boolean {
   if (process.platform !== "linux") return false;
   if (!commandSucceeds("systemd-run", ["--version"])) return false;
   const state = spawnSync("systemctl", ["--user", "is-system-running"], { encoding: "utf-8" });

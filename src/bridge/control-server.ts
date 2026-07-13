@@ -10,6 +10,10 @@ import type {
   SessionRecord,
 } from "../session-store/session-store.js";
 import { isSessionControlPatch } from "../session-store/session-controls.js";
+import {
+  isLifecycleTransaction,
+  type LifecycleTransaction,
+} from "../../bin/lifecycle-coordinator.js";
 
 export interface AgentProbeFailureTarget {
   readonly label?: string;
@@ -19,6 +23,11 @@ export interface AgentProbeFailureTarget {
 }
 
 export type ControlRequest =
+  | {
+      readonly id?: string | number;
+      readonly method: "beginLifecycle";
+      readonly params: { readonly transaction: LifecycleTransaction };
+    }
   | {
       readonly id?: string | number;
       readonly method: "shutdown";
@@ -89,6 +98,11 @@ export type ControlResponse =
   | { readonly ok: false; readonly error: string; readonly id?: string | number };
 
 export interface BridgeControlHandlers {
+  beginLifecycle(transaction: LifecycleTransaction): Promise<{
+    readonly accepted: true;
+    readonly transactionId: string;
+    readonly readyToExit: true;
+  }>;
   shutdown(): Promise<unknown>;
   restart(): Promise<unknown>;
   capabilities(chatId: string, threadId: string | null): Promise<SessionCapabilitiesSnapshot>;
@@ -211,6 +225,12 @@ export class BridgeControlServer {
     if (!isControlRequest(parsed)) return { ok: false, error: "invalid control request" };
     try {
       switch (parsed.method) {
+        case "beginLifecycle":
+          return {
+            ok: true,
+            id: parsed.id,
+            result: await this.handlers.beginLifecycle(parsed.params.transaction),
+          };
         case "shutdown":
           return {
             ok: true,
@@ -356,6 +376,10 @@ export async function sendControlRequest(
 
 function isControlRequest(value: unknown): value is ControlRequest {
   if (!isRecord(value)) return false;
+  if (value["method"] === "beginLifecycle") {
+    const params = value["params"];
+    return isRecord(params) && isLifecycleTransaction(params["transaction"]);
+  }
   if (value["method"] === "shutdown" || value["method"] === "restart") {
     return isRecord(value["params"]) && Object.keys(value["params"]).length === 0;
   }

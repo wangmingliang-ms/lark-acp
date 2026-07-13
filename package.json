@@ -14,6 +14,7 @@
   },
   "bin": {
     "humming": "./dist/bin/humming.js",
+    "humming-lifecycle-coordinator": "./dist/bin/lifecycle-coordinator.js",
     "humming-mock": "./dist/bin/mock-agent.js"
   },
   "main": "./dist/src/index.js",

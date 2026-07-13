@@ -13,7 +13,11 @@ import { chmodSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BIN_RELATIVE_PATHS = ["dist/bin/humming.js", "dist/bin/mock-agent.js"];
+const BIN_RELATIVE_PATHS = [
+  "dist/bin/humming.js",
+  "dist/bin/lifecycle-coordinator.js",
+  "dist/bin/mock-agent.js",
+];
 const EXECUTABLE_MODE = 0o755;
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
