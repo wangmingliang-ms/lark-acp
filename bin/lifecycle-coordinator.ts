@@ -179,6 +179,7 @@ export function buildLifecycleCoordinatorLaunch(
         "Type=exec",
         "--property",
         "StandardInput=null",
+        ...lifecycleCoordinatorSystemdEnvArgs(),
         ...coordinatorArgs,
       ],
     };
@@ -188,6 +189,40 @@ export function buildLifecycleCoordinatorLaunch(
     command: capabilities.nodePath,
     args: coordinatorArgs.slice(1),
   };
+}
+
+function lifecycleCoordinatorSystemdEnvArgs(): readonly string[] {
+  const prefixes = [
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "CODEX_",
+    "COPILOT_",
+    "GEMINI_",
+    "GITHUB_",
+    "GOOGLE_",
+    "HUMMING_",
+    "NODE_",
+    "NPM_",
+  ];
+  const exact = new Set([
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "USER",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+  ]);
+  return Object.entries(process.env).flatMap(([key, value]) => {
+    if (value === undefined) return [];
+    if (!exact.has(key) && !prefixes.some((prefix) => key.startsWith(prefix))) return [];
+    return ["--setenv", `${key}=${value}`];
+  });
 }
 
 export function armLifecycleCoordinator(

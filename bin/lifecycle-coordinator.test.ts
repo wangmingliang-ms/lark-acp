@@ -206,31 +206,28 @@ describe("coordinator launch strategy", () => {
     });
   });
 
-  it("builds a separate transient systemd unit on capable Linux", () => {
-    expect(
-      buildLifecycleCoordinatorLaunch(transaction(), {
-        platform: "linux",
-        systemdAvailable: true,
-        nodePath: "/usr/bin/node",
-        coordinatorPath: "/opt/humming/lifecycle-coordinator.js",
-      }),
-    ).toEqual({
+  it("builds a separate transient systemd unit on capable Linux and forwards agent auth", () => {
+    const previous = process.env["COPILOT_PROXY_API_KEY"];
+    process.env["COPILOT_PROXY_API_KEY"] = "test-proxy-key";
+    const launch = buildLifecycleCoordinatorLaunch(transaction(), {
+      platform: "linux",
+      systemdAvailable: true,
+      nodePath: "/usr/bin/node",
+      coordinatorPath: "/opt/humming/lifecycle-coordinator.js",
+    });
+    if (previous === undefined) delete process.env["COPILOT_PROXY_API_KEY"];
+    else process.env["COPILOT_PROXY_API_KEY"] = previous;
+
+    expect(launch).toMatchObject({
       strategy: "systemd",
       command: "systemd-run",
-      args: [
-        "--user",
-        "--unit",
-        "humming-lifecycle-lifecycle-123",
-        "--collect",
-        "--property",
-        "Type=exec",
-        "--property",
-        "StandardInput=null",
-        "/usr/bin/node",
-        "/opt/humming/lifecycle-coordinator.js",
-        transaction().statePath,
-      ],
     });
+    expect(launch.args).toContain("COPILOT_PROXY_API_KEY=test-proxy-key");
+    expect(launch.args.slice(-3)).toEqual([
+      "/usr/bin/node",
+      "/opt/humming/lifecycle-coordinator.js",
+      transaction().statePath,
+    ]);
   });
 
   it("falls back to a detached Node helper without systemd", () => {
