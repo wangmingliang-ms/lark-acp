@@ -49,19 +49,22 @@ describe("buildLifecycleNoticeCard", () => {
     expect(JSON.stringify(card)).toContain("123");
   });
 
-  it("includes the current code revision on restarted notices", () => {
-    const card = buildLifecycleNoticeCard("restarted", {
-      pid: 123,
-      now: new Date("2026-07-05T10:00:00Z"),
-      codeRevision: { commit: "abc1234", message: "feat: show revision" },
-    });
+  it.each(["started", "restarted"] as const)(
+    "includes the current code revision on %s notices",
+    (kind) => {
+      const card = buildLifecycleNoticeCard(kind, {
+        pid: 123,
+        now: new Date("2026-07-05T10:00:00Z"),
+        codeRevision: { commit: "abc1234", message: "feat: show revision" },
+      });
 
-    expect(bodyMarkdown(card)).toContain("• Commit：`abc1234`");
-    expect(bodyMarkdown(card)).toContain("• Message：feat: show revision");
-  });
+      expect(bodyMarkdown(card)).toContain("• Commit：`abc1234`");
+      expect(bodyMarkdown(card)).toContain("• Message：feat: show revision");
+    },
+  );
 
-  it("does not include code revision on non-restarted notices", () => {
-    const card = buildLifecycleNoticeCard("started", {
+  it("does not include code revision on stopping notices", () => {
+    const card = buildLifecycleNoticeCard("stopping", {
       pid: 123,
       now: new Date("2026-07-05T10:00:00Z"),
       codeRevision: { commit: "abc1234", message: "feat: show revision" },

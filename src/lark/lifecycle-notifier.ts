@@ -184,7 +184,7 @@ function formatCodeRevision(
   kind: LifecycleNoticeKind,
   revision: LifecycleCodeRevision | undefined,
 ): readonly string[] {
-  if (kind !== "restarted" || revision === undefined) return [];
+  if ((kind !== "started" && kind !== "restarted") || revision === undefined) return [];
   const message = revision.message.trim();
   return [
     `• Commit：\`${revision.commit}\``,
