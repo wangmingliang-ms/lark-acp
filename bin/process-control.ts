@@ -163,6 +163,46 @@ export function bridgeUnitName(homeDir: string): string {
   return `${SYSTEMD_UNIT_PREFIX}-${digest}${SYSTEMD_UNIT_SUFFIX}`;
 }
 
+/** Properties that make systemd the bridge's restart authority. */
+export function buildSystemdServiceProperties(): readonly string[] {
+  return [
+    "Type=simple",
+    "Restart=on-failure",
+    "RestartPreventExitStatus=0",
+    "RestartSec=1s",
+    "KillSignal=SIGTERM",
+    "StandardInput=null",
+  ];
+}
+
+/** Whether two Linux processes belong to the same cgroup v2 service scope. */
+export function sameProcessControlGroup(left: string, right: string): boolean {
+  const normalize = (raw: string): string | null => {
+    for (const line of raw.split("\n")) {
+      const match = /^0::(.+)$/.exec(line.trim());
+      if (match?.[1]) return match[1];
+    }
+    return null;
+  };
+  const leftGroup = normalize(left);
+  return leftGroup !== null && leftGroup === normalize(right);
+}
+
+/** True when this CLI process runs inside the bridge's managed systemd unit. */
+export function isCurrentProcessInBridgeUnit(homeDir: string): boolean {
+  if (process.platform !== "linux" || !isUserSystemdAvailable()) return false;
+  const bridgePid = systemdMainPid(bridgeUnitName(homeDir));
+  if (bridgePid === null) return false;
+  try {
+    return sameProcessControlGroup(
+      fs.readFileSync("/proc/self/cgroup", "utf-8"),
+      fs.readFileSync(`/proc/${bridgePid}/cgroup`, "utf-8"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ---------- pure, testable cores ------------------------------------------
 
 /**
@@ -457,14 +497,7 @@ async function startBridgeWithSystemd(
     "--unit",
     opts.unitName,
     "--collect",
-    "--property",
-    "Type=simple",
-    "--property",
-    "Restart=no",
-    "--property",
-    "KillSignal=SIGTERM",
-    "--property",
-    "StandardInput=null",
+    ...buildSystemdServiceProperties().flatMap((property) => ["--property", property]),
     "--property",
     `StandardOutput=append:${logPath}`,
     "--property",

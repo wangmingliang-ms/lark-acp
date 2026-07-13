@@ -394,6 +394,9 @@ export interface LarkBridgeOptions {
   /** Ask the foreground CLI to stop this bridge after replying to a local control request. */
   onShutdownRequested?: () => void;
 
+  /** Ask the foreground CLI to exit for supervisor-driven restart. */
+  onRestartRequested?: () => void;
+
   /** Direct-message chat ids whose Agent/Model/Mode/Permission changes update settings.json defaults. */
   globalDefaultControlChatIds?: readonly string[];
 
@@ -517,6 +520,7 @@ export class LarkBridge {
   private readonly settingsPath: string | null;
   private readonly controlSocketPath: string | null;
   private readonly onShutdownRequested: (() => void) | undefined;
+  private readonly onRestartRequested: (() => void) | undefined;
   private readonly globalDefaultControlChatIds: readonly string[];
   private readonly lark: LarkBridgeLarkOptions;
   private readonly lifecycleNotificationChatIds: readonly string[];
@@ -580,6 +584,7 @@ export class LarkBridge {
     this.settingsPath = opts.settingsPath ?? null;
     this.controlSocketPath = opts.controlSocketPath ?? null;
     this.onShutdownRequested = opts.onShutdownRequested;
+    this.onRestartRequested = opts.onRestartRequested;
     this.globalDefaultControlChatIds = opts.globalDefaultControlChatIds ?? [];
     this.lifecycleNotificationChatIds = opts.lifecycle?.notificationChatIds ?? [];
     this.restartMarkerPath = opts.lifecycle?.restartMarkerPath ?? null;
@@ -744,6 +749,11 @@ export class LarkBridge {
         shutdown: async () => {
           if (!this.onShutdownRequested) throw new Error("bridge shutdown is unavailable");
           this.onShutdownRequested();
+          return { accepted: true };
+        },
+        restart: async () => {
+          if (!this.onRestartRequested) throw new Error("bridge restart is unavailable");
+          this.onRestartRequested();
           return { accepted: true };
         },
 

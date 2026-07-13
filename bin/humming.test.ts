@@ -29,6 +29,7 @@ import {
   runInit,
   resolveUpdateRef,
   restartHasExplicitOptions,
+  resolveRestartExecutionStrategy,
   DEFAULT_AGENT,
   DEFAULT_PERMISSION_MODE,
   type ParsedArgs,
@@ -170,6 +171,20 @@ describe("restartHasExplicitOptions — bare restart vs. restart with flags", ()
     // argv extends past it, so the typed options win over the persisted file.
     const args = parseArgs(["--home", "/tmp/h", "restart", "--agent", "codex"]);
     expect(restartHasExplicitOptions(args)).toBe(true);
+  });
+});
+
+describe("restart execution strategy", () => {
+  it("delegates a bare in-service restart to the supervisor", () => {
+    expect(resolveRestartExecutionStrategy(true, false)).toBe("supervisor");
+  });
+
+  it("rejects restart options that cannot change an already-running systemd unit", () => {
+    expect(resolveRestartExecutionStrategy(true, true)).toBe("unsupported-options");
+  });
+
+  it("uses the normal stop-start path outside the bridge unit", () => {
+    expect(resolveRestartExecutionStrategy(false, false)).toBe("external");
   });
 });
 

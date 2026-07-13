@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPinoLogger } from "../logger/logger.js";
 import { BridgeControlServer, sendControlRequest } from "./control-server.js";
+import type { LarkBridgeOptions } from "./bridge.js";
+import { LarkBridge } from "./bridge.js";
 
 let dir: string;
 let server: BridgeControlServer | null;
@@ -27,6 +29,7 @@ describe("BridgeControlServer", () => {
       logger: createPinoLogger(),
       handlers: {
         shutdown: async () => ({ accepted: true }),
+        restart: async () => ({ accepted: true, restarting: true }),
         capabilities: async (chatId, threadId) => ({
           session: { chatId, threadId, sessionId: "sess_1" },
           agent: { command: "node", args: [], cwd: "/repo" },
@@ -81,6 +84,10 @@ describe("BridgeControlServer", () => {
     await expect(
       sendControlRequest(socketPath, { method: "shutdown", params: {} }),
     ).resolves.toMatchObject({ ok: true, result: { accepted: true } });
+
+    await expect(
+      sendControlRequest(socketPath, { method: "restart", params: {} }),
+    ).resolves.toMatchObject({ ok: true, result: { accepted: true, restarting: true } });
 
     const caps = await sendControlRequest(socketPath, {
       method: "capabilities",
@@ -243,6 +250,31 @@ describe("BridgeControlServer", () => {
     });
   });
 
+  it("routes a restart request through the production bridge callback", async () => {
+    const socketPath = path.join(dir, "control.sock");
+    let restartRequested = false;
+    const bridge = new LarkBridge({
+      lark: { appId: "cli_test", appSecret: "secret" },
+      agent: { resolver: async () => ({ command: "node", args: [] }) },
+      sessionStore: {},
+      bindingStore: {},
+      presenter: {},
+      controlSocketPath: socketPath,
+      onRestartRequested: () => {
+        restartRequested = true;
+      },
+    } as unknown as LarkBridgeOptions);
+
+    await (bridge as unknown as { startControlServer(): Promise<void> }).startControlServer();
+    const response = await sendControlRequest(socketPath, { method: "restart", params: {} });
+
+    expect(response).toMatchObject({ ok: true, result: { accepted: true } });
+    expect(restartRequested).toBe(true);
+    await (
+      bridge as unknown as { controlServer: { stop(): Promise<void> } | null }
+    ).controlServer?.stop();
+  });
+
   it("responds to newline-framed requests before the client half-closes", async () => {
     const socketPath = path.join(dir, "control.sock");
     server = new BridgeControlServer({
@@ -250,6 +282,7 @@ describe("BridgeControlServer", () => {
       logger: createPinoLogger(),
       handlers: {
         shutdown: async () => ({ accepted: true }),
+        restart: async () => ({ accepted: true, restarting: true }),
         capabilities: async (chatId, threadId) => ({
           session: { chatId, threadId, sessionId: "sess_pipe" },
           agent: { command: "node", args: [], cwd: "/repo" },
@@ -332,6 +365,8 @@ describe("BridgeControlServer", () => {
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
+        shutdown: async () => ({ accepted: true }),
+        restart: async () => ({ accepted: true, restarting: true }),
       },
     });
     await server.start();
@@ -393,6 +428,8 @@ describe("BridgeControlServer", () => {
         bindSession: async (record) => ({ bound: true, record }),
         setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
+        shutdown: async () => ({ accepted: true }),
+        restart: async () => ({ accepted: true, restarting: true }),
       },
     });
     await server.start();

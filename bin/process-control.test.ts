@@ -10,6 +10,7 @@ import {
   bridgePidPath,
   bridgeRestartMarkerPath,
   bridgeUnitName,
+  buildSystemdServiceProperties,
   clearBridgeRestartMarker,
   isAlive,
   managedCheckoutDir,
@@ -20,6 +21,7 @@ import {
   readLaunchArgv,
   readPid,
   rewriteSubcommand,
+  sameProcessControlGroup,
   ProcessControlError,
 } from "./process-control.js";
 
@@ -57,6 +59,31 @@ describe("path helpers", () => {
     expect(bridgeUnitName(dir)).toMatch(/^humming-bridge-[a-f0-9]{10}\.service$/);
     expect(bridgeUnitName(dir)).toBe(bridgeUnitName(dir));
     expect(bridgeUnitName(path.join(dir, "other"))).not.toBe(bridgeUnitName(dir));
+  });
+});
+
+describe("systemd supervision policy", () => {
+  it("restarts the bridge after a process-requested failure exit", () => {
+    expect(buildSystemdServiceProperties()).toContain("Restart=on-failure");
+  });
+
+  it("does not restart after a clean process exit", () => {
+    expect(buildSystemdServiceProperties()).toContain("RestartPreventExitStatus=0");
+  });
+
+  it("identifies a CLI running inside the managed bridge service", () => {
+    expect(
+      sameProcessControlGroup(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/humming.service\n",
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/humming.service\n",
+      ),
+    ).toBe(true);
+    expect(
+      sameProcessControlGroup(
+        "0::/user.slice/user-1000.slice/session-2.scope\n",
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/humming.service\n",
+      ),
+    ).toBe(false);
   });
 });
 

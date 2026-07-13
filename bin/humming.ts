@@ -78,6 +78,7 @@ import {
   managedCheckoutDir,
   bridgeLaunchPath,
   isBridgeRunning,
+  isCurrentProcessInBridgeUnit,
   runGit,
   runNpm,
   readCodeRevision,
@@ -128,6 +129,8 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 1440;
 const DEFAULT_MAX_CHATS = 10;
 const DEFAULT_PERMISSION_MODE: PermissionMode = "alwaysAsk";
 const DEFAULT_IDLE_STATUS_CARD_MS = 15_000;
+/** Non-zero exit tells the systemd supervisor to restart after graceful shutdown. */
+const SUPERVISOR_RESTART_EXIT_CODE = 75;
 /**
  * Agent used when neither `--agent` nor settings.json `runtime.agent` names one.
  * Makes a bare `humming start` / `humming proxy` work out-of-the-box on a
@@ -3016,6 +3019,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   const codeRevision = readCodeRevision(path.dirname(fileURLToPath(import.meta.url)));
 
   let requestShutdown = (): void => {};
+  let requestRestart = (): void => {};
   const bridge = new LarkBridge({
     lark: { appId: cfg.appId, appSecret: cfg.appSecret },
     agent: {
@@ -3039,6 +3043,7 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     settingsPath: configPath,
     controlSocketPath: bridgeControlSocketPath(homeDir),
     onShutdownRequested: () => requestShutdown(),
+    onRestartRequested: () => requestRestart(),
     globalDefaultControlChatIds: cfg.globalControlChatIds,
     lifecycle: {
       notificationChatIds: cfg.lifecycleNotifyChatIds,
@@ -3051,7 +3056,10 @@ async function runProxy(args: ParsedArgs): Promise<void> {
   });
 
   let stopping = false;
-  const shutdown = async (reason: NodeJS.Signals | "CONTROL"): Promise<void> => {
+  const shutdown = async (
+    reason: NodeJS.Signals | "CONTROL" | "RESTART",
+    exitCode = 0,
+  ): Promise<void> => {
     if (stopping) return;
     stopping = true;
     cliLogger.info(`received ${reason}, stopping`);
@@ -3062,9 +3070,13 @@ async function runProxy(args: ParsedArgs): Promise<void> {
     } finally {
       notifyCrash.dispose();
     }
-    process.exit(0);
+    process.exit(exitCode);
   };
   requestShutdown = () => setImmediate(() => void shutdown("CONTROL"));
+  requestRestart = () => {
+    markBridgeRestart(homeDir);
+    setImmediate(() => void shutdown("RESTART", SUPERVISOR_RESTART_EXIT_CODE));
+  };
   process.on("SIGINT", (sig) => void shutdown(sig));
   process.on("SIGTERM", (sig) => void shutdown(sig));
 
@@ -3099,6 +3111,28 @@ async function runRestart(args: ParsedArgs): Promise<void> {
   const homeDir = resolveHomeDir(args.home);
   const launch = resolveRestartLaunch(args, homeDir);
   persistLaunchArgv(homeDir, launch.spawnArgv, launch.workingDirectory);
+
+  const strategy = resolveRestartExecutionStrategy(
+    isCurrentProcessInBridgeUnit(homeDir),
+    restartHasExplicitOptions(args),
+  );
+  if (strategy === "unsupported-options") {
+    throw new ProcessControlError(
+      "a restart requested from inside Humming cannot change launch options; update the launch configuration from an external shell first",
+    );
+  }
+  if (strategy === "supervisor") {
+    const response = await sendControlRequest(bridgeControlSocketPath(homeDir), {
+      method: "restart",
+      params: {},
+    });
+    if (!response.ok) throw new ProcessControlError(response.error);
+    process.stdout.write(
+      "bridge restart requested; systemd will relaunch it after this turn exits\n",
+    );
+    return;
+  }
+
   markBridgeRestart(homeDir);
   try {
     await stopBridge({ homeDir });
@@ -3144,6 +3178,14 @@ function resolveRestartLaunch(
 function restartHasExplicitOptions(args: ParsedArgs): boolean {
   if (args.rawArgv === undefined || args.subcommandIndex === undefined) return false;
   return args.rawArgv.length > args.subcommandIndex + 1;
+}
+
+function resolveRestartExecutionStrategy(
+  insideBridgeUnit: boolean,
+  hasExplicitOptions: boolean,
+): "supervisor" | "unsupported-options" | "external" {
+  if (!insideBridgeUnit) return "external";
+  return hasExplicitOptions ? "unsupported-options" : "supervisor";
 }
 
 async function runInit(args: ParsedArgs): Promise<void> {
@@ -3490,6 +3532,7 @@ export {
   maskCredentialId,
   resolveUpdateRef,
   restartHasExplicitOptions,
+  resolveRestartExecutionStrategy,
   DEFAULT_AGENT,
   DEFAULT_PERMISSION_MODE,
 };
