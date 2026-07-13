@@ -32,8 +32,17 @@ import { ConversationResponseHandle } from "../conversation/conversation-respons
 import type { RequestMessage, ResponseId } from "../conversation/topic-conversation.js";
 import type { PromptToken } from "../presenter/conversation-card-view.js";
 import crypto from "node:crypto";
+import type { LifecycleIntent } from "../../bin/lifecycle-coordinator.js";
 
 const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
+
+export interface DrainResult {
+  readonly intent: LifecycleIntent;
+  readonly outcome: "drained" | "escalated";
+  readonly cancel: "not-needed" | "sent" | "rejected" | "timed-out";
+  readonly persisted: boolean;
+  readonly agentClose: "not-needed" | "closed" | "timed-out";
+}
 
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
@@ -145,6 +154,9 @@ export class ChatRuntime {
   private followupInterruptRequested = false;
   /** Suppress the prompt-error notice when this runtime is intentionally replaced. */
   private suppressPromptErrorNotice = false;
+  /** Absorbing coordinated lifecycle reason, never reset by prompt cleanup. */
+  private lifecycleIntent: LifecycleIntent | null = null;
+  private drainPromise: Promise<DrainResult> | null = null;
   /** Set while a prompt is in-flight — exit handler defers to handlePromptError then. */
   private promptInFlight = false;
   /** Follow-up messages preserved across a respawn after an interrupt closed the agent. */
@@ -510,6 +522,87 @@ export class ChatRuntime {
 
     this.state = null;
     killAgent(state.agent.process);
+  }
+
+  /** Gracefully quiesce this runtime for coordinated bridge Stop/Restart. */
+  drain(intent: LifecycleIntent): Promise<DrainResult> {
+    if (this.lifecycleIntent !== null && this.lifecycleIntent !== intent) {
+      return Promise.reject(new Error(`runtime is already draining for ${this.lifecycleIntent}`));
+    }
+    if (this.drainPromise !== null) return this.drainPromise;
+
+    // Commit crash suppression and revoke ingress/action authority before any await/ACP action.
+    this.lifecycleIntent = intent;
+    this.suppressPromptErrorNotice = true;
+    this.aborted = true;
+    const state = this.state;
+    const interruption = this.conversation.interruptTopic();
+    this.clearAdmissionState(`runtime is draining for ${intent}`);
+    this.queuedAfterRespawn.length = 0;
+    if (state !== null) state.queue.length = 0;
+
+    this.drainPromise = this.finishDrain(intent, state, interruption);
+    return this.drainPromise;
+  }
+
+  private async finishDrain(
+    intent: LifecycleIntent,
+    state: ChatRuntimeState | null,
+    interruption: Promise<void>,
+  ): Promise<DrainResult> {
+    let escalated = false;
+    await withTimeout(
+      interruption.then(() => this.conversation.flushPresentation()),
+      SHUTDOWN_FINALIZE_TIMEOUT_MS,
+    ).catch((err) => {
+      escalated = true;
+      this.logger.warn({ err, intent }, "drain presentation flush timed out");
+    });
+
+    if (state === null) {
+      return {
+        intent,
+        outcome: escalated ? "escalated" : "drained",
+        cancel: "not-needed",
+        persisted: false,
+        agentClose: "not-needed",
+      };
+    }
+
+    let cancel: DrainResult["cancel"] = "sent";
+    try {
+      await withTimeout(
+        state.agent.connection.cancel({ sessionId: state.agent.sessionId }),
+        SHUTDOWN_FINALIZE_TIMEOUT_MS,
+      );
+    } catch (err) {
+      cancel = isTimeoutError(err) ? "timed-out" : "rejected";
+      escalated = true;
+      this.logger.info({ err, intent }, "expected drain cancel did not settle cleanly");
+    }
+
+    let promptTimedOut = false;
+    try {
+      await withTimeout(
+        waitUntil(() => !this.promptInFlight),
+        SHUTDOWN_FINALIZE_TIMEOUT_MS,
+      );
+    } catch (err) {
+      promptTimedOut = true;
+      escalated = true;
+      this.logger.info({ err, intent }, "active prompt did not settle during drain");
+    }
+
+    const persisted = await this.persistSession(state.agent.sessionId);
+    this.state = null;
+    killAgent(state.agent.process);
+    return {
+      intent,
+      outcome: escalated ? "escalated" : "drained",
+      cancel,
+      persisted,
+      agentClose: promptTimedOut ? "timed-out" : "closed",
+    };
   }
 
   /**
@@ -1374,7 +1467,7 @@ export class ChatRuntime {
     const permissionDisplayFailed =
       this.permissionDisplayFailureResponse === pending.response?.responseId;
     const followupInterruptRequested = this.followupInterruptRequested;
-    const suppressNotice = this.suppressPromptErrorNotice;
+    const suppressNotice = this.suppressPromptErrorNotice || this.lifecycleIntent !== null;
     const exitCode = state.agent.process.exitCode;
     const signal = state.agent.process.signalCode;
     const stderrTail = procDead ? state.agent.getRecentStderr() : [];
@@ -1468,7 +1561,10 @@ export class ChatRuntime {
       .catch((sendErr) => this.logger.warn({ err: sendErr }, "error reply failed"));
   }
 
-  private async persistSession(sessionId: string, controls?: SessionControlPatch): Promise<void> {
+  private async persistSession(
+    sessionId: string,
+    controls?: SessionControlPatch,
+  ): Promise<boolean> {
     const now = Date.now();
     try {
       const latest = await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
@@ -1502,8 +1598,10 @@ export class ChatRuntime {
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
       });
+      return true;
     } catch (err) {
       this.logger.warn({ err }, "session store save failed");
+      return false;
     }
   }
 }
@@ -1516,6 +1614,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("timed out after ");
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
 function sessionMetaFromSnapshot(snapshot: SessionCapabilitiesSnapshot): SessionCardMeta {

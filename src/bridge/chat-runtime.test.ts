@@ -1129,6 +1129,85 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     );
   });
 
+  it("drains an active prompt as interrupted without reporting an expected disconnect", async () => {
+    const states: RecordedConversationState[] = [];
+    const notices: Array<{ title: string; body: string; template: string }> = [];
+    const order: string[] = [];
+    const fake = makeFakeAgent();
+    const cancel = fake.agent.connection.cancel.bind(fake.agent.connection);
+    fake.agent.connection.cancel = async (params) => {
+      order.push("cancel");
+      await cancel(params);
+      fake.closeConnection();
+    };
+    killAgentMock.mockImplementation(() => {
+      order.push("kill");
+    });
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states, notices),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "restart the bridge" }],
+      messageId: "om_restart",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+
+    const result = await runtime.drain("restart");
+
+    expect(result).toMatchObject({
+      intent: "restart",
+      outcome: "drained",
+      cancel: "sent",
+      persisted: true,
+    });
+    expect(states.at(-1)).toMatchObject({ status: "interrupted", cancellable: false });
+    expect(notices).toEqual([]);
+    expect(order).toEqual(["cancel", "kill"]);
+  });
+
+  it("reports bounded escalation without a crash notice when cancel and prompt hang", async () => {
+    vi.useFakeTimers();
+    try {
+      const states: RecordedConversationState[] = [];
+      const notices: Array<{ title: string; body: string; template: string }> = [];
+      const fake = makeFakeAgent();
+      fake.holdNextCancel();
+      spawnAgentMock.mockResolvedValue(fake.agent);
+      const runtime = new ChatRuntime({
+        ...opts(),
+        presenter: recordingPresenter(states, notices),
+        sessionStore: stubSessionStore(),
+      });
+
+      await runtime.enqueue({
+        prompt: [{ type: "text", text: "hang forever" }],
+        messageId: "om_hung_drain",
+        chatId: "oc_test",
+      });
+      await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+
+      const drain = runtime.drain("stop");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(drain).resolves.toMatchObject({
+        intent: "stop",
+        outcome: "escalated",
+        cancel: "timed-out",
+        persisted: true,
+        agentClose: "timed-out",
+      });
+      expect(killAgentMock).toHaveBeenCalledExactlyOnceWith(fake.agent.process);
+      expect(states.at(-1)).toMatchObject({ status: "interrupted", cancellable: false });
+      expect(notices).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("forces an in-flight card to a terminal state when the bridge shuts down", async () => {
     const states: RecordedConversationState[] = [];
     const fake = makeFakeAgent();

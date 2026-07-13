@@ -3,6 +3,8 @@ import type { BindingStore } from "../binding-store/binding-store.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
 import type { SessionStore } from "../session-store/session-store.js";
+import type { LifecycleTransaction } from "../../bin/lifecycle-coordinator.js";
+import type { DrainResult } from "./chat-runtime.js";
 import { LarkBridge } from "./bridge.js";
 
 const logger: LarkLogger = {
@@ -37,6 +39,124 @@ function dispatchCardAction(bridge: LarkBridge, value: object): void {
 }
 
 describe("LarkBridge prompt ingress ordering", () => {
+  it("quiesces ingress synchronously and waits for every runtime before lifecycle notice", async () => {
+    const notices: Array<{ title: string; body: string }> = [];
+    const presenter = {
+      replyNoticeCard: vi.fn(
+        async (_messageId: string, notice: { title: string; body: string }) => {
+          notices.push(notice);
+          return "notice";
+        },
+      ),
+    } as unknown as LarkPresenter;
+    const bridge = makeBridge(presenter);
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const drained = (intent: "stop" | "restart"): DrainResult => ({
+      intent,
+      outcome: "drained",
+      cancel: "sent",
+      persisted: true,
+      agentClose: "closed",
+    });
+    const first = {
+      drain: vi.fn(async (intent: "stop" | "restart") => {
+        events.push("first:start");
+        await firstGate;
+        events.push("first:end");
+        return drained(intent);
+      }),
+    };
+    const second = {
+      drain: vi.fn(async (intent: "stop" | "restart") => {
+        events.push("second:start");
+        await secondGate;
+        events.push("second:end");
+        return drained(intent);
+      }),
+    };
+    const transaction = {
+      id: "lifecycle-1",
+      intent: "restart",
+      home: "/tmp/home",
+      oldPid: 1,
+      launch: { spawnArgv: ["node"], workingDirectory: "/tmp", savedAt: new Date().toISOString() },
+      deadlines: { readyToExitAt: 1, oldPidExitAt: 2, restartReadyAt: 3 },
+      statePath: "/tmp/lifecycle.json",
+    } satisfies LifecycleTransaction;
+    const testable = bridge as unknown as {
+      chats: Map<string, typeof first | typeof second>;
+      beginLifecycle(transaction: LifecycleTransaction): Promise<unknown>;
+      enqueueWithContextSerial(
+        event: unknown,
+        chatId: string,
+        threadId: string | null,
+        userId: string,
+        messageId: string,
+        segments: unknown[],
+        admit: () => void,
+      ): Promise<void>;
+      sendLifecycleNotice(kind: string): Promise<unknown>;
+      lifecycleState: { kind: string };
+    };
+    testable.chats.set("first", first);
+    testable.chats.set("second", second);
+    testable.sendLifecycleNotice = vi.fn(async (kind) => {
+      events.push(`notice:${kind}`);
+      return [];
+    });
+
+    const lifecycle = testable.beginLifecycle(transaction);
+    const duplicate = testable.beginLifecycle(transaction);
+    expect(duplicate).toBe(lifecycle);
+    await expect(
+      testable.beginLifecycle({ ...transaction, id: "lifecycle-2", intent: "stop" }),
+    ).rejects.toThrow("already active");
+    expect(testable.lifecycleState).toMatchObject({
+      kind: "quiescing",
+      intent: "restart",
+      transactionId: "lifecycle-1",
+    });
+    await testable.enqueueWithContextSerial({}, "chat", "topic", "user", "message", [], () =>
+      events.push("admit"),
+    );
+    expect(notices.at(-1)?.body).toContain("未排队");
+    expect(events).toEqual(expect.arrayContaining(["first:start", "second:start"]));
+    expect(events).not.toContain("notice:restarting");
+
+    releaseFirst();
+    await Promise.resolve();
+    expect(events).not.toContain("notice:restarting");
+    releaseSecond();
+    await expect(lifecycle).resolves.toMatchObject({
+      accepted: true,
+      transactionId: "lifecycle-1",
+      readyToExit: true,
+    });
+    expect(events.at(-1)).toBe("notice:restarting");
+    expect(testable.lifecycleState).toMatchObject({ kind: "readyToExit" });
+
+    const shutdownAllRuntimes = vi.fn(async () => {});
+    Object.assign(testable, {
+      started: true,
+      shutdownAllRuntimes,
+      sessionStore: { close: vi.fn(async () => {}) },
+      bindingStore: { close: vi.fn(async () => {}) },
+    });
+    await bridge.stop();
+    expect(shutdownAllRuntimes).not.toHaveBeenCalled();
+    expect(first.drain).toHaveBeenCalledOnce();
+    expect(second.drain).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event === "notice:restarting")).toHaveLength(1);
+  });
+
   it("serializes admission per topic while allowing hydration to finish out of order", async () => {
     const bridge = makeBridge();
     let releaseB!: () => void;

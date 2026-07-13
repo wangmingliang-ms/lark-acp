@@ -34,12 +34,14 @@ import {
   ChatRuntime,
   formatControlFailure,
   validateSessionControls,
+  type DrainResult,
   type PendingMessage,
 } from "./chat-runtime.js";
 import { DEFAULT_INBOUND_DIR, sweepInboundDir } from "./inbound-store.js";
 import { hydratePrompt } from "./prompt-hydrator.js";
 import type { PermissionMode } from "../acp/humming-client.js";
 import type { AcknowledgementPort } from "../conversation/topic-conversation-session.js";
+import type { LifecycleIntent, LifecycleTransaction } from "../../bin/lifecycle-coordinator.js";
 import {
   AgentAuthError,
   probeAgentSessionCapabilities,
@@ -483,6 +485,20 @@ interface PendingPostTurnAgentSwitch {
   readonly queuedNotice?: WipNoticeCardRef | null;
 }
 
+export type BridgeLifecycleState =
+  | { readonly kind: "running" }
+  | {
+      readonly kind: "quiescing";
+      readonly intent: LifecycleIntent;
+      readonly transactionId: string;
+    }
+  | {
+      readonly kind: "readyToExit";
+      readonly intent: LifecycleIntent;
+      readonly transactionId: string;
+      readonly drains: readonly DrainResult[];
+    };
+
 const POST_TURN_AGENT_SWITCH_TASK_HINT =
   "[humming: this prompt is the task portion of an already-applied Agent handoff. Do not call Humming session-control commands again unless the user explicitly requests another Agent/Model/Mode/Permission/Config change.]";
 
@@ -534,6 +550,12 @@ export class LarkBridge {
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
   private readonly pendingPostTurnAgentSwitches = new Map<string, PendingPostTurnAgentSwitch>();
   private readonly promptIngress = new Map<string, Promise<void>>();
+  private lifecycleState: BridgeLifecycleState = { kind: "running" };
+  private lifecyclePromise: Promise<{
+    readonly accepted: true;
+    readonly transactionId: string;
+    readonly readyToExit: true;
+  }> | null = null;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private ws: LarkWsConnection | null = null;
   private controlServer: BridgeControlServer | null = null;
@@ -660,11 +682,16 @@ export class LarkBridge {
       this.settingsWatcher.close();
       this.settingsWatcher = null;
     }
-    // A process supervisor may deliver SIGTERM to child agents alongside the
-    // bridge. Mark runtimes aborted before awaiting any network notification.
-    await this.shutdownAllRuntimes("cancelled");
-    this.chats.clear();
-    await this.sendLifecycleStoppingNotice();
+    // If beginLifecycle already drained runtimes and emitted its terminal old-process
+    // notice, stop() only releases process resources. Compatibility signal/control
+    // shutdowns still use the legacy best-effort drain and notice path.
+    if (this.lifecycleState.kind === "running") {
+      await this.shutdownAllRuntimes("cancelled");
+      this.chats.clear();
+      await this.sendLifecycleStoppingNotice();
+    } else {
+      this.chats.clear();
+    }
     await this.controlServer?.stop();
     this.controlServer = null;
     await this.sessionStore.close();
@@ -677,10 +704,69 @@ export class LarkBridge {
     await this.sendLifecycleNotice(restart ? "restarted" : "started", restart?.deliveries);
   }
 
-  private async sendLifecycleStoppingNotice(): Promise<void> {
-    const restarting = this.hasRestartMarker();
+  private async sendLifecycleStoppingNotice(intent?: LifecycleIntent): Promise<void> {
+    const restarting = intent === "restart" || (intent === undefined && this.hasRestartMarker());
     const deliveries = await this.sendLifecycleNotice(restarting ? "restarting" : "stopping");
     if (restarting) this.persistRestartNoticeDeliveries(deliveries);
+  }
+
+  private beginLifecycle(transaction: LifecycleTransaction): Promise<{
+    readonly accepted: true;
+    readonly transactionId: string;
+    readonly readyToExit: true;
+  }> {
+    if (this.lifecycleState.kind !== "running") {
+      if (this.lifecycleState.transactionId !== transaction.id) {
+        return Promise.reject(
+          new Error(`lifecycle transaction ${this.lifecycleState.transactionId} is already active`),
+        );
+      }
+      return (
+        this.lifecyclePromise ??
+        Promise.resolve({
+          accepted: true,
+          transactionId: transaction.id,
+          readyToExit: true,
+        })
+      );
+    }
+
+    // Quiesce synchronously before the first await so ingress cannot pass the gate.
+    this.lifecycleState = {
+      kind: "quiescing",
+      intent: transaction.intent,
+      transactionId: transaction.id,
+    };
+    const runtimes = [...this.chats.values()];
+    this.lifecyclePromise = (async () => {
+      const settled = await Promise.allSettled(
+        runtimes.map((runtime) => runtime.drain(transaction.intent)),
+      );
+      const drains = settled.map((result, index): DrainResult => {
+        if (result.status === "fulfilled") return result.value;
+        const runtime = runtimes[index];
+        this.logger.warn(
+          { err: result.reason, chatId: runtime?.chatId, threadId: runtime?.threadId },
+          "runtime drain failed",
+        );
+        return {
+          intent: transaction.intent,
+          outcome: "escalated",
+          cancel: "rejected",
+          persisted: false,
+          agentClose: "timed-out",
+        };
+      });
+      await this.sendLifecycleStoppingNotice(transaction.intent);
+      this.lifecycleState = {
+        kind: "readyToExit",
+        intent: transaction.intent,
+        transactionId: transaction.id,
+        drains,
+      };
+      return { accepted: true, transactionId: transaction.id, readyToExit: true } as const;
+    })();
+    return this.lifecyclePromise;
   }
 
   private async sendLifecycleNotice(
@@ -746,9 +832,7 @@ export class LarkBridge {
       socketPath: this.controlSocketPath,
       logger: this.logger,
       handlers: {
-        beginLifecycle: async () => {
-          throw new Error("coordinated bridge lifecycle is not available yet");
-        },
+        beginLifecycle: (transaction) => this.beginLifecycle(transaction),
         shutdown: async () => {
           if (!this.onShutdownRequested) throw new Error("bridge shutdown is unavailable");
           this.onShutdownRequested();
@@ -1264,6 +1348,7 @@ export class LarkBridge {
     threadId: string | null,
     messageId: string,
   ): Promise<void> {
+    if (this.lifecycleState.kind !== "running") return;
     const key = runtimeKey(chatId, threadId);
     const pending = this.pendingPostTurnAgentSwitches.get(key);
     const previous = await this.sessionStore.getLatest(chatId, threadId);
@@ -1387,6 +1472,11 @@ export class LarkBridge {
     // behaviour). A populated value scopes this message to its own topic.
     const threadId = message.thread_id ?? null;
 
+    if (this.lifecycleState.kind !== "running") {
+      void this.rejectQuiescingIngress(messageId);
+      return;
+    }
+
     this.logger.info(
       { userId, chatId, threadId, messageType: message.message_type },
       "message received",
@@ -1407,6 +1497,11 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
   ): Promise<void> {
+    if (this.lifecycleState.kind !== "running") {
+      await this.rejectQuiescingIngress(messageId);
+      return;
+    }
+
     const { message } = event;
     const isGroup = message.chat_type === CHAT_TYPE_GROUP;
     const commandContext: CommandContext = { isDirectMessage: !isGroup };
@@ -2086,6 +2181,9 @@ export class LarkBridge {
     messageId: string,
     segments: PromptSegment[],
   ): Promise<void> {
+    if (this.lifecycleState.kind !== "running") {
+      return this.rejectQuiescingIngress(messageId);
+    }
     const key = runtimeKey(chatId, threadId);
     const prior = this.promptIngress.get(key) ?? Promise.resolve();
     const start = prior
@@ -2128,7 +2226,15 @@ export class LarkBridge {
     segments: PromptSegment[],
     admit: () => void,
   ): Promise<void> {
+    if (this.lifecycleState.kind !== "running") {
+      await this.rejectQuiescingIngress(messageId);
+      return;
+    }
     const binding = await this.resolveBinding(chatId);
+    if (this.lifecycleState.kind !== "running") {
+      await this.rejectQuiescingIngress(messageId);
+      return;
+    }
     if (!binding) {
       admit();
       this.logger.info({ chatId }, "message in unbound chat — reception disabled, prompting /bind");
@@ -2145,6 +2251,10 @@ export class LarkBridge {
 
     const isGroup = event.message.chat_type === CHAT_TYPE_GROUP;
     const runtime = await this.acquireRuntime(chatId, threadId, binding);
+    if (this.lifecycleState.kind !== "running") {
+      await this.rejectQuiescingIngress(messageId);
+      return;
+    }
     const response = runtime.acceptResponse({ messageId, content: segments, profile: null });
     admit();
     const reaction = this.http.addMessageReaction(messageId, "OnIt").catch((err) => {
@@ -2205,6 +2315,18 @@ export class LarkBridge {
         .replyText(messageId, summary)
         .catch((sendErr) => this.logger.warn({ err: sendErr }, "bootstrap error reply failed"));
     }
+  }
+
+  private async rejectQuiescingIngress(messageId: string): Promise<void> {
+    await this.presenter
+      .replyNoticeCard(messageId, {
+        title: "⏸️ Humming 正在停止",
+        body: "这条消息未排队。请等待 Humming 完成停止或重启后重新发送。",
+        template: "orange",
+      })
+      .catch((err) =>
+        this.logger.warn({ err, messageId }, "quiescing ingress rejection notice failed"),
+      );
   }
 
   /**
@@ -2348,6 +2470,9 @@ export class LarkBridge {
     threadId: string | null,
     binding: EffectiveBinding,
   ): Promise<ChatRuntime> {
+    if (this.lifecycleState.kind !== "running") {
+      throw new Error("bridge lifecycle is quiescing; runtime acquisition rejected");
+    }
     const key = runtimeKey(chatId, threadId);
     const existing = this.chats.get(key);
     if (existing) return existing;
@@ -2359,6 +2484,9 @@ export class LarkBridge {
       threadId,
       binding,
     );
+    if (this.lifecycleState.kind !== "running") {
+      throw new Error("bridge lifecycle is quiescing; runtime acquisition rejected");
+    }
 
     if (inherited) {
       this.logger.info(
@@ -2763,6 +2891,10 @@ export class LarkBridge {
   }
 
   private handleCardAction(event: Lark.CardActionEvent): void {
+    if (this.lifecycleState.kind !== "running") {
+      this.logger.info("card action ignored while bridge is quiescing");
+      return;
+    }
     const value = event.action.value as CardActionPayload | undefined;
     if (!value || typeof value !== "object") return;
     if (Object.hasOwn(value, "v")) {
