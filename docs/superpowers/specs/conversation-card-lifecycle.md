@@ -714,7 +714,206 @@ Retention must be bounded in steady state. A normal Topic should hold approximat
 
 Restart remains non-durable as specified in Section 10. The Reconciler need not replay arbitrary historical Cards. It reconstructs desired work only from the retained current snapshot and delivery records available in the running process. No design may require a full in-memory Card history for correctness.
 
-## 13. Required invariants
+## 13. Subagent activity panels
+
+This section defines the user-visible Conversation Card semantics for Agent implementations that expose one Primary Agent plus one or more Subagents. It defines presentation and Card-rotation requirements only. The transport mechanism by which Humming obtains reliable source identity is outside this section.
+
+### 13.1 Primary is the main line
+
+The Primary Agent's message stream is always the main Conversation Card timeline. Subagent activity is a subordinate branch rendered inside the same Card.
+
+The body order of an active Card is:
+
+```text
+Primary Agent content
+
+Subagent activity panels, if any
+```
+
+- Subagent activity must never be appended to the Primary timeline.
+- A Subagent is rendered as a collapsible panel below Primary content, not as an independent Conversation Card.
+- The presence of Subagents does not change Response execution ownership, tail identity, Title, Metadata, or Cancel rules.
+- Subagent panels are part of the Conversation Card payload and count toward that Card's size and structural budgets.
+
+### 13.2 Response-scoped Subagent Runs and Card-scoped segments
+
+A Subagent execution is a **Subagent Run** owned by the Response, not by an individual Card. Its visible output is divided into ordered **Subagent Segments**, each owned by exactly one Card.
+
+```text
+Response
+├── Primary stream
+├── Subagent Run A
+│   ├── Segment A1 -> Card 1
+│   └── Segment A2 -> Card 2
+├── Subagent Run B
+│   └── Segment B1 -> Card 1
+└── Card[]
+```
+
+The canonical distinction is:
+
+```text
+Subagent Run     = execution identity and lifecycle across Card rotation
+Subagent Segment = one Card-local interval of visible output
+```
+
+Required identity and state include:
+
+```ts
+type SubagentRun = {
+  id: SubagentRunId;
+  name: string;
+  task: string | null;
+  model: string | null;
+  status: "running" | "completed" | "failed" | "cancelled";
+  segments: SubagentSegment[];
+};
+
+type SubagentSegment = {
+  cardId: ResponseCardId;
+  status: "running" | "continued" | "completed" | "failed" | "cancelled";
+  entries: SubagentTimelineEntry[];
+};
+```
+
+The exact storage representation may differ, but it must preserve these semantics.
+
+### 13.3 Source isolation
+
+Every renderable Agent update must have a reliable source identity before entering the conversation Domain:
+
+```text
+Primary update   -> Primary stream
+Subagent A update -> Subagent Run A current segment
+Subagent B update -> Subagent Run B current segment
+```
+
+The following invariants are mandatory:
+
+1. Updates from different sources are never coalesced into one text or thought entry.
+2. Updates from a Subagent never enter the Primary timeline.
+3. Updates from one Subagent never enter another Subagent's panel.
+4. Ordering is strict within one source. Different sources may progress concurrently.
+5. Humming must not infer source identity from text, timing, model name, or adjacency.
+6. If reliable source identity is unavailable, Humming must not present mixed Subagent output as Primary content.
+
+This specification does not select the ACP transport design. Standard ACP child/forked sessions, a proxy/conductor, or an Agent-specific compatibility patch may satisfy the requirement if they preserve reliable source identity and lifecycle boundaries.
+
+### 13.4 Panel projection
+
+Each Subagent Run with a segment on the current Card is projected as one collapsible panel. Its title communicates identity and Card-local lifecycle:
+
+```text
+Explore A — Running
+Explore A — Continued
+Explore A — Completed
+Explore A — Failed
+Explore A — Cancelled
+```
+
+- `Running` is legal only on the current tail Card.
+- `Continued`, `Completed`, `Failed`, and `Cancelled` are immutable historical states.
+- A panel may contain only entries produced during its own Card-local segment.
+- Collapsing a panel changes visual height only; it does not reduce payload size and therefore does not bypass Card budgets.
+- Primary content and Subagent panel content remain separate projection regions even when they contain the same entry kinds.
+
+### 13.5 Rotation cuts every active display stream
+
+Normal Conversation Card rotation remains a Response-level operation. One atomic rotation cuts the Primary UI stream and every currently running Subagent UI stream at the same Card boundary.
+
+Suppose Card 1 contains Primary Segment 1, running Subagent A, and completed Subagent B. Rotation produces:
+
+```text
+Card 1 (intermediate, sealed)
+├── Primary Segment 1
+├── Explore A Segment 1 — Continued
+└── Explore B Segment 1 — Completed
+
+Card 2 (tail, active)
+├── Primary Segment 2 — initially empty
+└── Explore A Segment 2 — Running, initially empty
+```
+
+The transition is semantically atomic:
+
+```text
+1. Freeze the old Primary segment.
+2. Freeze every running Subagent segment as Continued.
+3. Create the successor Card.
+4. Create a new empty Primary segment on the successor.
+5. Create a new empty Running segment for every still-running Subagent.
+6. Transfer all future source-local writes to the successor segments.
+7. Make the old Card intermediate and the successor the unique tail.
+```
+
+Most importantly:
+
+> Card rotation does not stop or restart a Subagent Run, but it does cut its visible output segment. Historical Subagent content is never copied into the successor Card.
+
+After rotation, only newly arriving output is written to the new panel. A completed, failed, or cancelled Subagent is not carried into later Cards.
+
+### 13.6 Rotation and completion ordering
+
+Subagent completion and Card rotation use the Domain event order, not remote Card request completion order.
+
+If completion commits first:
+
+```text
+SubagentCompleted(A)
+RotateCard
+```
+
+A is frozen as `Completed` on the old Card and receives no segment on the successor.
+
+If rotation commits first:
+
+```text
+RotateCard
+SubagentCompleted(A)
+```
+
+A's old segment is frozen as `Continued`; its new segment on the successor becomes `Completed` and receives any post-rotation output that preceded completion.
+
+A late transport completion must not move output across this committed boundary or reopen an intermediate Card.
+
+### 13.7 Card budget and rotation pressure
+
+Subagent panels participate in the same Card rotation decision as Primary content. Budgeting must account for the final rendered Card, including:
+
+- Primary Markdown and tool elements;
+- Subagent panel titles and panel bodies;
+- panel containers and separators;
+- Title, Metadata, and actions;
+- serialized and escaped Card structure;
+- platform element-count limits where known.
+
+A budget based only on Primary text bytes is insufficient. A collapsed panel still contributes its complete payload.
+
+When accumulated Primary and Subagent content reaches the rotation threshold, Humming rotates the whole Card once and applies Section 13.5. It must not independently rotate one panel while leaving the Primary segment on the old Card, and it must not copy old panel content into the successor.
+
+### 13.8 Patch failure during rotation
+
+The semantic rotation completes even if Feishu rejects the old Card's final patch:
+
+- the old Card remains intermediate and has no valid action authority;
+- old running panels are semantically `Continued` even if the external Card still displays stale `Running` text;
+- the successor Card is the only destination for future Primary and Subagent updates;
+- no update may be routed back to the rejected old Card;
+- the existing transport diagnostic rules in Section 5.3 apply.
+
+### 13.9 Scope boundary
+
+This section intentionally does not define:
+
+- how an Agent implementation exposes Subagent identity over ACP;
+- whether an Agent uses ACP forked sessions, proxy chains, internal child Agents, or another mechanism;
+- how to patch a specific Agent implementation that currently flattens Subagent output;
+- full Subagent transcripts outside the bounded Card presentation;
+- Subagent execution that intentionally outlives the parent Response.
+
+Those concerns require separate protocol and runtime designs. Any future design must preserve the UI and Domain invariants in this section.
+
+## 14. Required invariants
 
 These invariants are mandatory in production and tests:
 
@@ -744,37 +943,49 @@ I22. An effect for an older revision never settles a newer desired revision; rec
 I23. A failed old-Card patch marks the current legal tail dirty and its warning follows that tail across later rotations until successfully delivered.
 I24. A Card is evicted only after it is semantically immutable, delivery-finalized (settled or retry-exhausted), authority-free, and free of pending diagnostics/retries.
 I25. Historical Card retention is bounded; stale action rejection does not require retaining all historical Card objects or tokens.
+I26. Primary and Subagent updates have reliable source identity before entering the Domain and are never coalesced across sources.
+I27. Every running Subagent has exactly one writable Segment, and that Segment belongs to the current Response tail.
+I28. Rotation freezes each running Subagent's old Segment as continued and creates one empty writable Segment on the successor Card.
+I29. Historical Primary or Subagent Segment content is never copied into a successor Card.
+I30. Completed, failed, and cancelled Subagents are not carried into later Cards.
+I31. Subagent panels count toward the final rendered Card budget and cannot rotate independently of the Primary Card.
 ```
 
-## 14. Conformance matrix
+## 15. Conformance matrix
 
-| Situation                                    | Previous Response tail                                                             | New Response tail                                                   | Cancel owner                            |
-| -------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------- |
-| Idle Request accepted                        | none                                                                               | received/preparing                                                  | none                                    |
-| Response active                              | active Title + Metadata                                                            | none                                                                | active Response                         |
-| New Request arrives                          | A active Title + Metadata                                                          | B interrupting Title + Metadata                                     | A only                                  |
-| C arrives before A is sealed                 | B becomes merged terminal; batch becomes [B,C]                                     | C interrupting as newest carrier                                    | A only                                  |
-| More messages arrive before A is sealed      | each former carrier becomes merged terminal                                        | newest Response carries the growing ordered batch                   | A only                                  |
-| A interruption confirmed                     | A interrupted Title + Metadata                                                     | B preparing Title + Metadata                                        | none                                    |
-| B starts                                     | A interrupted Title + Metadata                                                     | B active Title + Metadata                                           | B only                                  |
-| Same Response rotates                        | old tail becomes plain intermediate; running tools become "continues in next Card" | successor tail Title + Metadata; later tool result appears here     | successor only if owner in progress     |
-| Permission requested                         | old tail becomes plain intermediate; Permission Card shows choices                 | continuation tail waiting + Metadata                                | continuation tail                       |
-| Consecutive Permission requested             | prior continuation becomes intermediate; next Permission Card shows choices        | next continuation tail waiting + Metadata                           | next continuation tail                  |
-| Permission Card send fails                   | old tail remains intermediate; no user decision is fabricated                      | continuation terminal(failed) Title + Metadata                      | none                                    |
-| Response ends during Permission              | Permission Card expires; prior Cards unchanged                                     | continuation terminal Title + Metadata                              | none                                    |
-| New Request during Permission                | old Permission Card expires immediately; A continuation remains current until stop | B interrupting without Cancel                                       | A until stopped                         |
-| Feishu rejects old-tail seal patch           | domain treats old tail as intermediate; stale visual button may remain inert       | current tail is marked dirty and shows warning after reconciliation | current valid owner tail                |
-| State changes while Card effect is in flight | older effect may finish but cannot settle the newer desired revision               | Reconciler re-projects latest state and continues                   | determined only by current Domain state |
-| Retiring Card final projection settles       | Card is immutable and may be evicted from hot state                                | current tail remains retained only while live/terminalizing         | unchanged                               |
-| Response completes                           | final tail complete Title + Metadata                                               | none                                                                | none                                    |
-| Response fails                               | final tail failed Title + Metadata                                                 | none                                                                | none                                    |
-| Response is cancelled                        | final tail cancelled Title + Metadata                                              | none                                                                | none                                    |
-| Card Cancel on A while [B,C] waits           | A cancelled Title + Metadata                                                       | carrier C continues preparing/active                                | C once active                           |
-| `/cancel` with unfinished work               | owner and waiting carrier tails become cancelled; merged tails stay merged         | no successor starts                                                 | none                                    |
-| Bridge restarts                              | final tail interrupted Title + Metadata                                            | optional non-actionable notice only                                 | none                                    |
-| Late callback arrives                        | no change                                                                          | no new Card                                                         | none                                    |
+| Situation                                    | Previous Response tail                                                             | New Response tail                                                     | Cancel owner                            |
+| -------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------- |
+| Idle Request accepted                        | none                                                                               | received/preparing                                                    | none                                    |
+| Response active                              | active Title + Metadata                                                            | none                                                                  | active Response                         |
+| New Request arrives                          | A active Title + Metadata                                                          | B interrupting Title + Metadata                                       | A only                                  |
+| C arrives before A is sealed                 | B becomes merged terminal; batch becomes [B,C]                                     | C interrupting as newest carrier                                      | A only                                  |
+| More messages arrive before A is sealed      | each former carrier becomes merged terminal                                        | newest Response carries the growing ordered batch                     | A only                                  |
+| A interruption confirmed                     | A interrupted Title + Metadata                                                     | B preparing Title + Metadata                                          | none                                    |
+| B starts                                     | A interrupted Title + Metadata                                                     | B active Title + Metadata                                             | B only                                  |
+| Same Response rotates                        | old tail becomes plain intermediate; running tools become "continues in next Card" | successor tail Title + Metadata; later tool result appears here       | successor only if owner in progress     |
+| Response rotates with running Subagent A     | A's existing panel is frozen as Continued with its existing Card-local content     | a new empty A panel is Running and receives only post-rotation output | successor only if owner in progress     |
+| Response rotates after Subagent A completes  | A's panel is frozen as Completed with its existing Card-local content              | A is absent; no historical A content is copied                        | successor only if owner in progress     |
+| A completes after rotation                   | A's prior panel remains Continued and immutable                                    | A's current panel becomes Completed                                   | unchanged                               |
+| Primary, A, and B emit concurrently          | each source remains in its own Primary/Panel Segment                               | no text or thought entry is coalesced across sources                  | unchanged                               |
+| Subagent output causes Card budget rotation  | all active display streams are cut at one atomic Card boundary                     | Primary and running Subagent panels start empty successor Segments    | successor only if owner in progress     |
+| Old Card's Continued patch is rejected       | semantic panel remains Continued; stale external Running text may remain           | current panel is the only writable destination                        | current valid owner tail                |
+| Permission requested                         | old tail becomes plain intermediate; Permission Card shows choices                 | continuation tail waiting + Metadata                                  | continuation tail                       |
+| Consecutive Permission requested             | prior continuation becomes intermediate; next Permission Card shows choices        | next continuation tail waiting + Metadata                             | next continuation tail                  |
+| Permission Card send fails                   | old tail remains intermediate; no user decision is fabricated                      | continuation terminal(failed) Title + Metadata                        | none                                    |
+| Response ends during Permission              | Permission Card expires; prior Cards unchanged                                     | continuation terminal Title + Metadata                                | none                                    |
+| New Request during Permission                | old Permission Card expires immediately; A continuation remains current until stop | B interrupting without Cancel                                         | A until stopped                         |
+| Feishu rejects old-tail seal patch           | domain treats old tail as intermediate; stale visual button may remain inert       | current tail is marked dirty and shows warning after reconciliation   | current valid owner tail                |
+| State changes while Card effect is in flight | older effect may finish but cannot settle the newer desired revision               | Reconciler re-projects latest state and continues                     | determined only by current Domain state |
+| Retiring Card final projection settles       | Card is immutable and may be evicted from hot state                                | current tail remains retained only while live/terminalizing           | unchanged                               |
+| Response completes                           | final tail complete Title + Metadata                                               | none                                                                  | none                                    |
+| Response fails                               | final tail failed Title + Metadata                                                 | none                                                                  | none                                    |
+| Response is cancelled                        | final tail cancelled Title + Metadata                                              | none                                                                  | none                                    |
+| Card Cancel on A while [B,C] waits           | A cancelled Title + Metadata                                                       | carrier C continues preparing/active                                  | C once active                           |
+| `/cancel` with unfinished work               | owner and waiting carrier tails become cancelled; merged tails stay merged         | no successor starts                                                   | none                                    |
+| Bridge restarts                              | final tail interrupted Title + Metadata                                            | optional non-actionable notice only                                   | none                                    |
+| Late callback arrives                        | no change                                                                          | no new Card                                                           | none                                    |
 
-## 15. Change-control rule
+## 16. Change-control rule
 
 This specification is changed before implementation.
 
