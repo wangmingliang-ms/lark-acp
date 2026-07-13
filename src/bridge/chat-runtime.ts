@@ -566,9 +566,13 @@ export class ChatRuntime {
     let drainState = state;
     if (drainState === null && bootstrap !== null) {
       try {
-        drainState = await bootstrap;
+        drainState = await withTimeout(bootstrap, SHUTDOWN_FINALIZE_TIMEOUT_MS);
       } catch (err) {
-        this.logger.info({ err, intent }, "bootstrap ended while runtime was draining");
+        escalated = true;
+        this.logger.info(
+          { err, intent },
+          "bootstrap ended or timed out while runtime was draining",
+        );
       }
     }
 
@@ -608,30 +612,50 @@ export class ChatRuntime {
 
     const persisted = await this.persistSession(drainState.agent.sessionId);
     const closeSession = drainState.agent.connection.unstable_closeSession;
-    if (
+    const supportsClose =
       drainState.agent.capabilities["sessionCapabilities"] !== null &&
       typeof drainState.agent.capabilities["sessionCapabilities"] === "object" &&
-      (drainState.agent.capabilities["sessionCapabilities"] as { close?: unknown }).close &&
-      closeSession !== undefined
-    ) {
+      Boolean(
+        (drainState.agent.capabilities["sessionCapabilities"] as { close?: unknown }).close,
+      ) &&
+      closeSession !== undefined;
+    let processExited = false;
+    if (supportsClose) {
       try {
         await withTimeout(
           closeSession.call(drainState.agent.connection, { sessionId: drainState.agent.sessionId }),
           SHUTDOWN_FINALIZE_TIMEOUT_MS,
         );
+        await withTimeout(
+          waitForProcessExit(drainState.agent.process),
+          SHUTDOWN_FINALIZE_TIMEOUT_MS,
+        );
+        processExited = true;
       } catch (err) {
         escalated = true;
-        this.logger.info({ err, intent }, "expected drain session close did not settle cleanly");
+        this.logger.info({ err, intent }, "expected drain session close did not stop the Agent");
       }
     }
     this.state = null;
-    killAgent(drainState.agent.process);
+    if (!processExited) {
+      killAgent(drainState.agent.process);
+      try {
+        await withTimeout(
+          waitForProcessExit(drainState.agent.process),
+          SHUTDOWN_FINALIZE_TIMEOUT_MS,
+        );
+        processExited = true;
+      } catch (err) {
+        escalated = true;
+        this.logger.info({ err, intent }, "Agent did not exit after drain termination fallback");
+      }
+    }
     return {
       intent,
       outcome: escalated ? "escalated" : "drained",
       cancel,
       persisted,
-      agentClose: promptTimedOut ? "timed-out" : "closed",
+      agentClose: processExited ? "closed" : "timed-out",
     };
   }
 
@@ -1652,6 +1676,13 @@ function isTimeoutError(error: unknown): boolean {
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
   while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+function waitForProcessExit(process: AgentProcess["process"]): Promise<void> {
+  if (process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    process.once("exit", () => resolve());
+  });
 }
 
 function sessionMetaFromSnapshot(snapshot: SessionCapabilitiesSnapshot): SessionCardMeta {

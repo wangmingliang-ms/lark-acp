@@ -511,6 +511,13 @@ function makeFakeAgent(): FakeAgentHandle {
     killed: false,
     exitCode: null as number | null,
     signalCode: null as NodeJS.Signals | null,
+    once: (
+      event: string,
+      handler: (code: number | null, signal: NodeJS.Signals | null) => void,
+    ) => {
+      if (event === "exit") exitHandler = handler;
+      return proc;
+    },
     on: (event: string, handler: (code: number | null, signal: NodeJS.Signals | null) => void) => {
       if (event === "exit") exitHandler = handler;
       return proc;
@@ -1142,6 +1149,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     };
     killAgentMock.mockImplementation(() => {
       order.push("kill");
+      fake.exitProcess(null, "SIGTERM");
     });
     spawnAgentMock.mockResolvedValue(fake.agent);
     const runtime = new ChatRuntime({
@@ -1192,6 +1200,9 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     });
     await vi.waitFor(() => expect(spawnAgentMock).toHaveBeenCalledOnce());
 
+    killAgentMock.mockImplementation(() => {
+      fake.exitProcess(null, "SIGTERM");
+    });
     const drain = runtime.drain("restart");
     let settled = false;
     void drain.then(() => {

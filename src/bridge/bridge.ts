@@ -551,6 +551,7 @@ export class LarkBridge {
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
   private readonly pendingPostTurnAgentSwitches = new Map<string, PendingPostTurnAgentSwitch>();
   private readonly promptIngress = new Map<string, Promise<void>>();
+  private readonly runtimeTurnCompletions = new Set<Promise<void>>();
   private lifecycleState: BridgeLifecycleState = { kind: "running" };
   private lifecyclePromise: Promise<{
     readonly accepted: true;
@@ -747,7 +748,9 @@ export class LarkBridge {
       transactionId: transaction.id,
     };
     const runtimes = [...this.chats.values()];
+    const turnCompletions = [...this.runtimeTurnCompletions];
     this.lifecyclePromise = (async () => {
+      await Promise.allSettled(turnCompletions);
       const settled = await Promise.allSettled(
         runtimes.map((runtime) => runtime.drain(transaction.intent)),
       );
@@ -1371,10 +1374,14 @@ export class LarkBridge {
       pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, targetProfile!);
     const pendingTask = targetProfile?.task ?? previous?.pendingTask;
     try {
+      const inherited = pending?.record.controls
+        ? await this.findRecentAgentSessionProfile(pending.record)
+        : null;
+      if (this.lifecycleState.kind !== "running") return;
       await this.applyAgentSwitchNow(
         targetRecord,
         previous,
-        pending?.record.controls ? await this.findRecentAgentSessionProfile(pending.record) : null,
+        inherited,
         pending?.noticeMessageId ?? messageId,
         pendingTask,
         targetProfile ? "pending-target-profile" : "agent-switch",
@@ -2546,7 +2553,12 @@ export class LarkBridge {
       ...(binding.fallbackFrom ? { ignoreStoredSession: true } : {}),
       ...(effective.inheritedControls ? { inheritedControls: effective.inheritedControls } : {}),
       ...(usesGlobalDefaults ? { persistInheritedControls: true } : {}),
-      onTurnComplete: (messageId) => this.handleRuntimeTurnComplete(chatId, threadId, messageId),
+      onTurnComplete: (messageId) => {
+        const completion = this.handleRuntimeTurnComplete(chatId, threadId, messageId);
+        this.runtimeTurnCompletions.add(completion);
+        void completion.finally(() => this.runtimeTurnCompletions.delete(completion));
+        return completion;
+      },
       presenter: this.presenter,
       acknowledgement: this.acknowledgement,
       sessionStore: this.sessionStore,
