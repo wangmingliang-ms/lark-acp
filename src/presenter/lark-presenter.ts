@@ -316,8 +316,13 @@ function assertNeverConversationEntry(entry: never): never {
 
 type SummaryEntry = ConversationTimelineEntry;
 
-function statusSummary(status: AgentStatus, entries: readonly SummaryEntry[]): string {
-  const activityDetail = currentActivityDetail(status, entries);
+function statusSummary(
+  status: AgentStatus,
+  entries: readonly SummaryEntry[],
+  activityTitle?: string,
+): string {
+  const activityDetail =
+    status === "calling_tool" ? activityTitle : currentActivityDetail(status, entries);
   const detail = activityDetail ? stripMarkdownForSummary(activityDetail) : "";
   const summaryDetail = detail || STATUS_SUMMARY_DETAIL[status];
   const icon = STATUS_ICON[status];
@@ -328,23 +333,6 @@ function currentActivityDetail(
   status: AgentStatus,
   entries: readonly SummaryEntry[],
 ): string | undefined {
-  if (status === "calling_tool") {
-    const tool = entries
-      .slice()
-      .reverse()
-      .find(
-        (entry) =>
-          entry.kind === "tool" && (entry.status === "pending" || entry.status === "in_progress"),
-      );
-    return tool?.kind === "tool" ? `${tool.toolKind}: ${tool.title}` : undefined;
-  }
-  if (status === "thinking") {
-    const thought = entries
-      .slice()
-      .reverse()
-      .find((entry) => entry.kind === "thought");
-    return thought?.kind === "thought" ? thought.text : undefined;
-  }
   if (status === "responding") {
     const text = entries
       .slice()
@@ -517,7 +505,11 @@ function semanticSummary(
     case "orphaned":
       return header?.content ?? "对话片段";
     case "active":
-      return statusSummary(view.header, view.entries);
+      return statusSummary(
+        view.header,
+        view.entries,
+        view.header === "calling_tool" ? view.activityTitle : undefined,
+      );
     case "terminal":
       return header?.content ?? semanticTerminalHeader(view.header).content;
     default:
@@ -722,8 +714,17 @@ function isConversationCardView(value: unknown): value is ConversationCardView {
       );
     case "active":
       return (
-        hasOnlyKeys(value, ["kind", "header", "entries", "profile", "cancelAction", "route"]) &&
+        hasOnlyKeys(value, [
+          "kind",
+          "header",
+          "activityTitle",
+          "entries",
+          "profile",
+          "cancelAction",
+          "route",
+        ]) &&
         ["thinking", "waiting", "calling_tool", "responding"].includes(value.header as string) &&
+        (value.activityTitle === undefined || typeof value.activityTitle === "string") &&
         hasEntries(value) &&
         isProfile(value.profile) &&
         (value.cancelAction === undefined ||

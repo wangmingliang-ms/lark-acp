@@ -40,7 +40,7 @@ function header(
       return "preparing";
     case "active":
     case "awaiting_permission":
-      return (state.phase === "awaiting_permission" ? "waiting" : state.activity) as ActiveHeader;
+      return state.phase === "awaiting_permission" ? "waiting" : state.activity.kind;
   }
 }
 
@@ -157,6 +157,12 @@ export class ConversationCardViewMapper {
         return {
           kind: "active",
           header: header(state) as ActiveHeader,
+          ...(state.activity.kind === "calling_tool" &&
+          state.activity.title !== null &&
+          state.activity.title.trim() !== "" &&
+          state.activity.title.trim() !== "Tool"
+            ? { activityTitle: state.activity.title }
+            : {}),
           entries: timeline,
           profile: projection.metadata,
           ...(cancel === null

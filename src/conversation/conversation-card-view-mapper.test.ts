@@ -67,6 +67,36 @@ describe("ConversationCardViewMapper", () => {
     });
   });
 
+  it("uses only the explicit current Tool activity after rotation and completion", () => {
+    const conversation = topic();
+    conversation.prepare(responseId);
+    conversation.activate(responseId, action1);
+    conversation.append(responseId, {
+      kind: "tool",
+      toolCallId: "tool-1",
+      title: "Execute",
+      status: "in_progress",
+    });
+    conversation.startToolActivity(responseId, "tool-1", "Execute");
+    conversation.rotateTail(responseId, card2, "content_rotation", action2);
+
+    expect(view(conversation, card2)).toMatchObject({
+      kind: "active",
+      header: "calling_tool",
+      activityTitle: "Execute",
+      entries: [],
+    });
+
+    conversation.finishToolActivity(responseId, "tool-1");
+
+    expect(view(conversation, card2)).toMatchObject({
+      kind: "active",
+      header: "thinking",
+      entries: [],
+    });
+    expect(view(conversation, card2)).not.toHaveProperty("activityTitle");
+  });
+
   it("maps rotated history without title, metadata, or action", () => {
     const conversation = topic();
     conversation.prepare(responseId);

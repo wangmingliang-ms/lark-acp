@@ -103,6 +103,7 @@ export type ConversationCardView =
   | {
       readonly kind: "active";
       readonly header: ActiveHeader;
+      readonly activityTitle?: string;
       readonly entries: readonly ActiveTimelineEntry[];
       readonly profile: SessionCardMeta | null;
       readonly cancelAction?: CancelAction;

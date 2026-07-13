@@ -19,7 +19,15 @@ export type ResponsePhase =
 
 export type TerminalOutcome = "complete" | "failed" | "interrupted" | "cancelled" | "merged";
 
-export type ResponseActivity = "thinking" | "waiting" | "calling_tool" | "responding";
+export type ResponseActivity =
+  | { readonly kind: "thinking" }
+  | { readonly kind: "waiting" }
+  | {
+      readonly kind: "calling_tool";
+      readonly toolCallId: string;
+      readonly title: string | null;
+    }
+  | { readonly kind: "responding" };
 
 export type ResponseState =
   | {
@@ -238,7 +246,7 @@ class ResponseLifecycle {
     phase: "received" | "interrupting",
   ) {
     this.profileValue = profile;
-    this.stateValue = { kind: "in_progress", phase, activity: "thinking" };
+    this.stateValue = { kind: "in_progress", phase, activity: { kind: "thinking" } };
     this.responseCards = [new ResponseCard(initialCardId, "initial")];
   }
 
@@ -252,7 +260,7 @@ class ResponseLifecycle {
       first.id,
       "received",
     );
-    response.stateValue = { ...snapshot.state };
+    response.stateValue = cloneUnknown(snapshot.state);
     response.responseCards.splice(
       0,
       response.responseCards.length,
@@ -276,7 +284,7 @@ class ResponseLifecycle {
 
   transition(phase: ResponsePhase): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response is absorbing");
-    this.stateValue = { kind: "in_progress", phase, activity: "thinking" };
+    this.stateValue = { kind: "in_progress", phase, activity: { kind: "thinking" } };
   }
 
   setProfile(profile: SessionCardMeta | null): void {
@@ -286,7 +294,7 @@ class ResponseLifecycle {
 
   setActivity(activity: ResponseActivity): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects activity");
-    this.stateValue = { ...this.stateValue, activity };
+    this.stateValue = { ...this.stateValue, activity: cloneUnknown(activity) };
   }
 
   seal(outcome: TerminalOutcome): void {
@@ -567,6 +575,37 @@ export class TopicConversation {
   setActivity(responseId: ResponseId, activity: ResponseActivity): void {
     if (this.executionOwner !== responseId) throw new Error("only execution owner has activity");
     this.response(responseId).setActivity(activity);
+    this.assertInvariants();
+  }
+
+  startToolActivity(responseId: ResponseId, toolCallId: string, title: string | null): void {
+    this.setActivity(responseId, { kind: "calling_tool", toolCallId, title });
+  }
+
+  updateToolActivity(responseId: ResponseId, toolCallId: string, title?: string): void {
+    const response = this.response(responseId);
+    const state = response.state;
+    if (state.kind !== "in_progress") return;
+    if (state.activity.kind === "calling_tool") {
+      if (state.activity.toolCallId !== toolCallId) return;
+      if (title === undefined) return;
+      response.setActivity({ kind: "calling_tool", toolCallId, title });
+    } else {
+      response.setActivity({ kind: "calling_tool", toolCallId, title: title ?? null });
+    }
+    this.assertInvariants();
+  }
+
+  finishToolActivity(responseId: ResponseId, toolCallId: string): void {
+    const response = this.response(responseId);
+    const state = response.state;
+    if (
+      state.kind !== "in_progress" ||
+      state.activity.kind !== "calling_tool" ||
+      state.activity.toolCallId !== toolCallId
+    )
+      return;
+    response.setActivity({ kind: "thinking" });
     this.assertInvariants();
   }
 

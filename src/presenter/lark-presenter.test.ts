@@ -111,6 +111,47 @@ describe("LarkCardPresenter card summary", () => {
     }
   });
 
+  it("renders thinking as the current activity instead of exposing Thought text", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "thinking",
+      entries: [{ kind: "thought", text: "内部推理细节" }],
+      profile: null,
+      route: { c: "chat", th: "thread" },
+    });
+
+    expect(cards[0]?.config?.summary?.content).toBe("💭 Agent 正在思考");
+    expect(cards[0]?.config?.summary?.content).not.toContain("内部推理细节");
+  });
+
+  it("renders the current Tool Summary without a synthetic tool prefix", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "calling_tool",
+      activityTitle: "Viewing AccountActions.java",
+      entries: [
+        {
+          kind: "tool",
+          toolCallId: "tool-1",
+          title: "Viewing AccountActions.java",
+          toolKind: "tool",
+          status: "in_progress",
+        },
+      ],
+      profile: null,
+      route: { c: "chat", th: "thread" },
+    });
+
+    expect(cards[0]?.config?.summary?.content).toBe("🔄 Viewing AccountActions.java");
+    expect(cards[0]?.config?.summary?.content).not.toContain("tool:");
+  });
+
   it("labels a newly received semantic Response as received, not queued behind prior work", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);

@@ -120,17 +120,22 @@ export class TopicConversationSession {
       route: options.route,
       showCancelButton: options.showCancelButton,
       enabled: options.presentationEnabled ?? true,
-      onCardVisible: (responseId) => this.removeAcknowledgement(responseId),
       onSettledImmutable: (responseId, cardId, kind) => {
         if (kind === "intermediate") {
           this.store.transactionIfChanged((aggregate) =>
             aggregate.evictSettledIntermediate(responseId, cardId),
           );
         } else {
+          this.removeAcknowledgement(responseId);
           this.settledTerminalResponses.add(responseId);
           this.reclaimOldSettledTerminals();
         }
       },
+    });
+    let previous = this.store.snapshot;
+    this.store.subscribe(({ snapshot }) => {
+      this.removeAcknowledgementsForNewTerminals(previous, snapshot);
+      previous = snapshot;
     });
   }
 
@@ -187,8 +192,9 @@ export class TopicConversationSession {
     if (reactionId === null) return;
     const turn = this.acceptedTurn(responseId);
     this.acknowledgements.set(responseId, { messageId: turn.sourceMessageId, reactionId });
-    const hasVisibleCard = this.reconciler.hasVisibleCard(responseId);
-    if (hasVisibleCard) this.removeAcknowledgement(responseId);
+    if (this.response(responseId).state.kind === "terminal") {
+      this.removeAcknowledgement(responseId);
+    }
   }
 
   async prepare(responseId: ResponseId, profile: SessionCardMeta | null): Promise<void> {
@@ -267,7 +273,11 @@ export class TopicConversationSession {
               status,
             });
           }
-          aggregate.setActivity(responseId, "calling_tool");
+          if (status === "completed" || status === "failed") {
+            aggregate.finishToolActivity(responseId, update.toolCallId);
+          } else {
+            aggregate.startToolActivity(responseId, update.toolCallId, update.title ?? null);
+          }
         });
         return;
       case "tool_call_update":
@@ -283,7 +293,17 @@ export class TopicConversationSession {
             ...(update.title === null || update.title === undefined ? {} : { title: update.title }),
             ...(status === undefined ? {} : { status }),
           });
-          if (found) aggregate.setActivity(responseId, "calling_tool");
+          if (found) {
+            if (status === "completed" || status === "failed") {
+              aggregate.finishToolActivity(responseId, update.toolCallId);
+            } else if (status === "in_progress") {
+              aggregate.updateToolActivity(
+                responseId,
+                update.toolCallId,
+                update.title === null ? undefined : update.title,
+              );
+            }
+          }
           return found;
         });
         if (!updated) {
@@ -422,7 +442,6 @@ export class TopicConversationSession {
     if (response.state.kind === "terminal") {
       if (response.state.outcome === "merged") {
         this.store.transaction((aggregate) => aggregate.dropMergedBatchMember(responseId));
-        this.removeAcknowledgement(responseId);
       }
       return;
     }
@@ -433,7 +452,6 @@ export class TopicConversationSession {
       return;
     }
     this.store.transaction((aggregate) => aggregate.failWaiting(responseId, text));
-    this.removeAcknowledgement(responseId);
   }
 
   async finishOwner(
@@ -457,12 +475,10 @@ export class TopicConversationSession {
       });
       commit?.({ pendingBatch: sealed.messages, carrierResponseId: sealed.carrierResponseId });
       this.expirePermission("Response 已结束，权限请求已失效");
-      this.removeAcknowledgement(owner);
       return { pendingBatch: sealed.messages, carrierResponseId: sealed.carrierResponseId };
     }
     this.store.transaction((aggregate) => aggregate.seal(owner, outcome));
     this.expirePermission("Response 已结束，权限请求已失效");
-    this.removeAcknowledgement(owner);
     return { pendingBatch: null, carrierResponseId: null };
   }
 
@@ -471,27 +487,18 @@ export class TopicConversationSession {
   }
 
   async interruptTopic(): Promise<void> {
-    const interrupted = this.store.transaction((aggregate) => aggregate.interruptTopic());
+    this.store.transaction((aggregate) => aggregate.interruptTopic());
     this.expirePermission("Session 已中断，权限请求已失效");
-    for (const responseId of interrupted) this.removeAcknowledgement(responseId);
   }
 
   async beginTopicCancel(): Promise<ResponseId | null> {
-    const before = this.snapshot;
     const owner = this.store.transaction((aggregate) => aggregate.beginTopicCancel());
     this.expirePermission("Topic 已取消，权限请求已失效");
-    for (const turn of before.turns) {
-      if (turn.response.id !== owner && turn.response.state.kind === "in_progress") {
-        this.removeAcknowledgement(turn.response.id);
-      }
-    }
     return owner;
   }
 
   async confirmTopicCancel(): Promise<void> {
-    const owner = this.snapshot.executionOwnerResponseId;
     this.store.transaction((aggregate) => aggregate.confirmTopicCancel());
-    if (owner !== null) this.removeAcknowledgement(owner);
   }
 
   private async observePermissionPresentation(
@@ -589,7 +596,7 @@ export class TopicConversationSession {
       this.store.transaction((aggregate) => {
         if (replacing) aggregate.replaceTailText(responseId, kind, part);
         else aggregate.append(responseId, { kind, text: part });
-        aggregate.setActivity(responseId, activity);
+        aggregate.setActivity(responseId, { kind: activity });
       });
       remaining = remainder;
       if (remaining.length > 0) this.rotateConversationCard(responseId);
@@ -646,6 +653,20 @@ export class TopicConversationSession {
           this.removeAcknowledgement(responseId);
         }
       });
+  }
+
+  private removeAcknowledgementsForNewTerminals(
+    previous: TopicConversationSnapshot,
+    current: TopicConversationSnapshot,
+  ): void {
+    const previousStates = new Map(
+      previous.turns.map((turn) => [turn.response.id, turn.response.state] as const),
+    );
+    for (const turn of current.turns) {
+      if (turn.response.state.kind !== "terminal") continue;
+      if (previousStates.get(turn.response.id)?.kind === "terminal") continue;
+      this.removeAcknowledgement(turn.response.id);
+    }
   }
 
   private expirePermissionIfDomainRevoked(): void {

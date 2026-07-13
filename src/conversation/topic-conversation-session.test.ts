@@ -280,13 +280,18 @@ describe("TopicConversationSession", () => {
     }
   });
 
-  it("retries acknowledgement removal after a false transport result", async () => {
+  it("retries terminal acknowledgement removal after a false transport result", async () => {
     const remove = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const { session } = fixture({}, { acknowledgement: { add: vi.fn(), remove } });
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     session.attachAcknowledgement(a.responseId, "reaction-a");
-    await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
     await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.finishOwner("complete");
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
+
+    session.attachAcknowledgement(a.responseId, "reaction-a");
+
     await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(2));
   });
 
@@ -305,16 +310,79 @@ describe("TopicConversationSession", () => {
     expect(allow.permissions).toEqual([]);
   });
 
-  it("removes acknowledgement once after the first semantic Card becomes visible", async () => {
+  it("keeps acknowledgement through visible Cards and removes it when the Response terminates", async () => {
     const acknowledgement = { add: vi.fn(), remove: vi.fn(async () => true) };
     const { session } = fixture({}, { acknowledgement });
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     session.attachAcknowledgement(a.responseId, "reaction-a");
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.flushPresentation();
+    await session.rotate(a.responseId, "size");
+    await session.flushPresentation();
+
+    expect(acknowledgement.remove).not.toHaveBeenCalled();
+
+    await session.finishOwner("complete");
     await vi.waitFor(() =>
       expect(acknowledgement.remove).toHaveBeenCalledExactlyOnceWith("message-a", "reaction-a"),
     );
+  });
+
+  it.each(["complete", "failed", "interrupted", "cancelled"] as const)(
+    "removes acknowledgement when a Response becomes terminal(%s)",
+    async (outcome) => {
+      const acknowledgement = { add: vi.fn(), remove: vi.fn(async () => true) };
+      const { session } = fixture({}, { acknowledgement });
+      const response = session.accept({
+        sourceMessageId: `message-${outcome}`,
+        content: outcome,
+        profile,
+      });
+      session.attachAcknowledgement(response.responseId, `reaction-${outcome}`);
+      await session.prepare(response.responseId, profile);
+      await session.activate(response.responseId);
+      await session.finishOwner(outcome);
+
+      await vi.waitFor(() =>
+        expect(acknowledgement.remove).toHaveBeenCalledExactlyOnceWith(
+          `message-${outcome}`,
+          `reaction-${outcome}`,
+        ),
+      );
+    },
+  );
+
+  it("removes a merged Response acknowledgement but keeps the current carrier acknowledgement", async () => {
+    const acknowledgement = { add: vi.fn(), remove: vi.fn(async () => true) };
+    const { session } = fixture({}, { acknowledgement });
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     await session.prepare(a.responseId, profile);
-    expect(acknowledgement.remove).toHaveBeenCalledTimes(1);
+    await session.activate(a.responseId);
+    const b = session.accept({ sourceMessageId: "message-b", content: "B", profile });
+    session.attachAcknowledgement(b.responseId, "reaction-b");
+    const c = session.accept({ sourceMessageId: "message-c", content: "C", profile });
+    session.attachAcknowledgement(c.responseId, "reaction-c");
+
+    await vi.waitFor(() =>
+      expect(acknowledgement.remove).toHaveBeenCalledExactlyOnceWith("message-b", "reaction-b"),
+    );
+    expect(acknowledgement.remove).not.toHaveBeenCalledWith("message-c", "reaction-c");
+  });
+
+  it("removes a Reaction attached after its Response already terminated", async () => {
+    const acknowledgement = { add: vi.fn(), remove: vi.fn(async () => true) };
+    const { session } = fixture({}, { acknowledgement });
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.finishOwner("complete");
+
+    session.attachAcknowledgement(a.responseId, "reaction-a");
+
+    await vi.waitFor(() =>
+      expect(acknowledgement.remove).toHaveBeenCalledExactlyOnceWith("message-a", "reaction-a"),
+    );
   });
 
   it("keeps every oversized text Card within the 20 KB hard limit", async () => {
@@ -465,6 +533,39 @@ describe("TopicConversationSession", () => {
           ) <= conversationCardBudget.maxContentBytes,
       ),
     ).toBe(true);
+  });
+
+  it("does not let an old Tool completion clear a newer current Tool", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-1",
+      title: "First tool",
+      kind: "execute",
+      status: "pending",
+    });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-2",
+      title: "Current tool",
+      kind: "read",
+      status: "pending",
+    });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-1",
+      status: "completed",
+    });
+
+    expect(
+      session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response.state,
+    ).toMatchObject({
+      kind: "in_progress",
+      activity: { kind: "calling_tool", toolCallId: "tool-2", title: "Current tool" },
+    });
   });
 
   it("updates one tool element in place and preserves its title", async () => {

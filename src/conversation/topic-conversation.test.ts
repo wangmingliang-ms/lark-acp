@@ -121,6 +121,24 @@ describe("TopicConversation canonical lifecycle", () => {
     expect(topic.sealOwnerForPendingBatch("interrupted")).toMatchObject({ carrierResponseId: c });
   });
 
+  it("tracks the current Tool activity and clears it when that Tool finishes", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+    start(topic, a, "a");
+
+    topic.startToolActivity(a, "tool-1", "Execute");
+    expect(response(topic, a).state).toMatchObject({
+      kind: "in_progress",
+      activity: { kind: "calling_tool", toolCallId: "tool-1", title: "Execute" },
+    });
+
+    topic.finishToolActivity(a, "tool-1");
+    expect(response(topic, a).state).toMatchObject({
+      kind: "in_progress",
+      activity: { kind: "thinking" },
+    });
+  });
+
   it("normalizes running tools before publishing a terminal snapshot", () => {
     const topic = new TopicConversation();
     const a = accept(topic, "a");
