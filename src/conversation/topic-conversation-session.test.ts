@@ -535,6 +535,36 @@ describe("TopicConversationSession", () => {
     ).toBe(true);
   });
 
+  it("updates the current Tool activity title when an update omits status", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-1",
+      title: "Tool",
+      kind: "read",
+      status: "pending",
+    });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-1",
+      title: "Reading current file",
+    });
+
+    expect(
+      session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response.state,
+    ).toMatchObject({
+      kind: "in_progress",
+      activity: {
+        kind: "calling_tool",
+        toolCallId: "tool-1",
+        title: "Reading current file",
+      },
+    });
+  });
+
   it("does not let an old Tool completion clear a newer current Tool", async () => {
     const { session } = fixture();
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });

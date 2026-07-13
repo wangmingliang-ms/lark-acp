@@ -296,7 +296,10 @@ export class TopicConversationSession {
           if (found) {
             if (status === "completed" || status === "failed") {
               aggregate.finishToolActivity(responseId, update.toolCallId);
-            } else if (status === "in_progress") {
+            } else if (
+              status === "in_progress" ||
+              (update.title !== null && update.title !== undefined)
+            ) {
               aggregate.updateToolActivity(
                 responseId,
                 update.toolCallId,
