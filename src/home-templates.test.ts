@@ -32,21 +32,23 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain(settingsPath);
     expect(agents).toContain(sessionsPath);
     expect(agents).toContain(path.join(dir, "control.sock"));
-    expect(agents).toContain("## Settings contents");
-    expect(agents).toContain("runtime.defaultControls");
-    expect(agents).toContain("runtime.globalControlChatIds");
-    expect(agents).toContain("Use Humming CLI commands for Agent/session state");
-    expect(agents).toContain("Chat binding is repo-only");
-    expect(agents).toContain("/agent <agent>");
-    expect(agents).toContain("/model auto");
-    expect(agents).toContain("/capabilities <agent>");
-    expect(agents).toContain("humming session configure --model <model-id>");
+    expect(agents).toContain("## Commands by task");
+    expect(agents).toContain("Bind/rebind chat repository");
+    expect(agents).toContain("Do not write Agent/Model/Mode/Permission/Config into `bindings`");
+    expect(agents).toContain("/agent [agent]");
+    expect(agents).toContain("/model [model-id|auto]");
+    expect(agents).toContain("/capabilities [agent]");
+    expect(agents).toContain("humming session configure --model <model-id|auto>");
     expect(agents).toContain("humming session configure --agent <agent>");
+    expect(agents).toContain("Change current Model/Mode/Config");
+    expect(agents).toContain("humming session capabilities --json");
+    expect(agents).toContain("Switch Agent");
+    expect(agents).toContain("humming agent capabilities --agent <target-agent> --json");
+    expect(agents).toContain("Run that command once");
     expect(agents).not.toContain("sessions set-control");
     expect(agents).not.toContain("sessions queue-task");
     expect(agents).not.toContain("set-pending-target-profile");
     expect(agents).not.toContain("humming control ");
-    expect(agents).toContain("Do not explain Humming internals to the user");
 
     expect(fs.existsSync(settingsPath)).toBe(false);
     expect(fs.existsSync(sessionsPath)).toBe(false);
@@ -95,6 +97,6 @@ describe("installHomeTemplates", () => {
       controlSocketPath: null,
       overwriteDocs: true,
     });
-    expect(fs.readFileSync(agentsPath, "utf-8")).toContain("humming operating guide");
+    expect(fs.readFileSync(agentsPath, "utf-8")).toContain("Humming command guide");
   });
 });

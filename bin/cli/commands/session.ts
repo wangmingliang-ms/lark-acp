@@ -4,12 +4,7 @@
  */
 import { Command } from "commander";
 import path from "node:path";
-import {
-  FileSessionStore,
-  hasSessionControls,
-  listAgentSessions,
-  probeAgentSessionCapabilities,
-} from "../../../src/index.js";
+import { FileSessionStore, hasSessionControls, listAgentSessions } from "../../../src/index.js";
 import type {
   PendingSessionMessage,
   PendingTargetAgent,
@@ -22,13 +17,11 @@ import type {
 import {
   callBridgeControl,
   loadCliBase,
-  notifyAgentProbeFailure,
   resolveAgentProbeTarget,
   resolveOptionalChatScope,
   resolveRequiredChatScope,
   resolveSessionRepoTarget,
   SILENT_LOGGER,
-  type AgentProbeTarget,
   type GlobalOptions,
 } from "../context.js";
 import {
@@ -336,7 +329,6 @@ async function runSessionConfigure(
       chatId,
       threadId,
     });
-    await probeTargetAgentForUx(target);
     const now = Date.now();
     targetAgent = {
       sessionId: `profile:${now}`,
@@ -383,33 +375,6 @@ async function runSessionSend(globals: GlobalOptions & SessionSendCliOptions): P
     params: { chatId, threadId, message },
   });
   printJson(result);
-}
-
-/**
- * Best-effort UX probe of the Desired Agent before `configureSession` is
- * called. Never used to validate Model/Mode/Config locally — the Bridge owns
- * complete target validation (spec §9.2). A failure here surfaces early and
- * leaves the current Session untouched.
- *
- * @throws when the probe fails.
- */
-async function probeTargetAgentForUx(
-  target: Pick<AgentProbeTarget, "homeDir" | "chatId" | "threadId" | "invocation" | "cwd">,
-): Promise<void> {
-  try {
-    await probeAgentSessionCapabilities({
-      command: target.invocation.command,
-      args: [...target.invocation.args],
-      cwd: target.cwd,
-      ...(target.invocation.env ? { env: { ...target.invocation.env } } : {}),
-      logger: SILENT_LOGGER,
-    });
-  } catch (err) {
-    await notifyAgentProbeFailure(target, err);
-    throw new CliError(
-      `target agent probe failed; the current Topic Session was not changed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 }
 
 interface ControlPatchInput {

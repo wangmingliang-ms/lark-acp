@@ -31,7 +31,7 @@ The user may:
 When a Topic is busy, configuration changes wait until the current Turn reaches its completion
 boundary. Until application starts, later configuration requests update one pending desired
 configuration. Repeated fields use last-write-wins semantics. If the desired Agent changes, all
-accumulated Agent-specific controls are validated again against the new target Agent.
+accumulated Agent-specific controls remain caller-supplied desired values.
 
 ## 3. Vocabulary
 
@@ -42,7 +42,7 @@ accumulated Agent-specific controls are validated again against the new target A
 | **Topic Session**         | The Agent Session selected for one Lark chat/thread scope.                                                                                 |
 | **Session Profile**       | The desired Agent plus Model, Mode, Permission, and Config controls.                                                                       |
 | **Current Profile**       | The profile currently active for a Topic Session.                                                                                          |
-| **Pending Configuration** | The single validated desired profile change waiting to be applied at a Turn boundary.                                                      |
+| **Pending Configuration** | The single caller-supplied desired profile change waiting to be applied at a Turn boundary.                                                |
 | **Message**               | User-facing content submitted for Agent processing. `task`, `prompt`, and `queue` are implementation terms and are not exposed by the CLI. |
 | **Agent Capabilities**    | Models, modes, and config options reported by probing an arbitrary Agent.                                                                  |
 | **Session Capabilities**  | The live capabilities and current values reported by the current Topic Session.                                                            |
@@ -221,10 +221,11 @@ Every configuration request resolves one **Desired Agent**:
 2. otherwise the Agent already held by Pending Configuration;
 3. otherwise the current Topic Session Agent.
 
-Model, Mode, and Config values are Agent-specific. They must always be validated against the
-Desired Agent, never automatically against the currently live Agent.
+Model, Mode, and Config values are Agent-specific. The calling Agent must inspect the Desired
+Agent's capabilities and supply appropriate values. `session configure` trusts those values and
+does not automatically probe or validate target Agent capabilities.
 
-Permission is a Humming policy and is validated against Humming-supported permission modes.
+Permission is a Humming policy constrained by the CLI input schema.
 
 ### 9.3 Pending Configuration ownership
 
@@ -251,15 +252,12 @@ Configuration:
 Conceptually:
 
 ```text
-pending := validate(merge(pending, incoming))
+pending := merge(pending, incoming)
 ```
 
-The merged candidate is validated as a whole before replacing the existing Pending Configuration.
-An invalid incoming request must not partially mutate the previous valid pending state.
-
-If the merge changes the Desired Agent, all accumulated Model, Mode, and Config values are
-revalidated against the new target Agent. A Model that was legal for the previous target is not
-assumed legal for the new target.
+The CLI and control protocol validate input shape, but the Bridge does not query Agent capabilities
+before replacing the Pending Configuration. If the Desired Agent changes, the caller is responsible
+for selecting controls from that Agent's capabilities.
 
 Explicit clearing, where supported, must use an explicit option value such as `--model auto`; it is
 never inferred from omission.
@@ -269,10 +267,8 @@ never inferred from omission.
 ```text
 receive configure
   -> resolve Desired Agent
-  -> probe or obtain Desired Agent capabilities
   -> merge with Pending Configuration
-  -> validate the complete candidate against Desired Agent
-  -> persist the validated Pending Configuration
+  -> persist the Pending Configuration
   -> wait for the current Turn boundary when busy
   -> apply target profile
   -> start, resume, or switch the target Agent Session
@@ -286,9 +282,8 @@ before the target profile is successfully active.
 
 ### 9.6 Failure behavior
 
-- A target Agent probe failure leaves the current Session unchanged.
-- Invalid Model, Mode, Config, or Permission input leaves both the current Session and the previous
-  valid Pending Configuration unchanged.
+- `session configure` does not perform a target Agent probe.
+- Agent-specific control errors are surfaced when the target Agent actually applies the controls.
 - Failure to start or resume the target Agent leaves the current Session selected and does not send
   the attached Message.
 - Failure while applying controls does not send the attached Message.
@@ -308,8 +303,8 @@ humming session send --message-stdin
 concept.
 
 If the Session is busy, Humming schedules delivery internally; the CLI does not expose queue
-terminology. If a validated Pending Configuration already exists, the Message must not overtake
-that configuration. Messages attached directly to `configure` retain the stronger atomic guarantee
+terminology. If a Pending Configuration already exists, the Message must not overtake that
+configuration. Messages attached directly to `configure` retain the stronger atomic guarantee
 defined in section 9.
 
 Exactly one message input source is required.
@@ -333,9 +328,9 @@ The implementation must preserve these invariants:
 2. A Topic has at most one current profile and one Pending Configuration.
 3. Only the Bridge owns and mutates Pending Configuration.
 4. Pending changes are merged field-by-field with last-write-wins semantics.
-5. The complete merged candidate is validated before it replaces the previous pending value.
-6. Agent-specific controls are validated against the Desired Agent.
-7. Changing the Desired Agent revalidates all accumulated Agent-specific controls.
+5. CLI and control-protocol input shape is validated before entering Pending Configuration.
+6. The calling Agent owns capability discovery and selection of Agent-specific control values.
+7. `session configure` does not automatically probe target Agent capabilities.
 8. A Message attached to `configure` is sent only after the complete target profile is active.
 9. Failed configuration does not damage the current Session or partially replace valid pending
    state.
@@ -409,15 +404,16 @@ Agent guidance must teach:
 
 ## 15. Acceptance scenarios
 
-1. **Target Agent validation**
+1. **Caller-owned capability selection**
    - Current Agent is Claude.
+   - The calling Agent probes Copilot capabilities once.
    - User configures Copilot plus a Model.
-   - Humming validates the Model against Copilot, not Claude.
+   - `session configure` trusts the supplied Model without another probe.
 
 2. **Later Agent override**
    - Pending Configuration targets Claude with a Claude Model.
    - A later request changes only the Agent to Copilot.
-   - Humming revalidates the accumulated Model against Copilot and rejects the merge if invalid.
+   - Humming preserves the accumulated Model; the caller must replace it when incompatible.
 
 3. **Field-level merge**
    - A request sets Agent and Model.
@@ -435,7 +431,7 @@ Agent guidance must teach:
    - Humming activates the target profile before sending the Message.
 
 6. **Apply failure**
-   - Target Agent probe succeeds, but target Session startup fails.
+   - Target Session startup fails after configuration was accepted.
    - The previous Session remains current and the attached Message is not sent.
 
 7. **Live versus probe capabilities**

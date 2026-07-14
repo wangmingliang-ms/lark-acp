@@ -390,10 +390,10 @@ describe("reception area", () => {
     await bridge.start();
 
     expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf-8")).toContain(
-      "humming operating guide",
+      "Humming command guide",
     );
     expect(fs.readFileSync(path.join(home, "CLAUDE.md"), "utf-8")).toContain(
-      "humming operating guide",
+      "Humming command guide",
     );
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "settings.back.json"), "utf-8")),
@@ -687,7 +687,7 @@ describe("compact slash session profile commands", () => {
     expect(notice?.body).toContain("Model：opus → —");
   });
 
-  it("rejects an invalid stored /model before writing session controls", async () => {
+  it("stores a caller-supplied /model without probing capabilities", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
     await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
@@ -712,19 +712,16 @@ describe("compact slash session profile commands", () => {
       "th_topic",
     );
 
-    expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledWith(
-      expect.objectContaining({ command: CLAUDE.command, args: CLAUDE.args, cwd: repoA }),
-    );
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
     expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
-      controls: { modelId: "model-old" },
+      controls: { modelId: "missing-model" },
     });
     const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "⚠️ 会话配置失败", template: "red" });
-    expect(notice?.body).toContain("失败项: Model missing-model");
-    expect(notice?.body).toContain("会话配置未更新");
+    expect(notice).toMatchObject({ title: "✅ 会话配置已更新", template: "green" });
+    expect(notice?.body).toContain("Model：model-old → missing-model");
   });
 
-  it("uses the same configureSession validation path for humming sessions set-control", async () => {
+  it("trusts caller-supplied controls through configureSession", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
     await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
@@ -748,12 +745,13 @@ describe("compact slash session profile commands", () => {
         { controls: { modelId: "missing-model" } },
         "om_control_bad_model",
       ),
-    ).resolves.toMatchObject({ rejected: true });
+    ).resolves.toMatchObject({ applied: true });
 
     expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
-      controls: { modelId: "model-old" },
+      controls: { modelId: "missing-model" },
     });
-    expect(presenter.notices.at(-1)).toMatchObject({ title: "⚠️ 会话配置失败" });
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
+    expect(presenter.notices.at(-1)).toMatchObject({ title: "✅ 会话配置已更新" });
   });
 
   it("handles /permission through the shared stored setControls notice", async () => {

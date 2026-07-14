@@ -39,7 +39,6 @@ import {
 import {
   ChatRuntime,
   formatControlFailure,
-  validateSessionControls,
   type DrainResult,
   type PendingMessage,
 } from "./chat-runtime.js";
@@ -990,21 +989,6 @@ export class LarkBridge {
         };
       }
 
-      const desiredAgentRecord = merged.targetAgent
-        ? pendingTargetAgentToSessionRecord(chatId, threadId, merged.targetAgent)
-        : before;
-
-      if (merged.controls) {
-        const validation = await this.validateControlPatchForStoredProfile(
-          chatId,
-          threadId,
-          desiredAgentRecord,
-          merged.controls,
-          replyTo,
-        );
-        if (!validation.ok) return { rejected: true, reason: validation.reason };
-      }
-
       if (runtime?.processing) {
         return this.queuePendingConfiguration(chatId, threadId, before, merged, replyTo);
       }
@@ -1176,125 +1160,6 @@ export class LarkBridge {
     const targetAgent = saved.pendingConfiguration?.targetAgent;
     const agent = targetAgent ? (targetAgent.agentLabel ?? targetAgent.agentCommand) : undefined;
     return { queued: true, ...(agent !== undefined ? { agent } : {}) };
-  }
-
-  private async validateControlPatchForStoredProfile(
-    chatId: string,
-    threadId: string | null,
-    before: SessionRecord | null,
-    controls: SessionControlPatch,
-    noticeMessageId: string | null,
-  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
-    const bridgeOnlySnapshot = buildBridgeOnlyValidationSnapshot(
-      chatId,
-      threadId,
-      before,
-      controls,
-    );
-    if (!controlPatchNeedsAgentCapabilities(controls)) {
-      return this.validateControlPatchForSnapshot(bridgeOnlySnapshot, controls, noticeMessageId);
-    }
-    const snapshot = await this.resolveSessionCapabilitiesForControlValidation(
-      chatId,
-      threadId,
-      before,
-      noticeMessageId,
-    );
-    if (!snapshot) return { ok: false, reason: "capabilities probe failed" };
-    return this.validateControlPatchForSnapshot(snapshot, controls, noticeMessageId);
-  }
-
-  private async validateControlPatchForSnapshot(
-    snapshot: SessionCapabilitiesSnapshot,
-    controls: SessionControlPatch,
-    noticeMessageId: string | null,
-  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
-    try {
-      validateSessionControls(snapshot, controls);
-      return { ok: true };
-    } catch (err) {
-      const reason = formatControlFailure(err);
-      await this.notifyControlValidationFailure(noticeMessageId, reason);
-      return { ok: false, reason };
-    }
-  }
-
-  private async resolveSessionCapabilitiesForControlValidation(
-    chatId: string,
-    threadId: string | null,
-    before: SessionRecord | null,
-    noticeMessageId: string | null,
-  ): Promise<SessionCapabilitiesSnapshot | null> {
-    const binding = await this.resolveBinding(chatId);
-    if (!binding) {
-      if (noticeMessageId) {
-        await this.presenter.replyNoticeCard(
-          noticeMessageId,
-          buildProfileCommandFailureNotice(
-            "⚠️ 会话配置失败",
-            "当前 chat 没有可用 repo。请先 /bind <路径>，或配置默认工作目录。",
-          ),
-        );
-      }
-      return null;
-    }
-    const effectiveBinding: EffectiveBinding = before
-      ? {
-          cwd: before.cwd,
-          command: before.agentCommand,
-          args: before.agentArgs,
-          ...(before.agentEnv ? { env: before.agentEnv } : {}),
-          label: before.agentLabel ?? before.agentCommand,
-          explicit: binding.explicit,
-          reception: false,
-        }
-      : binding;
-    try {
-      const result = await probeAgentSessionCapabilities({
-        command: effectiveBinding.command,
-        args: [...effectiveBinding.args],
-        cwd: effectiveBinding.cwd,
-        ...(effectiveBinding.env ? { env: { ...effectiveBinding.env } } : {}),
-        logger: this.logger,
-      });
-      return buildProbeCapabilitiesSnapshot(chatId, threadId, effectiveBinding, result);
-    } catch (err) {
-      if (noticeMessageId) {
-        await this.controlAgentProbeFailed(
-          chatId,
-          threadId,
-          {
-            label: effectiveBinding.label,
-            command: effectiveBinding.command,
-            args: [...effectiveBinding.args],
-            cwd: effectiveBinding.cwd,
-          },
-          formatBootstrapError(err),
-          noticeMessageId,
-        );
-      }
-      return null;
-    }
-  }
-
-  private async notifyControlValidationFailure(
-    noticeMessageId: string | null,
-    reason: string,
-  ): Promise<void> {
-    if (!noticeMessageId) return;
-    await this.presenter
-      .replyNoticeCard(noticeMessageId, {
-        title: "⚠️ 会话配置失败",
-        body: [
-          "会话配置未更新。",
-          "",
-          reason,
-          "",
-          "请先用 /model、/mode 或 /capabilities 查询可用项，再使用有效的 modelId / modeId / config 值。",
-        ].join("\n"),
-        template: "red",
-      })
-      .catch((err) => this.logger.warn({ err }, "control validation failure notice failed"));
   }
 
   private async controlAgentProbeFailed(
@@ -3397,14 +3262,6 @@ export class LarkBridge {
   }
 }
 
-function controlPatchNeedsAgentCapabilities(controls: SessionControlPatch): boolean {
-  return (
-    controls.modelId !== undefined ||
-    controls.modeId !== undefined ||
-    Object.keys(controls.config ?? {}).length > 0
-  );
-}
-
 function pendingTargetAgentToSessionRecord(
   chatId: string,
   threadId: string | null,
@@ -3423,33 +3280,6 @@ function pendingTargetAgentToSessionRecord(
     cwd: target.cwd,
     createdAt: now,
     updatedAt: now,
-  };
-}
-
-function buildBridgeOnlyValidationSnapshot(
-  chatId: string,
-  threadId: string | null,
-  before: SessionRecord | null,
-  controls: SessionControlPatch,
-): SessionCapabilitiesSnapshot {
-  const modelId = before?.controls?.modelId;
-  return {
-    session: { chatId, threadId, sessionId: before?.sessionId ?? "profile-validation" },
-    agent: {
-      command: before?.agentCommand ?? "",
-      args: before?.agentArgs ?? [],
-      cwd: before?.cwd ?? "",
-    },
-    ...(controls.clearModelId === true
-      ? {
-          models: {
-            availableModels: modelId ? [{ modelId, name: modelId }] : [],
-            currentModelId: modelId,
-          },
-        }
-      : {}),
-    bridgePermissionModes: ["alwaysAllow", "alwaysDeny", "alwaysAsk"],
-    bridgePermissionMode: before?.controls?.bridgePermissionMode ?? "alwaysAsk",
   };
 }
 

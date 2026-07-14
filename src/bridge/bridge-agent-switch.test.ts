@@ -616,19 +616,6 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "oc_A\u0000omt_1",
       fakeRuntime,
     );
-    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
-      sessionId: "probe_codex",
-      capabilities: {
-        models: {
-          currentModelId: "auto",
-          availableModels: [
-            { modelId: "auto", name: "Auto" },
-            { modelId: "gpt-5.5", name: "GPT-5.5" },
-          ],
-        },
-      },
-    });
-
     await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
@@ -682,6 +669,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(events.noticeUpdates[0]?.body).toContain("• Agent：claude → codex");
     expect(events.noticeUpdates[0]?.body).toContain("• Model：gpt-5.5");
     expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
     expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
@@ -1170,7 +1158,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     await vi.waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1));
   });
 
-  it("rejects a pending configuration that puts core profile fields under config controls", async () => {
+  it("trusts caller-supplied controls without probing or validating target capabilities", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -1189,7 +1177,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
           readonly controls?: SessionControlPatch;
         },
         noticeMessageId?: string | null,
-      ): Promise<{ readonly rejected?: true; readonly reason?: string }>;
+      ): Promise<{ readonly queued?: true }>;
     };
 
     const fakeRuntime = {
@@ -1201,21 +1189,6 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "oc_A\u0000omt_1",
       fakeRuntime,
     );
-    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
-      sessionId: "probe_codex",
-      capabilities: {
-        configOptions: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "claude-opus-4.8",
-            options: [{ name: "GPT-5.6 Sol", value: "gpt-5.6-sol" }],
-          },
-        ],
-      },
-    });
-
     const result = await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
@@ -1228,14 +1201,19 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
           agentLabel: "codex",
           cwd: "/tmp",
         },
-        controls: { config: { model: { value: "gpt-5.6-sol" } } },
+        controls: { modelId: "caller-selected-model" },
       },
       "om_handoff",
     );
 
-    expect(result.rejected).toBe(true);
-    expect(result.reason).toMatch(/Config model[\s\S]*controls\.modelId[\s\S]*controls\.config/);
-    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
+    expect(result).toMatchObject({ queued: true });
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
+        controls: { modelId: "caller-selected-model" },
+      },
+    });
   });
 
   it("keeps the atomic pending configuration even if the finishing old runtime re-persists its session", async () => {
@@ -1318,7 +1296,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
 
-  it("validates queued model changes against the pending target Agent, not the live Agent", async () => {
+  it("merges caller-selected model changes into the pending target Agent without probing", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -1367,19 +1345,6 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "oc_A\u0000omt_1",
       fakeRuntime,
     );
-    probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
-      sessionId: "probe_codex",
-      capabilities: {
-        models: {
-          currentModelId: "auto",
-          availableModels: [
-            { modelId: "auto", name: "Auto" },
-            { modelId: "gpt-5.5", name: "GPT-5.5" },
-          ],
-        },
-      },
-    });
-
     await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
     await testable.controlConfigureSession(
       "oc_A",
@@ -1396,6 +1361,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       agentLabel: "codex",
       controls: { modelId: "gpt-5.5" },
     });
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
   });
 
   it("persists controls merged into an already queued pending configuration", async () => {
@@ -1430,33 +1396,6 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "oc_A\u0000omt_1",
       fakeRuntime,
     );
-    probeAgentSessionCapabilitiesMock
-      .mockResolvedValueOnce({
-        sessionId: "probe_codex",
-        capabilities: {
-          models: {
-            currentModelId: "auto",
-            availableModels: [{ modelId: "gpt-5.5", name: "GPT-5.5" }],
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        sessionId: "probe_codex",
-        capabilities: {
-          models: {
-            currentModelId: "gpt-5.5",
-            availableModels: [
-              { modelId: "gpt-5.5", name: "GPT-5.5" },
-              { modelId: "gpt-5.6", name: "GPT-5.6" },
-            ],
-          },
-          modes: {
-            currentModeId: "ask",
-            availableModes: [{ id: "agent", name: "Agent" }],
-          },
-        },
-      });
-
     await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
@@ -1489,6 +1428,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
         message: { prompt: "继续检查" },
       },
     });
+    expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
   });
 
   it("selects the target Agent immediately when the topic has no real session yet", async () => {
@@ -1978,19 +1918,6 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
           messageId: string | null,
         ): Promise<void>;
       };
-      probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
-        sessionId: "probe_codex",
-        capabilities: {
-          models: {
-            currentModelId: "auto",
-            availableModels: [
-              { modelId: "auto", name: "Auto" },
-              { modelId: "gpt-5.5", name: "GPT-5.5" },
-            ],
-          },
-        },
-      });
-
       const input = {
         targetAgent: {
           sessionId: "profile:codex-gpt",
@@ -2007,6 +1934,7 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
       // successful configure from a configured DM control chat.
       const result = await testable.controlConfigureSession("oc_DM", null, input, "om_dm_handoff");
       expect(result).not.toHaveProperty("rejected");
+      expect(probeAgentSessionCapabilitiesMock).not.toHaveBeenCalled();
       await testable.persistGlobalDefaultAgent(input.targetAgent.agentLabel, null);
       await testable.persistGlobalDefaultControls(input.controls, null);
 
