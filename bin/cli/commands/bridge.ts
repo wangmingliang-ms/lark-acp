@@ -437,6 +437,14 @@ async function runBridgeRun(
     lifecycle: {
       notificationChatIds: cfg.lifecycleNotifyChatIds,
       restartMarkerPath: bridgeRestartMarkerPath(homeDir),
+      defaultProfile: {
+        agent: defaultAgent.label,
+        ...(cfg.defaultControls?.modelId !== undefined
+          ? { model: cfg.defaultControls.modelId }
+          : {}),
+        ...(cfg.defaultControls?.modeId !== undefined ? { mode: cfg.defaultControls.modeId } : {}),
+        permissionMode: cfg.permissionMode,
+      },
       ...(codeRevision !== undefined ? { codeRevision } : {}),
     },
     sessionStore,

@@ -9,6 +9,7 @@ import { LarkHttpClient } from "../lark/lark-http.js";
 import {
   sendLifecycleNotice,
   type LifecycleCodeRevision,
+  type LifecycleDefaultProfile,
   type LifecycleNoticeDelivery,
   type LifecycleNoticeKind,
 } from "../lark/lifecycle-notifier.js";
@@ -366,6 +367,8 @@ export interface LarkBridgeLifecycleOptions {
   restartMarkerPath?: string | null;
   /** Git revision of the bridge code currently running; shown on restarted notices. */
   codeRevision?: LifecycleCodeRevision;
+  /** Effective global defaults shown on successful start/restart notices. */
+  defaultProfile?: LifecycleDefaultProfile;
   /** Per-chat send timeout for best-effort lifecycle notices. */
   noticeTimeoutMs?: number;
 }
@@ -577,6 +580,7 @@ export class LarkBridge {
   private readonly lifecycleNotificationChatIds: readonly string[];
   private readonly restartMarkerPath: string | null;
   private readonly lifecycleCodeRevision: LifecycleCodeRevision | undefined;
+  private readonly lifecycleDefaultProfile: LifecycleDefaultProfile | undefined;
   private readonly lifecycleNoticeTimeoutMs: number | undefined;
 
   private readonly acknowledgement: AcknowledgementPort;
@@ -663,6 +667,7 @@ export class LarkBridge {
     this.lifecycleNotificationChatIds = opts.lifecycle?.notificationChatIds ?? [];
     this.restartMarkerPath = opts.lifecycle?.restartMarkerPath ?? null;
     this.lifecycleCodeRevision = opts.lifecycle?.codeRevision;
+    this.lifecycleDefaultProfile = opts.lifecycle?.defaultProfile;
     this.lifecycleNoticeTimeoutMs = opts.lifecycle?.noticeTimeoutMs;
     this.acknowledgement = {
       add: async (messageId) => {
@@ -842,6 +847,9 @@ export class LarkBridge {
       ...(replace !== undefined ? { replace } : {}),
       ...(this.lifecycleCodeRevision !== undefined
         ? { codeRevision: this.lifecycleCodeRevision }
+        : {}),
+      ...(this.lifecycleDefaultProfile !== undefined
+        ? { defaultProfile: this.lifecycleDefaultProfile }
         : {}),
       ...(this.lifecycleNoticeTimeoutMs !== undefined
         ? { timeoutMs: this.lifecycleNoticeTimeoutMs }

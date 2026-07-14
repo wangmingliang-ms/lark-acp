@@ -58,19 +58,62 @@ describe("buildLifecycleNoticeCard", () => {
         codeRevision: { commit: "abc1234", message: "feat: show revision" },
       });
 
+      expect(bodyMarkdown(card)).toContain("**Code Revision**");
       expect(bodyMarkdown(card)).toContain("• Commit：`abc1234`");
       expect(bodyMarkdown(card)).toContain("• Message：feat: show revision");
     },
   );
+
+  it.each(["started", "restarted"] as const)(
+    "includes the effective global default configuration on %s notices",
+    (kind) => {
+      const card = buildLifecycleNoticeCard(kind, {
+        pid: 123,
+        now: new Date("2026-07-05T10:00:00Z"),
+        defaultProfile: {
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          mode: "plan",
+          permissionMode: "alwaysAsk",
+        },
+      });
+
+      expect(bodyMarkdown(card)).toContain("**Default Configuration（全局）**");
+      expect(bodyMarkdown(card)).toContain("• Agent：claude");
+      expect(bodyMarkdown(card)).toContain("• Model：claude-sonnet-4-5");
+      expect(bodyMarkdown(card)).toContain("• Mode：plan");
+      expect(bodyMarkdown(card)).toContain("• Permission Mode：alwaysAsk");
+    },
+  );
+
+  it("leaves unset Model and Mode values blank", () => {
+    const card = buildLifecycleNoticeCard("started", {
+      defaultProfile: {
+        agent: "claude",
+        permissionMode: "alwaysAllow",
+      },
+    });
+
+    expect(bodyMarkdown(card)).toContain("• Model：\n");
+    expect(bodyMarkdown(card)).toContain("• Mode：\n");
+  });
 
   it("does not include code revision on stopped notices", () => {
     const card = buildLifecycleNoticeCard("stopped", {
       pid: 123,
       now: new Date("2026-07-05T10:00:00Z"),
       codeRevision: { commit: "abc1234", message: "feat: show revision" },
+      defaultProfile: {
+        agent: "claude",
+        model: "claude-sonnet-4-5",
+        mode: "plan",
+        permissionMode: "alwaysAsk",
+      },
     });
 
     expect(bodyMarkdown(card)).not.toContain("Commit");
+    expect(bodyMarkdown(card)).not.toContain("Default Configuration");
+    expect(bodyMarkdown(card)).toContain("**Runtime**");
   });
 });
 

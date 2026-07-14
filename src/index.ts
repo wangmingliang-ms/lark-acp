@@ -119,6 +119,7 @@ export {
 } from "./lark/lifecycle-notifier.js";
 export type {
   LifecycleCodeRevision,
+  LifecycleDefaultProfile,
   LifecycleNoticeDelivery,
   LifecycleNoticeKind,
   LifecycleNoticeOptions,

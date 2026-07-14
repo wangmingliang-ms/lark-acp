@@ -1,4 +1,5 @@
 import process from "node:process";
+import type { PermissionMode } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
 import type { LarkHttpClient } from "./lark-http.js";
 
@@ -27,6 +28,13 @@ type LifecycleNoticeSpec = {
 export type LifecycleCodeRevision = {
   readonly commit: string;
   readonly message: string;
+};
+
+export type LifecycleDefaultProfile = {
+  readonly agent: string;
+  readonly model?: string;
+  readonly mode?: string;
+  readonly permissionMode: PermissionMode;
 };
 
 const LIFECYCLE_NOTICE_SPECS: Readonly<Record<LifecycleNoticeKind, LifecycleNoticeSpec>> = {
@@ -74,6 +82,7 @@ type LifecycleNoticeCardOptions = {
   readonly pid?: number;
   readonly now?: Date;
   readonly codeRevision?: LifecycleCodeRevision;
+  readonly defaultProfile?: LifecycleDefaultProfile;
 };
 
 export type LifecycleNoticeOptions = LifecycleNoticeCardOptions & {
@@ -102,6 +111,8 @@ export function buildLifecycleNoticeCard(
     spec.body,
     "",
     ...formatCodeRevision(kind, opts.codeRevision),
+    ...formatDefaultProfile(kind, opts.defaultProfile),
+    "**Runtime**",
     `• PID：${pid}`,
     `• 时间：${formatLifecycleTime(now)}`,
   ].join("\n");
@@ -137,6 +148,7 @@ export async function sendLifecycleNotice(
     pid: opts.pid,
     now: opts.now,
     codeRevision: opts.codeRevision,
+    defaultProfile: opts.defaultProfile,
   });
   const replaceByChat = new Map(opts.replace?.map((item) => [item.chatId, item.messageId]) ?? []);
   const results = await Promise.allSettled(
@@ -187,8 +199,25 @@ function formatCodeRevision(
   if ((kind !== "started" && kind !== "restarted") || revision === undefined) return [];
   const message = revision.message.trim();
   return [
+    "**Code Revision**",
     `• Commit：\`${revision.commit}\``,
     ...(message.length > 0 ? [`• Message：${message}`] : []),
+    "",
+  ];
+}
+
+function formatDefaultProfile(
+  kind: LifecycleNoticeKind,
+  profile: LifecycleDefaultProfile | undefined,
+): readonly string[] {
+  if ((kind !== "started" && kind !== "restarted") || profile === undefined) return [];
+  return [
+    "**Default Configuration（全局）**",
+    `• Agent：${profile.agent}`,
+    `• Model：${profile.model ?? ""}`,
+    `• Mode：${profile.mode ?? ""}`,
+    `• Permission Mode：${profile.permissionMode}`,
+    "",
   ];
 }
 
