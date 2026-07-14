@@ -410,7 +410,6 @@ describe("TopicConversation canonical lifecycle", () => {
     expect(response(topic, a).state).toEqual({ kind: "terminal", outcome: "interrupted" });
     expect(topic.snapshot().executionOwnerResponseId).toBeNull();
 
-    topic.prepare(c);
     topic.activate(c, id.action("action-c"));
     topic.clearSealedBatch();
 
@@ -419,6 +418,19 @@ describe("TopicConversation canonical lifecycle", () => {
       pendingBatch: null,
       cancelAuthority: { kind: "cancel", responseId: c },
     });
+  });
+
+  it("activates a warm received Response without a preparing transition", () => {
+    const topic = new TopicConversation();
+    const a = accept(topic, "a");
+
+    topic.activate(a, id.action("action-a"));
+
+    expect(response(topic, a).state).toMatchObject({
+      kind: "in_progress",
+      phase: "active",
+    });
+    expect(topic.snapshot().executionOwnerResponseId).toBe(a);
   });
 
   it("Card Cancel revokes A immediately, then preserves the pending batch after A stops", () => {

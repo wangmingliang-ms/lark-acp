@@ -35,6 +35,26 @@ import type { LifecycleIntent } from "../../bin/lifecycle-coordinator.js";
 
 const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
 
+function renderableAgentUpdateKind(
+  update: acp.SessionUpdate,
+  options: { readonly showThoughts: boolean; readonly showTools: boolean },
+): "message" | "thought" | "tool" | null {
+  switch (update.sessionUpdate) {
+    case "agent_message_chunk":
+      return update.content.type === "text" && update.content.text.length > 0 ? "message" : null;
+    case "agent_thought_chunk":
+      return options.showThoughts &&
+        update.content.type === "text" &&
+        update.content.text.length > 0
+        ? "thought"
+        : null;
+    case "tool_call":
+      return options.showTools ? "tool" : null;
+    default:
+      return null;
+  }
+}
+
 export interface DrainResult {
   readonly intent: LifecycleIntent;
   readonly outcome: "drained" | "escalated";
@@ -167,6 +187,8 @@ export class ChatRuntime {
   private booting = false;
   /** Wall-clock construction time — the `lastActivity` floor before `state` exists. */
   private readonly createdAt = Date.now();
+  /** Monotonic Request sequence within this topic runtime; 1 is the cold-start turn. */
+  private nextTurnSequence = 1;
 
   constructor(opts: ChatRuntimeOptions) {
     this.opts = opts;
@@ -199,6 +221,8 @@ export class ChatRuntime {
     content: unknown;
     profile: SessionCardMeta | null;
   }): ConversationResponseHandle {
+    const turnSequence = this.nextTurnSequence;
+    this.nextTurnSequence += 1;
     const accepted = this.conversation.accept({
       sourceMessageId: context.messageId,
       content: context.content,
@@ -208,7 +232,17 @@ export class ChatRuntime {
       accepted.responseId,
       accepted.responseToken,
       context.messageId,
+      Date.now(),
+      turnSequence,
       this.conversation,
+    );
+    this.logger.info(
+      {
+        responseId: handle.responseId,
+        turnSequence,
+        runtimeKind: turnSequence === 1 ? "cold" : "warm",
+      },
+      "request accepted",
     );
     this.admissionOrder.push(handle.responseId);
     return handle;
@@ -305,6 +339,9 @@ export class ChatRuntime {
       this.followupInterruptRequested = false;
       const ownsBootstrap = this.bootstrapPromise === null;
       if (ownsBootstrap) {
+        if (pending.response !== undefined) {
+          await pending.response.prepare(this.bootstrapSessionMeta());
+        }
         this.booting = true;
         this.bootstrapPromise = this.bootstrap(pending);
       }
@@ -1274,7 +1311,7 @@ export class ChatRuntime {
     const router = state.router;
     if (router === null) throw new Error("semantic Response requires an ACP callback router");
     this.activeResponse = response;
-    await response.prepare(
+    response.setProfile(
       sessionMetaFromSnapshot({
         ...state.sessionCapabilities,
         bridgePermissionMode: state.client.getPermissionMode(),
@@ -1291,16 +1328,82 @@ export class ChatRuntime {
         await this.interruptCurrentPromptForFollowup(state, carrier);
       }
     }
+    const promptStartedAt = Date.now();
+    const timingContext = {
+      responseId: response.responseId,
+      turnSequence: response.turnSequence,
+      runtimeKind: response.turnSequence === 1 ? "cold" : "warm",
+    } as const;
+    let firstAgentEventAt: number | null = null;
+    let firstRenderableEventAt: number | null = null;
+    const observeAgentEvent = (eventType: string): void => {
+      if (firstAgentEventAt !== null) return;
+      firstAgentEventAt = Date.now();
+      this.logger.info(
+        {
+          ...timingContext,
+          eventType,
+          elapsedMs: firstAgentEventAt - promptStartedAt,
+        },
+        "first agent protocol event",
+      );
+    };
+    const observeRenderableEvent = (eventType: "message" | "thought" | "tool"): void => {
+      if (firstRenderableEventAt !== null) return;
+      firstRenderableEventAt = Date.now();
+      this.logger.info(
+        {
+          ...timingContext,
+          eventType,
+          elapsedMs: firstRenderableEventAt - promptStartedAt,
+        },
+        "first renderable agent event",
+      );
+    };
+    this.logger.info(
+      {
+        ...timingContext,
+        acceptedToPromptMs: promptStartedAt - response.acceptedAt,
+      },
+      "prompt dispatch started",
+    );
     const routeHandle = router.activate(response.responseToken as PromptToken, {
-      sessionUpdate: async (params) => response.applyAgentUpdate(params.update),
-      requestPermission: async (params) => response.requestPermission(params),
+      sessionUpdate: async (params) => {
+        observeAgentEvent(params.update.sessionUpdate);
+        await response.applyAgentUpdate(params.update);
+        const renderableKind = renderableAgentUpdateKind(params.update, {
+          showThoughts: this.opts.showThoughts,
+          showTools: this.opts.showTools,
+        });
+        if (renderableKind !== null) observeRenderableEvent(renderableKind);
+      },
+      requestPermission: async (params) => {
+        observeAgentEvent("permission_request");
+        return response.requestPermission(params);
+      },
       cancelPendingPermissions: () => response.cancelPendingPermissions(),
     });
 
     let result: Awaited<ReturnType<typeof state.agent.connection.prompt>>;
+    let promptCompleted = false;
     try {
       result = await this.promptOrDisconnect(state, pending);
+      promptCompleted = true;
     } finally {
+      const promptFinishedAt = Date.now();
+      this.logger.info(
+        {
+          ...timingContext,
+          outcome: promptCompleted ? "completed" : "failed",
+          totalMs: promptFinishedAt - promptStartedAt,
+          acceptedToPromptMs: promptStartedAt - response.acceptedAt,
+          firstAgentEventMs:
+            firstAgentEventAt === null ? null : firstAgentEventAt - promptStartedAt,
+          firstRenderableEventMs:
+            firstRenderableEventAt === null ? null : firstRenderableEventAt - promptStartedAt,
+        },
+        "prompt timing",
+      );
       state.router?.close(routeHandle);
     }
 
@@ -1323,18 +1426,34 @@ export class ChatRuntime {
           ? "cancelled"
           : this.permissionDisplayFailureResponse === response.responseId
             ? "failed"
-            : this.followupInterruptRequested
-              ? "interrupted"
-              : status === "complete"
-                ? "complete"
-                : status === "failed"
-                  ? "failed"
+            : status === "complete"
+              ? "complete"
+              : status === "failed"
+                ? "failed"
+                : this.followupInterruptRequested
+                  ? "interrupted"
                   : "cancelled",
         (handoff) => this.commitPendingCarrier(handoff),
       );
     }
     await this.persistSession(state.agent.sessionId);
     await this.opts.onTurnComplete?.(pending.messageId);
+  }
+
+  private bootstrapSessionMeta(): SessionCardMeta {
+    return {
+      agent: displayAgent({
+        ...(this.opts.agentLabel !== undefined ? { label: this.opts.agentLabel } : {}),
+        command: this.opts.agentCommand,
+        args: this.opts.agentArgs,
+        cwd: this.opts.agentCwd,
+      }),
+      mode: "—",
+      model: "—",
+      permission: bridgePermissionLabel(
+        this.opts.inheritedControls?.bridgePermissionMode ?? this.opts.permissionMode,
+      ),
+    };
   }
 
   /**

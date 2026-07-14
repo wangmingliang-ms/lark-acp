@@ -649,7 +649,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     );
   });
 
-  it("advances one semantic card from received through active before agent output", async () => {
+  it("shows preparing throughout cold bootstrap before activating the Response", async () => {
     const states: RecordedConversationState[] = [];
     const fake = makeFakeAgent();
     let resolveSpawn: (agent: AgentProcess) => void = () => {};
@@ -675,6 +675,10 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       timeout: 1_000,
       interval: 20,
     });
+    await vi.waitFor(() => expect(states.at(-1)?.status).toBe("preparing"), {
+      timeout: 1_000,
+      interval: 20,
+    });
 
     resolveSpawn(fake.agent);
     await enqueue;
@@ -684,6 +688,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       interval: 20,
     });
     expect(states.map((state) => state.status)).toContain("received");
+    expect(states.map((state) => state.status)).toContain("preparing");
     expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
 
     fake.resolvePrompt("end_turn");
@@ -986,7 +991,38 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       },
       { timeout: 1_000, interval: 20 },
     );
+    expect(states.some((state) => state.status === "interrupted")).toBe(true);
     expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
+  });
+
+  it("completes the owner when end_turn wins a requested follow-up interrupt", async () => {
+    const states: RecordedConversationState[] = [];
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter(states),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "nearly finished task" }],
+      messageId: "om_first",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(1));
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "follow-up arriving at turn end" }],
+      messageId: "om_followup",
+      chatId: "oc_test",
+    });
+
+    expect(fake.cancelCalls()).toBe(1);
+    fake.resolvePrompt("end_turn");
+
+    await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
+    expect(states.some((state) => state.status === "complete")).toBe(true);
+    expect(states.some((state) => state.status === "interrupted")).toBe(false);
   });
 
   it("respawns and preserves the queued follow-up if interrupt closes the agent", async () => {
@@ -1432,6 +1468,75 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
         usage: { inputTokens: 71_395, outputTokens: 16_000, totalTokens: 87_395 },
       },
       msg: "prompt done",
+    });
+    expect(logs).toContainEqual({
+      obj: expect.objectContaining({
+        outcome: "completed",
+        firstAgentEventMs: null,
+        firstRenderableEventMs: null,
+      }),
+      msg: "prompt timing",
+    });
+  });
+
+  it("logs the first agent and renderable events once per prompt", async () => {
+    const logs: Array<{ obj: object; msg?: string }> = [];
+    const logger: LarkLogger = {
+      debug: () => {},
+      info: (obj: string | object, msg?: string) => {
+        if (typeof obj === "object") logs.push({ obj, msg });
+      },
+      warn: () => {},
+      error: () => {},
+      child: () => logger,
+    };
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(logger),
+      presenter: recordingPresenter([]),
+      sessionStore: stubSessionStore(),
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "observe this turn" }],
+      messageId: "om_timing",
+      chatId: "oc_test",
+    });
+    const spawnOptions = spawnAgentMock.mock.calls[0]?.[0] as SpawnAgentOptions;
+    await spawnOptions.client.sessionUpdate({
+      sessionId: "sess_fake",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "investigating" },
+      },
+    });
+    await spawnOptions.client.sessionUpdate({
+      sessionId: "sess_fake",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "done" },
+      },
+    });
+    fake.resolvePrompt("end_turn");
+
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+    expect(logs.filter((entry) => entry.msg === "first agent protocol event")).toHaveLength(1);
+    expect(logs.filter((entry) => entry.msg === "first renderable agent event")).toHaveLength(1);
+    expect(logs).toContainEqual({
+      obj: expect.objectContaining({
+        eventType: "agent_thought_chunk",
+      }),
+      msg: "first agent protocol event",
+    });
+    expect(logs).toContainEqual({
+      obj: expect.objectContaining({
+        eventType: "thought",
+      }),
+      msg: "first renderable agent event",
     });
   });
 

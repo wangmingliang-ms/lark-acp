@@ -204,6 +204,10 @@ export class TopicConversationSession {
     });
   }
 
+  setProfile(responseId: ResponseId, profile: SessionCardMeta | null): void {
+    this.store.transaction((aggregate) => aggregate.setProfile(responseId, profile));
+  }
+
   async activate(responseId: ResponseId): Promise<ActionToken> {
     const token = this.tokens.action();
     this.store.transaction((aggregate) => {

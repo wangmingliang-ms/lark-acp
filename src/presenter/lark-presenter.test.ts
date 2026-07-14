@@ -169,6 +169,22 @@ describe("LarkCardPresenter card summary", () => {
     expect(JSON.stringify(cards[0])).not.toContain("前一任务仍在进行");
   });
 
+  it("renders an interrupted Response with the lightning icon", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.sendConversationCard("message", {
+      kind: "terminal",
+      header: "interrupted",
+      entries: [{ kind: "text", text: "任务被后续消息中断" }],
+      profile: null,
+      body: "content",
+      route: { c: "chat", th: "thread" },
+    });
+
+    expect(cards[0]?.header?.title?.content).toBe("⚡ 已中断");
+  });
+
   it("truncates oversized notice card bodies at the compact notice limit", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);

@@ -499,8 +499,13 @@ export class TopicConversation {
   activate(responseId: ResponseId, token: ActionToken): void {
     if (this.executionOwner !== null) throw new Error("execution is already owned");
     const response = this.response(responseId);
-    if (response.state.kind !== "in_progress" || response.state.phase !== "preparing") {
-      throw new Error("only a preparing response may activate");
+    if (
+      response.state.kind !== "in_progress" ||
+      (response.state.phase !== "received" &&
+        response.state.phase !== "interrupting" &&
+        response.state.phase !== "preparing")
+    ) {
+      throw new Error("only a waiting or preparing response may activate");
     }
     const batch = this.pendingBatchValue;
     if (batch !== null) {

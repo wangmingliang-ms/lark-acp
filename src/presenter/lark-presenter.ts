@@ -475,7 +475,7 @@ function semanticTerminalHeader(
     case "failed":
       return STATUS_HEADER[header];
     case "interrupted":
-      return { content: "⏸️ 已中断", template: "grey" };
+      return { content: "⚡ 已中断", template: "grey" };
     case "merged":
       return { content: "🔗 已合并到下一条消息", template: "grey" };
     case "superseded":

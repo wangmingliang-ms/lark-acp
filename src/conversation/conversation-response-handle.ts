@@ -9,6 +9,8 @@ export class ConversationResponseHandle {
     readonly responseId: ResponseId,
     readonly responseToken: string,
     readonly messageId: string,
+    readonly acceptedAt: number,
+    readonly turnSequence: number,
     private readonly session: TopicConversationSession,
   ) {}
 
@@ -18,6 +20,10 @@ export class ConversationResponseHandle {
 
   prepare(profile: SessionCardMeta | null): Promise<void> {
     return this.session.prepare(this.responseId, profile);
+  }
+
+  setProfile(profile: SessionCardMeta | null): void {
+    this.session.setProfile(this.responseId, profile);
   }
 
   activate(): Promise<unknown> {
