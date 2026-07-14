@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import type * as acp from "@agentclientprotocol/sdk";
 import { LarkBridge, type LarkCommand, type ResolvedAgentInvocation } from "./bridge.js";
 import type { AgentProcess, ProbeAgentSessionCapabilitiesResult } from "../acp/agent-process.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
@@ -14,8 +16,10 @@ import type {
   CommandResultCardSpec,
 } from "../presenter/presenter.js";
 import type {
-  PendingSessionTask,
-  PendingTargetProfile,
+  PendingSessionConfiguration,
+  PendingSessionMessage,
+  PendingTargetAgent,
+  SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionControls,
   SessionControlTarget,
@@ -34,6 +38,11 @@ vi.mock("../acp/agent-process.js", async (importOriginal) => {
     ...actual,
     probeAgentSessionCapabilities: probeAgentSessionCapabilitiesMock,
     spawnAgent: spawnAgentMock,
+    // Route "resume an existing session" bootstraps through the same fake
+    // Agent process factory used for fresh switches, so tests that acquire a
+    // runtime for an already-persisted (non-profile-only) session don't hit
+    // the real ACP spawn/resume machinery.
+    spawnAndResumeAgent: async () => ({ agent: await spawnAgentMock(), resumed: true }),
     killAgent: () => {},
   };
 });
@@ -98,62 +107,35 @@ class MemorySessionStore implements SessionStore {
     return updated;
   }
 
-  async setPendingControls(
+  async setPendingConfiguration(
     target: SessionControlTarget,
-    controls: SessionControlPatch,
+    configuration: PendingSessionConfiguration,
   ): Promise<SessionRecord> {
     const record = await this.requireLatest(target.chatId, target.threadId);
     const updated: SessionRecord = {
       ...record,
-      pendingControls: controls,
+      pendingConfiguration: configuration,
       updatedAt: record.updatedAt + 1,
     };
     await this.save(updated);
     return updated;
   }
 
-  async consumePendingControls(
+  async clearPendingConfigurationIfMatches(
     target: SessionControlTarget,
-  ): Promise<{ readonly record: SessionRecord; readonly pendingControls?: SessionControlPatch }> {
+    expected: PendingSessionConfiguration,
+  ): Promise<{ readonly record: SessionRecord; readonly cleared: boolean }> {
     const record = await this.requireLatest(target.chatId, target.threadId);
-    return record.pendingControls
-      ? { record, pendingControls: record.pendingControls }
-      : { record };
-  }
-
-  async setPendingTask(
-    target: SessionControlTarget,
-    task: PendingSessionTask,
-  ): Promise<SessionRecord> {
-    const record = await this.requireLatest(target.chatId, target.threadId);
+    if (!isDeepStrictEqual(record.pendingConfiguration, expected)) {
+      return { record, cleared: false };
+    }
     const updated: SessionRecord = {
       ...record,
-      pendingTask: task,
+      pendingConfiguration: undefined,
       updatedAt: record.updatedAt + 1,
     };
     await this.save(updated);
-    return updated;
-  }
-
-  async setPendingTargetProfile(
-    target: SessionControlTarget,
-    profile: PendingTargetProfile,
-  ): Promise<SessionRecord> {
-    const record = await this.requireLatest(target.chatId, target.threadId);
-    const updated: SessionRecord = {
-      ...record,
-      pendingTargetProfile: profile,
-      updatedAt: record.updatedAt + 1,
-    };
-    await this.save(updated);
-    return updated;
-  }
-
-  async consumePendingTask(
-    target: SessionControlTarget,
-  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }> {
-    const record = await this.requireLatest(target.chatId, target.threadId);
-    return record.pendingTask ? { record, pendingTask: record.pendingTask } : { record };
+    return { record: updated, cleared: true };
   }
 
   async clearThread(chatId: string, threadId: string | null): Promise<void> {
@@ -385,6 +367,16 @@ function codexProfileRecord(): SessionRecord {
   };
 }
 
+/** Minimal valid capabilities snapshot for a fake in-memory `ChatRuntime` stand-in. */
+function fakeCapabilitiesSnapshot(): SessionCapabilitiesSnapshot {
+  return {
+    session: { chatId: "oc_A", threadId: "omt_1", sessionId: "sess_claude" },
+    agent: { command: "npx", args: ["-y", "@zed-industries/claude-code-acp"], cwd: "/tmp" },
+    bridgePermissionModes: ["alwaysAllow", "alwaysDeny", "alwaysAsk"],
+    bridgePermissionMode: "alwaysAsk",
+  };
+}
+
 function fakeAgentProcess(
   sessionId: string,
   sessionCapabilities: AgentProcess["sessionCapabilities"] = {},
@@ -532,10 +524,11 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
       controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
-      controlSetPendingTask(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        task: PendingSessionTask,
+        input: { readonly message?: PendingSessionMessage },
+        noticeMessageId?: string | null,
       ): Promise<unknown>;
       handleRuntimeTurnComplete(
         chatId: string,
@@ -556,14 +549,16 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     );
 
     await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
-    await testable.controlSetPendingTask("oc_A", "omt_1", {
-      prompt: "查一下 pipeline 为什么失败",
-      createdAt: 10,
-    });
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      { message: { prompt: "查一下 pipeline 为什么失败", createdAt: 10 } },
+      "om_handoff",
+    );
 
     expect(fakeRuntime.supersede).not.toHaveBeenCalled();
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({ agentLabel: "claude" });
-    expect(events.notices.at(-1)).toMatchObject({ title: "⏳ Agent 切换已排队" });
+    expect(events.notices.at(-1)).toMatchObject({ title: "⏳ Pending configuration 已排队" });
 
     fakeRuntime.processing = false;
     await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
@@ -575,7 +570,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       });
       expect(testable.activeChatCount).toBe(1);
     });
-    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTask).toBeUndefined();
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
     expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
     expect(events.notices).toHaveLength(1);
@@ -583,7 +578,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(events.noticeUpdates.at(-1)?.body).toContain("正在交给新 Agent 继续执行");
   });
 
-  it("queues an atomic pending target profile with Agent, controls, and task in one notice", async () => {
+  it("queues an atomic pending configuration with Agent, controls, and message in one notice", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -594,10 +589,14 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
-      controlSetPendingTargetProfile(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        profile: PendingTargetProfile,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly controls?: SessionControlPatch;
+          readonly message?: PendingSessionMessage;
+        },
         noticeMessageId?: string | null,
       ): Promise<unknown>;
       handleRuntimeTurnComplete(
@@ -630,35 +629,35 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       },
     });
 
-    await testable.controlSetPendingTargetProfile(
+    await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
       {
-        sessionId: "profile:atomic",
-        profileOnly: true,
-        agentCommand: "npx",
-        agentArgs: ["-y", "@zed-industries/codex-acp"],
-        agentLabel: "codex",
-        cwd: "/tmp",
+        targetAgent: {
+          sessionId: "profile:atomic",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
         controls: { modelId: "gpt-5.5" },
-        task: { prompt: "查一下 pipeline 为什么失败", createdAt: 10 },
-        createdAt: 10,
-        updatedAt: 10,
+        message: { prompt: "查一下 pipeline 为什么失败", createdAt: 10 },
       },
       "om_handoff",
     );
 
     expect(events.notices).toHaveLength(1);
-    expect(events.notices[0]).toMatchObject({ title: "⏳ Pending target profile 已排队" });
-    expect(events.notices[0]?.body).toContain("• Agent：codex");
-    expect(events.notices[0]?.body).toContain("• Model：gpt-5.5");
-    expect(events.notices[0]?.body).toContain("• Task：已保存");
+    expect(events.notices[0]).toMatchObject({ title: "⏳ Pending configuration 已排队" });
+    expect(events.notices[0]?.body).toContain("codex");
+    expect(events.notices[0]?.body).toContain("Model: gpt-5.5");
+    expect(events.notices[0]?.body).toContain("Message：已保存");
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       agentLabel: "claude",
-      pendingTargetProfile: {
-        agentLabel: "codex",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
         controls: { modelId: "gpt-5.5" },
-        task: { prompt: "查一下 pipeline 为什么失败" },
+        message: { prompt: "查一下 pipeline 为什么失败" },
       },
     });
 
@@ -675,13 +674,13 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(events.notices).toHaveLength(1);
     expect(events.noticeUpdates).toHaveLength(1);
     expect(events.noticeUpdates[0]).toMatchObject({
-      title: "✅ Pending target profile 已生效",
+      title: "✅ Agent 已切换",
       template: "green",
     });
-    expect(events.noticeUpdates[0]?.body).toContain("**本次 Profile 更新**");
+    expect(events.noticeUpdates[0]?.body).toContain("**切换结果**");
     expect(events.noticeUpdates[0]?.body).toContain("• Agent：claude → codex");
-    expect(events.noticeUpdates[0]?.body).toContain("• Model：— → gpt-5.5");
-    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTargetProfile).toBeUndefined();
+    expect(events.noticeUpdates[0]?.body).toContain("• Model：gpt-5.5");
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
     expect(fakeRuntime.supersede).toHaveBeenCalledTimes(1);
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
@@ -728,7 +727,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     });
   });
 
-  it("does not mark a queued Agent switch successful before its pending task starts", async () => {
+  it("does not mark a queued Agent switch successful before its pending message is sent", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -740,10 +739,11 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
       controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
-      controlSetPendingTask(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        task: PendingSessionTask,
+        input: { readonly message?: PendingSessionMessage },
+        noticeMessageId?: string | null,
       ): Promise<unknown>;
       handleRuntimeTurnComplete(
         chatId: string,
@@ -762,24 +762,38 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     );
 
     await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
-    await testable.controlSetPendingTask("oc_A", "omt_1", {
-      prompt: "continue after switch",
-      createdAt: 10,
-    });
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      { message: { prompt: "continue after switch", createdAt: 10 } },
+      "om_handoff",
+    );
+    const queuedConfiguration = (await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration;
+    expect(queuedConfiguration?.targetAgent).toMatchObject({ agentLabel: "codex" });
+    expect(queuedConfiguration?.message).toMatchObject({ prompt: "continue after switch" });
+
     spawnAgentMock.mockRejectedValueOnce(new Error("target Agent failed to start"));
     fakeRuntime.processing = false;
 
     await expect(testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff")).rejects.toThrow(
       "target Agent failed to start",
     );
-    expect(events.noticeUpdates).toHaveLength(1);
-    expect(events.noticeUpdates[0]).toMatchObject({
+    expect(events.noticeUpdates.at(-1)).toMatchObject({
       title: "⚠️ 排队的 Session 操作未完成",
       template: "red",
     });
+
+    // Target startup/enqueue failed: the previous Session must remain
+    // current (not the failed codex candidate), and the whole Pending
+    // Configuration — including its attached message — must survive for a
+    // later retry (spec §9.6).
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after).toMatchObject({ sessionId: "sess_claude", agentLabel: "claude" });
+    expect(after?.pendingConfiguration).toEqual(queuedConfiguration);
+    expect(bridge.activeChatCount).toBe(0);
   });
 
-  it("rejects pending target profiles that put core profile fields under config controls", async () => {
+  it("preserves the pending configuration and does not send its message when applying queued controls fails at the turn boundary", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -790,12 +804,391 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
-      controlSetPendingTargetProfile(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        profile: PendingTargetProfile,
+        input: {
+          readonly controls?: SessionControlPatch;
+          readonly message?: PendingSessionMessage;
+        },
         noticeMessageId?: string | null,
       ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+    const enqueue = vi.fn(async () => {});
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+      capabilities: vi.fn(() => fakeCapabilitiesSnapshot()),
+      applyControlsAtTurnBoundary: vi.fn(async () => {
+        throw new Error("control apply failed");
+      }),
+      enqueue,
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        controls: { bridgePermissionMode: "alwaysAllow" },
+        message: { prompt: "continue after controls", createdAt: 10 },
+      },
+      "om_handoff",
+    );
+    const queuedConfiguration = (await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration;
+    expect(queuedConfiguration?.controls).toMatchObject({ bridgePermissionMode: "alwaysAllow" });
+
+    fakeRuntime.processing = false;
+    await expect(testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff")).rejects.toThrow(
+      "control apply failed",
+    );
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(events.noticeUpdates.at(-1)).toMatchObject({
+      title: "⚠️ 排队的 Session 操作未完成",
+      template: "red",
+    });
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after?.pendingConfiguration).toEqual(queuedConfiguration);
+  });
+
+  it("treats a queued message delivery failure at the turn boundary as a hard failure and preserves the pending configuration", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: {
+          readonly controls?: SessionControlPatch;
+          readonly message?: PendingSessionMessage;
+        },
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+      capabilities: vi.fn(() => fakeCapabilitiesSnapshot()),
+      applyControlsAtTurnBoundary: vi.fn(async () => {}),
+      enqueue: vi.fn(async () => {
+        throw new Error("message enqueue failed");
+      }),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        controls: { bridgePermissionMode: "alwaysAllow" },
+        message: { prompt: "continue after controls", createdAt: 10 },
+      },
+      "om_handoff",
+    );
+    const queuedConfiguration = (await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration;
+
+    fakeRuntime.processing = false;
+    await expect(testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff")).rejects.toThrow(
+      "message enqueue failed",
+    );
+
+    // Controls did apply successfully, but the message failed to send: the
+    // whole application is a hard failure, not a logged-and-ignored warning
+    // (spec §9.6) — the Pending Configuration must still be there for retry.
+    expect(events.noticeUpdates.at(-1)).toMatchObject({
+      title: "⚠️ 排队的 Session 操作未完成",
+      template: "red",
+    });
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after?.pendingConfiguration).toEqual(queuedConfiguration);
+  });
+
+  it("does not let an in-flight turn-boundary apply clear a newer pending configuration written while it was applying controls", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: { readonly controls?: SessionControlPatch },
+        noticeMessageId?: string | null,
+      ): Promise<unknown>;
+      handleRuntimeTurnComplete(
+        chatId: string,
+        threadId: string | null,
+        messageId: string,
+      ): Promise<void>;
+    };
+    const fakeRuntime = {
+      processing: true,
+      lastMessageId: "om_handoff",
+      supersede: vi.fn(async () => {}),
+      capabilities: vi.fn(() => fakeCapabilitiesSnapshot()),
+      applyControlsAtTurnBoundary: vi.fn(async () => {
+        // Simulate a later `configure` request racing in via the store and
+        // replacing the Pending Configuration while this apply is already
+        // in flight (in production this is excluded by the per-topic lock;
+        // this directly exercises the conditional-clear safety net).
+        await store.setPendingConfiguration(
+          { chatId: "oc_A", threadId: "omt_1" },
+          { controls: { bridgePermissionMode: "alwaysDeny" }, createdAt: 1, updatedAt: 999 },
+        );
+      }),
+    };
+    (bridge as unknown as { chats: Map<string, typeof fakeRuntime> }).chats.set(
+      "oc_A\u0000omt_1",
+      fakeRuntime,
+    );
+
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      { controls: { bridgePermissionMode: "alwaysAllow" } },
+      "om_handoff",
+    );
+
+    fakeRuntime.processing = false;
+    await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
+
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after?.pendingConfiguration).toMatchObject({
+      controls: { bridgePermissionMode: "alwaysDeny" },
+    });
+  });
+
+  it("persists an idle pending configuration before applying and retains it when the switch fails", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly message?: PendingSessionMessage;
+        },
+        noticeMessageId?: string | null,
+      ): Promise<{ readonly rejected?: true }>;
+      activeChatCount: number;
+    };
+
+    // Idle topic (no live runtime): the target Agent's first-turn spawn fails,
+    // so the whole switch fails through the same canonical applier the Turn
+    // boundary uses. The candidate is persisted before applying, so the
+    // previous Session stays selected with its Pending Configuration intact.
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockRejectedValue(new Error("spawn failed"));
+
+    const result = await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        targetAgent: {
+          sessionId: "profile:atomic",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+        message: { prompt: "continue the task", createdAt: 10 },
+      },
+      "om_handoff",
+    );
+
+    expect(result).toMatchObject({ rejected: true });
+    expect(spawnAgentMock).toHaveBeenCalled();
+    expect(testable.activeChatCount).toBe(0);
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after).toMatchObject({
+      sessionId: "sess_claude",
+      agentLabel: "claude",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
+        message: { prompt: "continue the task" },
+      },
+    });
+  });
+
+  it("restart recovery delivers the attached message exactly once after a target Agent switch", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      acquireRuntime(
+        chatId: string,
+        threadId: string | null,
+        binding: unknown,
+      ): Promise<{
+        enqueue(message: { prompt: []; messageId: string; chatId: string }): Promise<void>;
+      }>;
+    };
+
+    // A leftover Pending Configuration as if the Bridge restarted right
+    // after the request was queued but before its Turn boundary ran.
+    await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "omt_1" },
+      {
+        targetAgent: {
+          sessionId: "profile:restart",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+        message: { prompt: "resume after restart", createdAt: 10 },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    );
+
+    await testable.acquireRuntime("oc_A", "omt_1", {
+      cwd: "/tmp",
+      command: "npx",
+      args: ["-y", "@zed-industries/claude-code-acp"],
+      label: "claude",
+      explicit: true,
+      reception: false,
+    });
+
+    await vi.waitFor(async () => {
+      expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({ agentLabel: "codex" });
+    });
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
+    // Exactly one Agent process was spawned — a recursive `acquireRuntime`
+    // loop while delivering the recovered message would spawn (and orphan)
+    // more than one.
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+    expect(events.notices.at(-1)).toMatchObject({ title: "✅ Agent 已切换" });
+    expect(events.notices.at(-1)?.body).toContain("已携带同一条请求中的 message");
+  });
+
+  it("restart recovery delivers the attached message exactly once after a controls-only pending configuration", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      acquireRuntime(
+        chatId: string,
+        threadId: string | null,
+        binding: unknown,
+      ): Promise<{
+        enqueue(message: { prompt: []; messageId: string; chatId: string }): Promise<void>;
+      }>;
+    };
+
+    await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "omt_1" },
+      {
+        controls: { bridgePermissionMode: "alwaysAllow" },
+        message: { prompt: "resume after restart", createdAt: 10 },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    );
+    // Delivering the recovered Message admits it onto a real ChatRuntime,
+    // whose background turn processing would otherwise run to completion
+    // (and fire its own nested Turn-boundary check) during this test. Hold
+    // that background Turn open so this test observes only the recovery
+    // application itself — exactly-once delivery is asserted via the
+    // `prompt` call count instead.
+    const promptSpy = vi.fn(() => new Promise<never>(() => {}));
+    const agent = fakeAgentProcess("sess_claude");
+    agent.connection.prompt = promptSpy;
+    spawnAgentMock.mockResolvedValueOnce(agent);
+
+    await testable.acquireRuntime("oc_A", "omt_1", {
+      cwd: "/tmp",
+      command: "npx",
+      args: ["-y", "@zed-industries/claude-code-acp"],
+      label: "claude",
+      explicit: true,
+      reception: false,
+    });
+
+    await vi.waitFor(async () => {
+      expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+        controls: { bridgePermissionMode: "alwaysAllow" },
+      });
+    });
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1));
+  });
+
+  it("rejects a pending configuration that puts core profile fields under config controls", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly controls?: SessionControlPatch;
+        },
+        noticeMessageId?: string | null,
+      ): Promise<{ readonly rejected?: true; readonly reason?: string }>;
     };
 
     const fakeRuntime = {
@@ -822,29 +1215,29 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       },
     });
 
-    await expect(
-      testable.controlSetPendingTargetProfile(
-        "oc_A",
-        "omt_1",
-        {
+    const result = await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        targetAgent: {
           sessionId: "profile:bad-config",
           profileOnly: true,
           agentCommand: "npx",
           agentArgs: ["-y", "@zed-industries/codex-acp"],
           agentLabel: "codex",
           cwd: "/tmp",
-          controls: { config: { model: { value: "gpt-5.6-sol" } } },
-          createdAt: 10,
-          updatedAt: 10,
         },
-        "om_handoff",
-      ),
-    ).rejects.toThrow(/Config model[\s\S]*controls\.modelId[\s\S]*controls\.config/);
+        controls: { config: { model: { value: "gpt-5.6-sol" } } },
+      },
+      "om_handoff",
+    );
 
-    expect((await store.getLatest("oc_A", "omt_1"))?.pendingTargetProfile).toBeUndefined();
+    expect(result.rejected).toBe(true);
+    expect(result.reason).toMatch(/Config model[\s\S]*controls\.modelId[\s\S]*controls\.config/);
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
   });
 
-  it("keeps the atomic pending task even if the finishing old runtime persists its session", async () => {
+  it("keeps the atomic pending configuration even if the finishing old runtime re-persists its session", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -855,10 +1248,13 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
-      controlSetPendingTargetProfile(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        profile: PendingTargetProfile,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly message?: PendingSessionMessage;
+        },
         noticeMessageId?: string | null,
       ): Promise<unknown>;
       handleRuntimeTurnComplete(
@@ -879,36 +1275,45 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       fakeRuntime,
     );
 
-    await testable.controlSetPendingTargetProfile(
+    await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
       {
-        sessionId: "profile:atomic",
-        profileOnly: true,
-        agentCommand: "npx",
-        agentArgs: ["-y", "@zed-industries/codex-acp"],
-        agentLabel: "codex",
-        cwd: "/tmp",
-        task: { prompt: "继续执行用户任务", createdAt: 10 },
-        createdAt: 10,
-        updatedAt: 10,
+        targetAgent: {
+          sessionId: "profile:atomic",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+        message: { prompt: "继续执行用户任务", createdAt: 10 },
       },
       "om_handoff",
     );
 
-    // Reproduces the real race: when the old runtime finishes, ChatRuntime.persistSession()
-    // rewrites the old session record. The in-memory pending target profile must still
-    // carry its task through the post-turn Agent switch.
-    await store.save({ ...existingClaudeSession(), updatedAt: 99 });
+    // Reproduces the real race: when the old runtime finishes, its own
+    // ChatRuntime.persistSession() re-saves the old session record — as it
+    // does in production, carrying `pendingConfiguration` forward untouched
+    // (spec §9.3: only the Bridge mutates it). The persisted Pending
+    // Configuration must still be there for the post-turn Agent switch.
+    const beforeReSave = await store.getLatest("oc_A", "omt_1");
+    await store.save({
+      ...existingClaudeSession(),
+      updatedAt: 99,
+      ...(beforeReSave?.pendingConfiguration
+        ? { pendingConfiguration: beforeReSave.pendingConfiguration }
+        : {}),
+    });
 
     fakeRuntime.processing = false;
     await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
 
     await vi.waitFor(() => expect(testable.activeChatCount).toBe(1));
     expect(events.noticeUpdates.at(-1)).toMatchObject({
-      title: "✅ Pending target profile 已生效",
+      title: "✅ Agent 已切换",
     });
-    expect(events.noticeUpdates.at(-1)?.body).toContain("正在交给目标 Agent 执行 pending task");
+    expect(events.noticeUpdates.at(-1)?.body).toContain("已携带同一条请求中的 message");
     expect(spawnAgentMock).toHaveBeenCalledTimes(1);
   });
 
@@ -924,10 +1329,10 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
       controlSetAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
-      controlSetControls(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        controls: SessionControlPatch,
+        input: { readonly controls?: SessionControlPatch },
         noticeMessageId?: string | null,
       ): Promise<unknown>;
       handleRuntimeTurnComplete(
@@ -975,7 +1380,12 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     });
 
     await testable.controlSetAgent(codexProfileRecord(), "om_handoff");
-    await testable.controlSetControls("oc_A", "omt_1", { modelId: "gpt-5.5" }, "om_model");
+    await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      { controls: { modelId: "gpt-5.5" } },
+      "om_model",
+    );
 
     fakeRuntime.processing = false;
     await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
@@ -987,7 +1397,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     });
   });
 
-  it("persists controls merged into an already queued pending target profile", async () => {
+  it("persists controls merged into an already queued pending configuration", async () => {
     const store = new MemorySessionStore([existingClaudeSession()]);
     const events: PresenterEvents = {
       warnings: [],
@@ -998,16 +1408,14 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
     const testable = bridge as unknown as {
-      controlSetControls(
+      controlConfigureSession(
         chatId: string,
         threadId: string | null,
-        controls: SessionControlPatch,
-        noticeMessageId?: string | null,
-      ): Promise<unknown>;
-      controlSetPendingTargetProfile(
-        chatId: string,
-        threadId: string | null,
-        profile: PendingTargetProfile,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly controls?: SessionControlPatch;
+          readonly message?: PendingSessionMessage;
+        },
         noticeMessageId?: string | null,
       ): Promise<unknown>;
     };
@@ -1048,36 +1456,36 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
         },
       });
 
-    await testable.controlSetPendingTargetProfile(
+    await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
       {
-        sessionId: "profile:atomic",
-        profileOnly: true,
-        agentCommand: "npx",
-        agentArgs: ["-y", "@zed-industries/codex-acp"],
-        agentLabel: "codex",
-        cwd: "/tmp",
+        targetAgent: {
+          sessionId: "profile:atomic",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
         controls: { modelId: "gpt-5.5" },
-        task: { prompt: "继续检查", createdAt: 10 },
-        createdAt: 10,
-        updatedAt: 10,
+        message: { prompt: "继续检查", createdAt: 10 },
       },
       "om_handoff",
     );
-    await testable.controlSetControls(
+    await testable.controlConfigureSession(
       "oc_A",
       "omt_1",
-      { modelId: "gpt-5.6", modeId: "agent" },
+      { controls: { modelId: "gpt-5.6", modeId: "agent" } },
       "om_model",
     );
 
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       agentLabel: "claude",
-      pendingTargetProfile: {
-        agentLabel: "codex",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
         controls: { modelId: "gpt-5.6", modeId: "agent" },
-        task: { prompt: "继续检查" },
+        message: { prompt: "继续检查" },
       },
     });
   });
@@ -1100,6 +1508,300 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       profileOnly: true,
       agentLabel: "codex",
+    });
+  });
+
+  it("persists a profile-only carrier with the pending snapshot before a brand-new target Agent starts", async () => {
+    const store = new MemorySessionStore();
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly message?: PendingSessionMessage;
+        },
+        noticeMessageId?: string | null,
+      ): Promise<{
+        readonly applied?: true;
+        readonly agent?: string;
+        readonly messageSent?: boolean;
+      }>;
+    };
+
+    const order: string[] = [];
+    const savedRecords: SessionRecord[] = [];
+    const originalSave = store.save.bind(store);
+    vi.spyOn(store, "save").mockImplementation(async (record) => {
+      order.push(record.pendingConfiguration ? "save-carrier-with-pending" : "save-clean");
+      savedRecords.push(structuredClone(record));
+      await originalSave(record);
+    });
+    // Hold the target Agent's first turn open so the just-started switch stays
+    // observable without a background completion racing the assertions.
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockImplementation(async () => {
+      order.push("spawn");
+      const agent = fakeAgentProcess("sess_codex");
+      agent.connection.prompt = vi.fn(() => new Promise<never>(() => {}));
+      return agent;
+    });
+
+    const result = await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        targetAgent: {
+          sessionId: "profile:new",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+        message: { prompt: "start the task", createdAt: 10 },
+      },
+      "om_new",
+    );
+
+    expect(result).toMatchObject({ applied: true, agent: "codex", messageSent: true });
+    // The profile-only carrier carrying the full pending snapshot was persisted
+    // before the target Agent process was ever spawned.
+    expect(order[0]).toBe("save-carrier-with-pending");
+    expect(order.indexOf("save-carrier-with-pending")).toBeLessThan(order.indexOf("spawn"));
+    expect(savedRecords[0]).toMatchObject({
+      profileOnly: true,
+      agentLabel: "codex",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
+        message: { prompt: "start the task" },
+      },
+    });
+    // The switch reads as "from no previous Session", never a same-Agent self-switch.
+    const switched = events.notices.find((notice) => notice.title === "✅ Agent 已切换");
+    expect(switched?.body).toContain("Agent：未绑定 → codex");
+    expect(switched?.body).not.toContain("codex → codex");
+    // Steady state: the carrier is replaced by the applied target with no
+    // pending config left behind (the delivered Message then evolves it into a
+    // live session).
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after).toMatchObject({ agentLabel: "codex" });
+    expect(after?.pendingConfiguration).toBeUndefined();
+  });
+
+  it("applies the persisted carrier snapshot, not the caller's local candidate, on a brand-new topic", async () => {
+    const store = new MemorySessionStore();
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: { readonly targetAgent?: PendingTargetAgent },
+        noticeMessageId?: string | null,
+      ): Promise<{ readonly applied?: true; readonly agent?: string }>;
+    };
+
+    // The store rewrites the carrier's Agent identity as it is persisted. If the
+    // canonical applier re-reads the persisted snapshot (as required) the
+    // rewritten Agent is applied; using the caller's local object would apply
+    // the original "codex" label instead.
+    const originalSave = store.save.bind(store);
+    vi.spyOn(store, "save").mockImplementation(async (record) => {
+      const pending = record.pendingConfiguration;
+      const rewritten: SessionRecord = pending?.targetAgent
+        ? {
+            ...record,
+            agentLabel: "persisted-codex",
+            pendingConfiguration: {
+              ...pending,
+              targetAgent: { ...pending.targetAgent, agentLabel: "persisted-codex" },
+            },
+          }
+        : record;
+      await originalSave(rewritten);
+    });
+
+    const result = await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        targetAgent: {
+          sessionId: "profile:new",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+      },
+      "om_new",
+    );
+
+    expect(result).toMatchObject({ applied: true, agent: "persisted-codex" });
+    expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({ agentLabel: "persisted-codex" });
+    const switched = events.notices.find((notice) => notice.title === "✅ Agent 已切换");
+    expect(switched?.body).toContain("Agent：未绑定 → persisted-codex");
+  });
+
+  it("retains the durable carrier with its pending configuration when a brand-new switch fails", async () => {
+    const store = new MemorySessionStore();
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      controlConfigureSession(
+        chatId: string,
+        threadId: string | null,
+        input: {
+          readonly targetAgent?: PendingTargetAgent;
+          readonly message?: PendingSessionMessage;
+        },
+        noticeMessageId?: string | null,
+      ): Promise<{ readonly rejected?: true }>;
+    };
+
+    // Brand-new topic, no prior Session: the target Agent's first-turn spawn
+    // fails through the same canonical applier, so the durable carrier must
+    // survive with its full pending configuration for a later retry.
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockRejectedValue(new Error("spawn failed"));
+
+    const result = await testable.controlConfigureSession(
+      "oc_A",
+      "omt_1",
+      {
+        targetAgent: {
+          sessionId: "profile:new",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@zed-industries/codex-acp"],
+          agentLabel: "codex",
+          cwd: "/tmp",
+        },
+        message: { prompt: "start the task", createdAt: 10 },
+      },
+      "om_new",
+    );
+
+    expect(result).toMatchObject({ rejected: true });
+    expect(bridge.activeChatCount).toBe(0);
+    const after = await store.getLatest("oc_A", "omt_1");
+    expect(after).toMatchObject({
+      profileOnly: true,
+      agentLabel: "codex",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "codex" },
+        message: { prompt: "start the task" },
+      },
+    });
+    // A brand-new failure never claims a prior-Session same-Agent self-switch.
+    expect(events.notices.every((notice) => !notice.body.includes("codex → codex"))).toBe(true);
+    expect(events.noticeUpdates.every((notice) => !notice.body.includes("codex → codex"))).toBe(
+      true,
+    );
+  });
+
+  it("sends only the dedicated pending failure notice, not a generic Agent failure notice, when the pending application fails after a successful turn", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as {
+      acquireRuntime(
+        chatId: string,
+        threadId: string | null,
+        binding: unknown,
+      ): Promise<{
+        enqueue(message: {
+          prompt: { type: "text"; text: string }[];
+          messageId: string;
+          chatId: string;
+        }): Promise<void>;
+        readonly processing: boolean;
+      }>;
+    };
+
+    // A live claude turn whose prompt we hold open so a Pending Configuration
+    // can be queued mid-turn and applied exactly at the Turn boundary.
+    let resolvePrompt: (response: acp.PromptResponse) => void = () => {};
+    const agent = fakeAgentProcess("sess_claude");
+    agent.connection.prompt = () =>
+      new Promise<acp.PromptResponse>((resolve) => {
+        resolvePrompt = resolve;
+      });
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockResolvedValue(agent);
+
+    const runtime = await testable.acquireRuntime("oc_A", "omt_1", {
+      cwd: "/tmp",
+      command: "npx",
+      args: ["-y", "@zed-industries/claude-code-acp"],
+      label: "claude",
+      explicit: true,
+      reception: false,
+    });
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "do the work" }],
+      messageId: "om_turn",
+      chatId: "oc_A",
+    });
+    await vi.waitFor(() => expect(runtime.processing).toBe(true));
+
+    // Queue a controls-only Pending Configuration that is valid to persist but
+    // fails to apply at the Turn boundary (the live agent exposes no model
+    // controls), simulating capabilities drift between queue and apply.
+    await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "omt_1" },
+      { controls: { modelId: "gone-at-apply-time" }, createdAt: 1, updatedAt: 1 },
+    );
+
+    // The turn itself completes successfully; only the Pending Configuration
+    // application fails at the Turn boundary.
+    resolvePrompt({ stopReason: "end_turn" });
+
+    await vi.waitFor(() => {
+      expect(
+        [...events.notices, ...events.noticeUpdates].some(
+          (notice) => notice.title === "⚠️ 排队的 Session 操作未完成",
+        ),
+      ).toBe(true);
+    });
+    // Let any (erroneous) second failure card flush before asserting only one.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const failureCards = [...events.notices, ...events.noticeUpdates].filter(
+      (notice) => notice.template === "red",
+    );
+    expect(failureCards).toHaveLength(1);
+    expect(failureCards[0]).toMatchObject({ title: "⚠️ 排队的 Session 操作未完成" });
+    // The Pending Configuration is retained for retry after the failed apply.
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toMatchObject({
+      controls: { modelId: "gone-at-apply-time" },
     });
   });
 });
@@ -1239,7 +1941,7 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
     }
   });
 
-  it("persists atomic pending target profile Agent and controls from the configured control chat into settings.json", async () => {
+  it("persists atomic pending configuration Agent and controls from the configured control chat into settings.json", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-global-default-target-profile-"));
     try {
       const settingsPath = path.join(dir, "settings.json");
@@ -1260,37 +1962,58 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         globalDefaultControlChatIds: ["oc_DM"],
       });
       const testable = bridge as unknown as {
-        controlSetPendingTargetProfile(
+        controlConfigureSession(
           chatId: string,
           threadId: string | null,
-          profile: PendingTargetProfile,
+          input: {
+            readonly targetAgent?: PendingTargetAgent;
+            readonly controls?: SessionControlPatch;
+          },
           noticeMessageId?: string | null,
-        ): Promise<unknown>;
+        ): Promise<{ readonly rejected?: true }>;
+        persistGlobalDefaultAgent(target: string, messageId: string | null): Promise<void>;
+        persistGlobalDefaultControls(
+          controls: SessionControlPatch,
+          messageId: string | null,
+        ): Promise<void>;
       };
+      probeAgentSessionCapabilitiesMock.mockResolvedValueOnce({
+        sessionId: "probe_codex",
+        capabilities: {
+          models: {
+            currentModelId: "auto",
+            availableModels: [
+              { modelId: "auto", name: "Auto" },
+              { modelId: "gpt-5.5", name: "GPT-5.5" },
+            ],
+          },
+        },
+      });
 
-      await testable.controlSetPendingTargetProfile(
-        "oc_DM",
-        null,
-        {
+      const input = {
+        targetAgent: {
           sessionId: "profile:codex-gpt",
           profileOnly: true,
           agentCommand: "npx",
           agentArgs: ["-y", "@zed-industries/codex-acp"],
           agentLabel: "codex",
           cwd: "/tmp",
-          controls: { modelId: "gpt-5.5" },
-          createdAt: 10,
-          updatedAt: 10,
         },
-        "om_dm_handoff",
-      );
+        controls: { modelId: "gpt-5.5" },
+      };
+      // Mirrors the `configureSession` control-server handler wrapper in
+      // startControlServer(), which persists global defaults after a
+      // successful configure from a configured DM control chat.
+      const result = await testable.controlConfigureSession("oc_DM", null, input, "om_dm_handoff");
+      expect(result).not.toHaveProperty("rejected");
+      await testable.persistGlobalDefaultAgent(input.targetAgent.agentLabel, null);
+      await testable.persistGlobalDefaultControls(input.controls, null);
 
       const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
         runtime?: { agent?: string; defaultControls?: SessionControls };
       };
       expect(settings.runtime?.agent).toBe("codex");
       expect(settings.runtime?.defaultControls).toMatchObject({ modelId: "gpt-5.5" });
-      expect(events.notices.some((notice) => notice.body.includes("全局默认"))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1394,5 +2117,129 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Resolve `work`, or reject once `ms` elapses, so a deadlocked call surfaces
+ * as an explicit "did not settle" failure instead of a generic test timeout.
+ */
+async function settlesWithin<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe("LarkBridge Pending Configuration lock — runtime acquisition under lock", () => {
+  interface AcquisitionTestable {
+    controlSendMessage(
+      chatId: string,
+      threadId: string | null,
+      message: PendingSessionMessage,
+      noticeMessageId?: string | null,
+    ): Promise<{ readonly sent: true } | { readonly queued: true }>;
+    acquireRuntime(
+      chatId: string,
+      threadId: string | null,
+      binding: unknown,
+    ): Promise<{
+      enqueue(message: {
+        prompt: { type: "text"; text: string }[];
+        messageId: string;
+        chatId: string;
+      }): Promise<void>;
+    }>;
+  }
+
+  beforeEach(() => {
+    probeAgentSessionCapabilitiesMock.mockReset();
+    probeAgentSessionCapabilitiesMock.mockResolvedValue({ sessionId: "probe", capabilities: {} });
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockResolvedValue(fakeAgentProcess("sess_claude"));
+  });
+
+  it("controlSendMessage with no cached runtime settles and sends exactly once without deadlocking", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as AcquisitionTestable;
+
+    // Hold the delivered Message's turn open so the test observes only the
+    // send path; exactly-once delivery is asserted via the prompt spy.
+    const promptSpy = vi.fn(() => new Promise<never>(() => {}));
+    const agent = fakeAgentProcess("sess_claude");
+    agent.connection.prompt = promptSpy;
+    spawnAgentMock.mockReset();
+    spawnAgentMock.mockResolvedValue(agent);
+
+    // There is no cached runtime and no persisted Pending Configuration, so
+    // this holds withPendingConfigurationLock and then acquires a runtime.
+    // Before the fix that acquisition re-entered the same non-reentrant lock
+    // via restart recovery and deadlocked (empirically reproduced as a
+    // timeout); it must now settle.
+    const result = await settlesWithin(
+      testable.controlSendMessage("oc_A", "omt_1", { prompt: "hello", createdAt: 10 }, "om_send"),
+      2000,
+      "controlSendMessage",
+    );
+
+    expect(result).toEqual({ sent: true });
+    // Exactly one runtime built (no recursive acquire) and the Message
+    // delivered exactly once.
+    expect(spawnAgentMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1));
+    // No phantom Pending Configuration was written behind the send.
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
+  });
+
+  it("ordinary runtime acquisition still runs pending recovery (send-path skip does not leak)", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const testable = bridge as unknown as AcquisitionTestable;
+
+    // A leftover controls-only Pending Configuration, as if the Bridge
+    // restarted before its Turn boundary ran.
+    await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "omt_1" },
+      { controls: { bridgePermissionMode: "alwaysAllow" }, createdAt: 1, updatedAt: 1 },
+    );
+
+    // Ordinary ingress acquisition (default "recover-on-acquire" policy) must
+    // still apply the leftover Pending Configuration before building the
+    // runtime — the send-path "pending-observed-under-lock" skip must not leak.
+    await testable.acquireRuntime("oc_A", "omt_1", {
+      cwd: "/tmp",
+      command: "npx",
+      args: ["-y", "@zed-industries/claude-code-acp"],
+      label: "claude",
+      explicit: true,
+      reception: false,
+    });
+
+    await vi.waitFor(async () => {
+      expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
+        controls: { bridgePermissionMode: "alwaysAllow" },
+      });
+    });
+    expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toBeUndefined();
   });
 });

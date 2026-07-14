@@ -1,6 +1,9 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { BindingStore, ChatBinding } from "./binding-store.js";
+import {
+  isSettingsFileReadable,
+  readSettingsFileObjectTolerant,
+  writeSettingsFileObject,
+} from "../settings-file/settings-file.js";
 
 /** Shape of one entry under the settings.json `bindings` block. */
 interface StoredBinding {
@@ -26,7 +29,7 @@ export class SettingsBindingStore implements BindingStore {
   }
 
   async init(): Promise<void> {
-    fs.mkdirSync(path.dirname(this.settingsPath), { recursive: true });
+    // The shared writer creates the parent directory on the first write.
   }
 
   async close(): Promise<void> {
@@ -40,20 +43,20 @@ export class SettingsBindingStore implements BindingStore {
   }
 
   async set(binding: ChatBinding): Promise<void> {
-    const root = this.readRoot();
+    const root = readSettingsFileObjectTolerant(this.settingsPath);
     const bindings = this.bindingsOf(root);
     bindings[binding.chatId] = { cwd: binding.cwd };
     root["bindings"] = bindings;
-    this.writeRoot(root);
+    writeSettingsFileObject(this.settingsPath, root);
   }
 
   async delete(chatId: string): Promise<void> {
-    const root = this.readRoot();
+    const root = readSettingsFileObjectTolerant(this.settingsPath);
     const bindings = this.bindingsOf(root);
     if (!(chatId in bindings)) return;
     delete bindings[chatId];
     root["bindings"] = bindings;
-    this.writeRoot(root);
+    writeSettingsFileObject(this.settingsPath, root);
   }
 
   async list(): Promise<readonly ChatBinding[]> {
@@ -69,13 +72,7 @@ export class SettingsBindingStore implements BindingStore {
    * read instead of mistaking it for "all bindings removed".
    */
   isReadable(): boolean {
-    if (!fs.existsSync(this.settingsPath)) return true;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.settingsPath, "utf-8")) as unknown;
-      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
-    } catch {
-      return false;
-    }
+    return isSettingsFileReadable(this.settingsPath);
   }
 
   // ----- internals --------------------------------------------------------
@@ -92,7 +89,7 @@ export class SettingsBindingStore implements BindingStore {
 
   /** Read only the `bindings` map (empty object when file/key absent or bad). */
   private readBindings(): Record<string, StoredBinding> {
-    return this.bindingsOf(this.readRoot());
+    return this.bindingsOf(readSettingsFileObjectTolerant(this.settingsPath));
   }
 
   private bindingsOf(root: Record<string, unknown>): Record<string, StoredBinding> {
@@ -106,32 +103,5 @@ export class SettingsBindingStore implements BindingStore {
       }
     }
     return out;
-  }
-
-  /**
-   * Read the whole settings.json object. Returns `{}` when the file is absent
-   * or unparseable (e.g. an agent is mid-write) so a transient bad read never
-   * throws — the caller keeps its last-good in-memory state.
-   */
-  private readRoot(): Record<string, unknown> {
-    if (!fs.existsSync(this.settingsPath)) return {};
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.settingsPath, "utf-8")) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-      return {};
-    } catch {
-      return {};
-    }
-  }
-
-  /** Atomically write the whole settings object: temp file + rename. */
-  private writeRoot(root: Record<string, unknown>): void {
-    const dir = path.dirname(this.settingsPath);
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = path.join(dir, `.settings.${process.pid}.${Date.now()}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify(root, null, 2), { encoding: "utf-8", mode: 0o600 });
-    fs.renameSync(tmp, this.settingsPath);
   }
 }

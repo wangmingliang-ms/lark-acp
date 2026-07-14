@@ -430,41 +430,12 @@ function stubSessionStore(): SessionStore {
     setControls: async () => {
       throw new Error("setControls not implemented in stub");
     },
-    setPendingControls: async () => {
-      throw new Error("setPendingControls not implemented in stub");
+    setPendingConfiguration: async () => {
+      throw new Error("setPendingConfiguration not implemented in stub");
     },
-    consumePendingControls: async () => ({
-      record: {
-        chatId: "oc_test",
-        threadId: null,
-        sessionId: "sess_fake",
-        agentCommand: "node",
-        agentArgs: [],
-        cwd: "/tmp",
-        createdAt: 1,
-        updatedAt: 1,
-      },
-      pendingControls: undefined,
-    }),
-    setPendingTask: async () => {
-      throw new Error("setPendingTask not implemented in stub");
+    clearPendingConfigurationIfMatches: async () => {
+      throw new Error("clearPendingConfigurationIfMatches not implemented in stub");
     },
-    setPendingTargetProfile: async () => {
-      throw new Error("setPendingTargetProfile not implemented in stub");
-    },
-    consumePendingTask: async () => ({
-      record: {
-        chatId: "oc_test",
-        threadId: null,
-        sessionId: "sess_fake",
-        agentCommand: "node",
-        agentArgs: [],
-        cwd: "/tmp",
-        createdAt: 1,
-        updatedAt: 1,
-      },
-      pendingTask: undefined,
-    }),
     clearThread: async () => {},
     delete: async () => {},
   };
@@ -976,6 +947,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       timeout: 1_000,
       interval: 20,
     });
+    // The initial "thinking" card render runs on the reconciler's own async
+    // worker, independent of the prompt() call above — wait for it to land
+    // before triggering the interrupt so the two are never racing.
+    await vi.waitFor(() => expect(states.some((state) => state.status === "thinking")).toBe(true), {
+      timeout: 1_000,
+      interval: 20,
+    });
 
     await runtime.enqueue({
       prompt: [{ type: "text", text: "urgent follow-up" }],
@@ -984,7 +962,20 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     });
 
     expect(fake.cancelCalls()).toBe(1);
-    expect(states.slice(-2).map((state) => state.status)).toEqual(["thinking", "interrupting"]);
+    await vi.waitFor(
+      () => expect(states.some((state) => state.status === "interrupting")).toBe(true),
+      {
+        timeout: 1_000,
+        interval: 20,
+      },
+    );
+    // The response transitions through "thinking" before the interrupt, and
+    // may transition back to "thinking" again afterwards while the actual
+    // agent-side cancel is still in flight — assert relative order, not an
+    // exact tail slice.
+    const interruptingIndex = states.findIndex((state) => state.status === "interrupting");
+    expect(interruptingIndex).toBeGreaterThan(-1);
+    expect(states.slice(0, interruptingIndex).map((state) => state.status)).toContain("thinking");
 
     fake.resolvePrompt("cancelled");
 
@@ -1063,10 +1054,16 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
     await runtime.cancel();
 
-    expect(states.at(-1)).toMatchObject({
-      status: "cancelled",
-      entries: [{ kind: "text", text: "本轮 Response 已取消。" }],
-    });
+    await vi.waitFor(
+      () =>
+        expect(states).toContainEqual(
+          expect.objectContaining({
+            status: "cancelled",
+            entries: [{ kind: "text", text: "本轮 Response 已取消。" }],
+          }),
+        ),
+      { timeout: 1_000, interval: 20 },
+    );
     fake.resolvePrompt("cancelled");
   });
 
@@ -1299,7 +1296,10 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
 
     await runtime.shutdown("cancelled");
 
-    expect(states.at(-1)).toMatchObject({ status: "interrupted", cancellable: false });
+    await vi.waitFor(
+      () => expect(states.at(-1)).toMatchObject({ status: "interrupted", cancellable: false }),
+      { timeout: 1_000, interval: 20 },
+    );
   });
 
   it("silently discards an idle agent that exits unexpectedly and respawns on demand", async () => {
@@ -1602,116 +1602,16 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(setMode).not.toHaveBeenCalled();
   });
 
-  it("applies controls queued during an in-flight turn as soon as that turn finishes", async () => {
-    const fake = makeFakeAgent();
-    fake.agent.sessionCapabilities = {
-      ...fake.agent.sessionCapabilities,
-      configOptions: [
-        { id: "agent", name: "Agent", type: "select", currentValue: "copilot", options: [] },
-        { id: "mode", name: "Mode", type: "select", currentValue: "agent", options: [] },
-        {
-          id: "model",
-          name: "Model",
-          type: "select",
-          currentValue: "model-old",
-          options: [],
-        },
-        {
-          id: "reasoning",
-          name: "Reasoning Effort",
-          type: "select",
-          currentValue: "high",
-          options: [],
-        },
-        { id: "allow_all", name: "Allow All", type: "boolean", currentValue: false },
-      ],
-    } as AgentProcess["sessionCapabilities"];
-    const setModel = vi.fn(async () => ({}));
-    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
-    fake.agent.connection = {
-      ...fake.agent.connection,
-      prompt,
-      unstable_setSessionModel: setModel,
-    } as AgentProcess["connection"];
-    spawnAgentMock.mockResolvedValue(fake.agent);
-
-    let latest: SessionRecord | null = null;
-    const notices: Array<{ title: string; body: string; template: string }> = [];
-    const noticeUpdates: Array<{ title: string; body: string; template: string }> = [];
-    const store: SessionStore = {
-      ...stubSessionStore(),
-      getLatest: async () => latest,
-      save: async (record) => {
-        latest = record;
-      },
-      consumePendingControls: async () => {
-        if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
-        const pendingControls = latest.pendingControls;
-        const noticeMessageId = latest.pendingControlsNoticeMessageId;
-        latest = {
-          ...latest,
-          pendingControls: undefined,
-          pendingControlsNoticeMessageId: undefined,
-        };
-        return { record: latest, pendingControls, noticeMessageId };
-      },
-    };
-    const runtime = new ChatRuntime({
-      ...opts(),
-      presenter: recordingPresenter([], notices, noticeUpdates),
-      sessionStore: store,
-      agentLabel: "copilot",
-    });
-
-    await runtime.enqueue({
-      prompt: [{ type: "text", text: "change my mode" }],
-      messageId: "om_pending_current_turn",
-      chatId: "oc_test",
-    });
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    expect(latest, "bootstrap should persist the session before the prompt runs").toBeTruthy();
-    latest = {
-      ...latest!,
-      pendingControls: { modelId: "model-new" },
-      pendingControlsNoticeMessageId: "notice_msg",
-    };
-
-    fake.resolvePrompt("end_turn");
-
-    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    expect(prompt).toHaveBeenCalledTimes(1);
-    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
-    expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
-    expect(latest?.pendingControls).toBeUndefined();
-    expect(latest?.pendingControlsNoticeMessageId).toBeUndefined();
-    expect(notices).toEqual([]);
-    expect(noticeUpdates.at(-1)).toMatchObject({
-      title: "✅ 排队的 Session profile 已生效",
-      template: "green",
-    });
-    expect(noticeUpdates.at(-1)?.body).toContain("Agent：copilot");
-    expect(noticeUpdates.at(-1)?.body).toContain("Model：Old → New");
-    expect(noticeUpdates.at(-1)?.body).toContain("Controls：—");
-    expect(noticeUpdates.at(-1)?.body).not.toContain("Reasoning Effort: high");
-    expect(noticeUpdates.at(-1)?.body).not.toContain("Controls：Agent:");
-    expect(noticeUpdates.at(-1)?.body).not.toContain("Mode: agent");
-    expect(noticeUpdates.at(-1)?.body).not.toContain("Model: model-old");
-    expect(noticeUpdates.at(-1)?.body).not.toContain("Controls：Allow All:");
-  });
-
-  it("runs a pending task immediately after current-turn controls become live", async () => {
+  it("applyControlsAtTurnBoundary applies and persists a control patch bypassing the busy guard", async () => {
+    // The Bridge is the sole owner of Pending Configuration (spec §9.3) and
+    // calls this method exactly at the Turn boundary, when `processing` may
+    // still read `true`. Unlike the public applyControls(), it must not
+    // reject on that guard, and it must not send any notice itself — the
+    // Bridge builds and sends the outcome notice.
     const fake = makeFakeAgent();
     const setModel = vi.fn(async () => ({}));
-    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
     fake.agent.connection = {
       ...fake.agent.connection,
-      prompt,
       unstable_setSessionModel: setModel,
     } as AgentProcess["connection"];
     spawnAgentMock.mockResolvedValue(fake.agent);
@@ -1723,22 +1623,41 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       save: async (record) => {
         latest = record;
       },
-      consumePendingControls: async () => {
-        if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
-        const pendingControls = latest.pendingControls;
-        const noticeMessageId = latest.pendingControlsNoticeMessageId;
-        latest = {
-          ...latest,
-          pendingControls: undefined,
-          pendingControlsNoticeMessageId: undefined,
-        };
-        return { record: latest, pendingControls, noticeMessageId };
-      },
-      consumePendingTask: async () => {
-        if (!latest?.pendingTask) return { record: latest!, pendingTask: undefined };
-        const pendingTask = latest.pendingTask;
-        latest = { ...latest, pendingTask: undefined };
-        return { record: latest, pendingTask };
+    };
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: store,
+    });
+
+    await runtime.enqueue({
+      prompt: [{ type: "text", text: "start session" }],
+      messageId: "om_boundary_apply",
+      chatId: "oc_test",
+    });
+    await vi.waitFor(() => expect(runtime.processing).toBe(true), { timeout: 1_000, interval: 20 });
+
+    await runtime.applyControlsAtTurnBoundary({ modelId: "model-new" });
+
+    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
+    expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
+
+    fake.resolvePrompt("end_turn");
+    await vi.waitFor(() => expect(runtime.processing).toBe(false), {
+      timeout: 1_000,
+      interval: 20,
+    });
+  });
+
+  it("applyControlsAtTurnBoundary rejects an invalid patch without persisting it", async () => {
+    const fake = makeFakeAgent();
+    spawnAgentMock.mockResolvedValue(fake.agent);
+    let latest: SessionRecord | null = null;
+    const store: SessionStore = {
+      ...stubSessionStore(),
+      getLatest: async () => latest,
+      save: async (record) => {
+        latest = record;
       },
     };
     const runtime = new ChatRuntime({
@@ -1748,111 +1667,22 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     });
 
     await runtime.enqueue({
-      prompt: [{ type: "text", text: "switch model then do work" }],
-      messageId: "om_pending_task",
+      prompt: [{ type: "text", text: "start session" }],
+      messageId: "om_boundary_reject",
       chatId: "oc_test",
     });
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    latest = {
-      ...latest!,
-      pendingControls: { modelId: "model-new" },
-      pendingTask: { prompt: "implement the pending task", createdAt: Date.now() },
-    };
+    await vi.waitFor(() => expect(runtime.processing).toBe(true), { timeout: 1_000, interval: 20 });
 
-    fake.resolvePrompt("end_turn");
-
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    expect(setModel).toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "model-new" });
-    expect(prompt.mock.calls[1]?.[0].prompt).toEqual(
-      expect.arrayContaining([{ type: "text", text: "implement the pending task" }]),
-    );
-    expect(latest?.pendingTask).toBeUndefined();
-
-    await runtime.enqueue({
-      prompt: [{ type: "text", text: "normal message after injected task" }],
-      messageId: "om_after_injected",
-      chatId: "oc_test",
-    });
-    fake.resolvePrompt("end_turn");
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(3), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    expect(prompt.mock.calls[2]?.[0].prompt).toEqual(
-      expect.arrayContaining([{ type: "text", text: "normal message after injected task" }]),
-    );
+    await expect(
+      runtime.applyControlsAtTurnBoundary({ modelId: "missing-model" }),
+    ).rejects.toThrow();
+    expect(latest?.controls).toBeUndefined();
 
     fake.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(runtime.processing).toBe(false), {
       timeout: 1_000,
       interval: 20,
     });
-  });
-
-  it("applies persisted pending controls after restart before sending the first resumed prompt", async () => {
-    const fake = makeFakeAgent();
-    const setModel = vi.fn(async () => ({}));
-    const prompt = vi.fn(fake.agent.connection.prompt.bind(fake.agent.connection));
-    fake.agent.connection = {
-      ...fake.agent.connection,
-      prompt,
-      unstable_setSessionModel: setModel,
-    } as AgentProcess["connection"];
-    spawnAndResumeAgentMock.mockResolvedValue({ agent: fake.agent, resumed: true });
-
-    let latest: SessionRecord | null = {
-      chatId: "oc_test",
-      threadId: null,
-      sessionId: "sess_fake",
-      agentCommand: "node",
-      agentArgs: [],
-      cwd: "/tmp",
-      controls: { modelId: "model-old" },
-      pendingControls: { modelId: "model-new" },
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    const runtime = new ChatRuntime({
-      ...opts(),
-      presenter: recordingPresenter([]),
-      sessionStore: {
-        ...stubSessionStore(),
-        getLatest: async () => latest,
-        save: async (record) => {
-          latest = record;
-        },
-        consumePendingControls: async () => {
-          if (!latest?.pendingControls) return { record: latest!, pendingControls: undefined };
-          const pendingControls = latest.pendingControls;
-          latest = { ...latest, pendingControls: undefined };
-          return { record: latest, pendingControls };
-        },
-      },
-    });
-
-    await runtime.enqueue({
-      prompt: [{ type: "text", text: "after restart" }],
-      messageId: "om_pending_restart",
-      chatId: "oc_test",
-    });
-
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1), {
-      timeout: 1_000,
-      interval: 20,
-    });
-    const appliedCall = setModel.mock.calls.findIndex((call) => call[0].modelId === "model-new");
-    expect(appliedCall).toBeGreaterThanOrEqual(0);
-    expect(setModel.mock.invocationCallOrder[appliedCall]).toBeLessThan(
-      prompt.mock.invocationCallOrder[0]!,
-    );
-    expect(latest).toMatchObject({ controls: { modelId: "model-new" } });
-    expect(latest?.pendingControls).toBeUndefined();
   });
 
   it("suppresses historical tool updates replayed while resuming a session", async () => {

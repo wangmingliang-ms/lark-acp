@@ -90,7 +90,7 @@ describe("SettingsBindingStore", () => {
     expect(readJson()["credentials"]).toEqual({ appId: "cli_x" });
   });
 
-  it("ignores legacy agent fields when reading bindings written directly into settings.json", async () => {
+  it("ignores unknown extra fields (e.g. a stray `agent` key) on a bindings entry", async () => {
     fs.writeFileSync(
       settingsPath,
       JSON.stringify({ bindings: { oc_z: { cwd: "/repo/z", agent: "codex" } } }),

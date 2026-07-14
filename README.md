@@ -40,7 +40,7 @@ node dist/bin/humming.js --help
 
 > **本地开发建议 `npm link`**：在仓库根执行一次 `npm link`，就把全局 `humming`
 > 软链到本仓库的 `dist/`。之后改了代码只需 `npm run build`（无需重新 link）即可
-> 生效，配合下文的 `humming restart` 快速迭代。撤销：`npm rm -g humming-agent`。
+> 生效，配合下文的 `humming bridge restart` 快速迭代。撤销：`npm rm -g humming-agent`。
 
 ### 从 GitHub 安装
 
@@ -90,35 +90,38 @@ curl -fsSL https://raw.githubusercontent.com/wangmingliang-ms/humming/main/unins
 ### 命令格式
 
 ```
-humming [global-options] proxy [--agent <preset>] [-- <extra-args>...]
-humming [global-options] proxy -- <agent-cmd> [agent-args...]
-humming [global-options] setup [feishu|lark] [--force] # 扫码一键创建飞书/Lark Bot 并保存凭据
-humming [global-options] init                       # 初始化 ~/.humming 模板
-humming [global-options] start [--agent <preset>]   # 后台运行 proxy
-humming [global-options] stop | restart | status
-humming logs [-f] [-n <lines>]
-humming [global-options] update                     # 同步并重建 managed checkout
-humming [global-options] control capabilities --chat-id <id> [--thread-id <id>] [--json]
-humming [global-options] control agent-capabilities [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]
-humming [global-options] sessions list [--chat-id <id>] [--thread-id <id>] [--agent <preset>] [--cwd <dir>] [--json]
-humming [global-options] sessions bind --chat-id <id> [--thread-id <id>] [--agent <preset>] --session-id <id>
-humming [global-options] sessions set-agent --chat-id <id> [--thread-id <id>] --agent <preset>
-humming [global-options] sessions set-control --chat-id <id> [--thread-id <id>] --json '<controls>'
-humming agents
-humming help
-humming version
+humming bridge run [--agent <preset>] [-- <extra-args>...]
+humming bridge run -- <agent-cmd> [agent-args...]
+humming setup [--domain feishu|lark] [--force] # 扫码一键创建飞书/Lark Bot 并保存凭据
+humming init                          # 初始化 ~/.humming 模板
+humming bridge start [--agent <preset>] [options]   # 后台运行 bridge run（不接受 `--` 原始命令）
+humming bridge stop | restart | status
+humming bridge logs [-f] [-n <lines>]
+humming run | start | stop | restart | status | logs  # 上述 bridge 命令的顶层快捷方式
+humming update                        # 同步并重建 managed checkout
+humming agent list [--json]
+humming agent capabilities|models|modes|permissions --agent <preset> [--cwd <dir>] [--json]
+humming session list [--agent <preset>] [--cwd <dir>] [--chat-id <id>] [--thread-id <id>] [--json]
+humming session bind --agent <preset> --session-id <id> [--chat-id <id>] [--thread-id <id>]
+humming session capabilities|models|modes|permissions [--chat-id <id>] [--thread-id <id>] [--json]
+humming session configure [--agent <preset>] [--model <id>] [--mode <id>] [--permission <mode>] [--config <id=value>...] [--message <text>|--message-file <path>|--message-stdin]
+humming session send --message <text>|--message-file <path>|--message-stdin
+humming --help
+humming --version
 ```
 
 两种启动方式：
 
-- **`--agent <preset>`** —— 使用内置预设，最常用。运行 `humming agents` 查看完整列表。
-- **`-- <agent-cmd>`** —— 自定义命令，`--` 后的所有参数原样转发给 agent。
+- **`--agent <preset>`** —— 使用内置预设，最常用。运行 `humming agent list` 查看完整列表。
+- **`-- <agent-cmd>`** —— 自定义命令，`--` 后的所有参数原样转发给 agent；这是唯一允许的位置参数透传，且只在 `bridge run` 下生效。
 
-两种方式可以组合：`proxy --agent claude -- --debug` 会在预设末尾追加 `--debug` 再启动。
+两种方式可以组合：`bridge run --agent claude -- --debug` 会在预设末尾追加 `--debug` 再启动。
 
-全局选项必须放在 `proxy`（或 `start` / `restart`）子命令之前。
+`--home` / `--settings-path` / `--data-dir` 这几个全局选项可以出现在命令行的任意位置（`bridge run` 前后皆可）。所有业务取值都用具名选项：`-a/--agent`、`-m/--model`、`--mode`、`-p/--permission`、`-c/--config`（可重复）、`-C/--cwd`、`--chat-id`、`--thread-id`、`--session-id`、`--json`；不接受位置参数形式的 Agent/Model 等取值。
 
-`proxy` 是**前台**运行（占住终端，`Ctrl-C` 停止）；`start` 把同样的 `proxy` 放到**后台**跑，见下文「后台运行与进程管理」。
+`run/start/stop/restart/status/logs` 是对应 `bridge` 命令的顶层快捷方式，参数和行为完全相同。
+例如 `humming start` 等价于 `humming bridge start`。`run` 是**前台**运行（占住终端，
+`Ctrl-C` 停止）；`start` 把规范的 `bridge run` 放到**后台**跑。
 
 ### 一键扫码配置飞书 / Lark Bot
 
@@ -139,7 +142,7 @@ humming setup --force
 国际版 Lark 可以显式指定：
 
 ```bash
-humming setup lark
+humming setup --domain lark
 ```
 
 安全约束：命令输出只显示脱敏后的 App ID，**不会打印 App Secret**。如果扫码流程不可用，仍可按下方「配置文件」和「飞书开发者后台配置」手动创建应用并填写凭据。
@@ -158,41 +161,47 @@ humming setup lark
 不在预设里的 agent，用 raw command：
 
 ```bash
-humming proxy -- node ./my-acp-server.js --port 9000
+humming bridge run -- node ./my-acp-server.js --port 9000
 ```
 
 也可以在配置文件的 `agents` 字段里固化自己的预设（详见下文「配置文件」一节）。
 
-### 全局选项
+### `bridge run` / `bridge start` 选项
 
-| 选项                    | 说明                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `--cwd <dir>`           | agent 工作目录（默认当前目录）                                                                         |
-| `--config <path>`       | 覆盖配置文件路径                                                                                       |
-| `--data-dir <dir>`      | 覆盖会话存储目录                                                                                       |
-| `--idle-timeout <min>`  | 闲置 N 分钟后释放会话（`0` 表示永不，默认 1440）                                                       |
-| `--max-chats <n>`       | 最大并发会话数（默认 10）                                                                              |
-| `--hide-thoughts`       | 不在卡片里渲染思考过程                                                                                 |
-| `--hide-tools`          | 不在卡片里渲染工具调用                                                                                 |
-| `--hide-cancel-button`  | 不渲染卡片底部的"中断当前任务"按钮                                                                     |
-| `--permission-mode <m>` | 工具授权策略：`alwaysAsk`（默认，弹卡片让用户选）/ `alwaysAllow`（自动允许）/ `alwaysDeny`（自动拒绝） |
-| `-h`, `--help`          | 显示帮助                                                                                               |
-| `-v`, `--version`       | 显示版本                                                                                               |
+| 选项                                         | 说明                                                                                                   |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `-a, --agent <preset>`                       | Agent 预设 id 或 raw command                                                                           |
+| `-C, --cwd <dir>`                            | 未绑定 chat 的默认工作目录                                                                             |
+| `--unbound-cwd <dir>`                        | 接待区（未绑定 chat）工作目录，空字符串表示关闭                                                        |
+| `--home <dir>`                               | Humming home 目录（默认 `~/.humming`）                                                                 |
+| `--settings-path <path>`                     | 覆盖 settings.json 路径                                                                                |
+| `--data-dir <dir>`                           | 覆盖会话存储目录                                                                                       |
+| `--idle-timeout <min>`                       | 闲置 N 分钟后释放会话（`0` 表示永不，默认 1440）                                                       |
+| `--max-chats <n>`                            | 最大并发会话数（默认 10）                                                                              |
+| `--hide-thoughts`                            | 不在卡片里渲染思考过程                                                                                 |
+| `--hide-tools`                               | 不在卡片里渲染工具调用                                                                                 |
+| `--hide-cancel-button`                       | 不渲染卡片底部的"中断当前任务"按钮                                                                     |
+| `-p, --permission <m>`                       | 工具授权策略：`alwaysAsk`（默认，弹卡片让用户选）/ `alwaysAllow`（自动允许）/ `alwaysDeny`（自动拒绝） |
+| `--require-mention` / `--no-require-mention` | 群聊里是否要求 @-mention 才响应                                                                        |
+| `-h`, `--help`                               | 显示帮助                                                                                               |
+| `-v`, `--version`                            | 显示版本                                                                                               |
+
+`--home` / `--settings-path` / `--data-dir` 对所有子命令都生效（`bridge`、`agent`、`session`、`setup`、`init`、`update`），不仅限于 `bridge run`。
 
 ### 后台运行与进程管理
 
-`proxy` 是前台进程。若不想开着终端，用 `start` 把它放到后台，并用一组跨平台
+`bridge run` 是前台进程。若不想开着终端，用 `bridge start` 把它放到后台，并用一组跨平台
 （Windows / Linux 通用）的子命令管理它的生命周期。Linux / WSL 上会优先使用
 **systemd user service** 托管（关闭 terminal 不会停）；没有 systemd 时回退到普通 detached
 子进程：
 
 ```bash
-humming start --agent claude    # 后台启动（选项与 proxy 完全一致）
+humming start --agent claude    # 后台启动（使用具名选项；原始命令仅支持 run）
 humming status                  # 是否在跑？PID + 运行时长
 humming logs                    # 打印日志末尾（默认 40 行）
 humming logs -f                 # 实时跟踪（Ctrl-C 退出）
 humming logs -n 100             # 末尾 100 行
-humming restart --agent claude  # 停掉再以相同选项重启（改了代码后常用）
+humming restart                 # 停掉再以原启动参数重启（改了代码后常用）
 humming stop                    # 停止后台 bridge
 ```
 
@@ -201,39 +210,44 @@ humming stop                    # 停止后台 bridge
 > settings.json 里填好凭据，直接 `humming start` 就能起（用 claude）；想换默认
 > agent，在 settings.json 写 `"runtime": { "agent": "codex" }` 即可，无需每次都敲
 > `--agent`。
+>
+> **`bridge restart` 暂不接受改动过的启动选项**：它总是复用上一次 `start`/`restart` 持久化
+> 的启动 argv。想换 `--agent` 等选项，请先 `humming stop`，再用新选项 `humming start`。
 
-| 子命令    | 说明                                                                                                                                 |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `start`   | 以后台进程方式启动 `proxy`，把 PID 写入 `<home>/bridge.pid`，输出重定向到 `<home>/bridge.log`（追加）。已在运行时会拒绝重复启动。    |
-| `stop`    | 停止后台 bridge：先 `SIGTERM`（触发 bridge 自身的优雅关闭），超时再 `SIGKILL`。                                                      |
-| `restart` | `stop` 后再 `start`，沿用同一组选项。                                                                                                |
-| `status`  | 显示是否在运行，含 PID 与运行时长。                                                                                                  |
-| `logs`    | 打印 `bridge.log` 末尾；`-f` / `--follow` 持续跟踪，`-n <行数>` 指定行数（默认 40）。                                                |
-| `update`  | 把 managed checkout 硬同步到 `origin/$HUMMING_REF` 并重建，然后按原始启动参数重启在跑的 bridge（见下文「升级：`humming update`」）。 |
+| 子命令    | 说明                                                                                                                                   |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `run`     | 前台运行 bridge，`Ctrl-C` 停止。                                                                                                       |
+| `start`   | 以后台进程方式启动 `bridge run`，把 PID 写入 `<home>/bridge.pid`，输出重定向到 `<home>/bridge.log`（追加）。已在运行时会拒绝重复启动。 |
+| `stop`    | 停止后台 bridge：先 `SIGTERM`（触发 bridge 自身的优雅关闭），超时再 `SIGKILL`。                                                        |
+| `restart` | `stop` 后再 `start`，沿用上一次持久化的启动参数。                                                                                      |
+| `status`  | 显示是否在运行，含 PID 与运行时长。                                                                                                    |
+| `logs`    | 打印 `bridge.log` 末尾；`-f` / `--follow` 持续跟踪，`-n <行数>` 指定行数（默认 40）。                                                  |
+
+`humming update`（顶层命令，不在 `bridge` 之下）把 managed checkout 硬同步到 `origin/$HUMMING_REF` 并重建，然后按原始启动参数重启在跑的 bridge（见下文「升级：`humming update`」）。
 
 要点：
 
 - **状态文件都在 home 目录下**（`~/.humming/`，可用 `--home` / `$HUMMING_HOME` 覆盖）：
-  `bridge.pid`、`bridge.log`。`start` / `restart` 会把你传的全局 / proxy 选项、以及
-  `-- <agent-cmd>` 透传部分**原样**转发给后台进程，并把解析出的启动 argv 持久化到
-  `bridge.launch.json`，供 `humming update`（以及不带参数的 `humming restart`）按原样重启，
+  `bridge.pid`、`bridge.log`。`bridge start` / `bridge restart` 会把你传的选项、以及
+  `-- <agent-cmd>` 透传部分重写成一份规范的 `bridge run ...` argv 转发给后台进程，并持久化到
+  `bridge.launch.json`，供 `humming update`（以及不带参数的 `humming bridge restart`）按原样重启，
   不会丢掉 `--agent` 等参数。managed checkout 位于同目录下的 `humming-project/`。
 - **Lifecycle / binding 通知**：在 settings.json 写 `"runtime": { "lifecycleNotifyChatIds": ["oc_..."] }` 后，
-  bridge 启动完成会给这些会话发「已启动」，`stop` 时发「正在停止」，`restart` 时发「正在重启」和「已重启」；若捕获到未处理异常 / Promise rejection，会写入 `bridge.log` 并发「Humming 发生未捕获错误」通知。通知是 best-effort，发送失败只记日志，不阻塞进程管理。每次 repo 绑定成功也会发「已绑定 repo」通知并列出修改明细；通过 CLI 绑定 topic session 成功时会发「已绑定 session」通知，包含 session title 和 Agent / Mode / Model / Permission / Controls 修改明细；`sessions set-control` 成功时会发「Session profile 已更新」通知，展示当前 Agent、Mode、Model、Permission 和 Config controls。
-- **Agent 切换通知**：`sessions set-agent` 会停止当前 topic runtime、清掉旧 session 绑定，并写入新 Agent 的 profile-only boundary。成功后发送「Agent 已切换」通知，说明旧 Agent 历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。切换时会从当前 chat 最近的目标 Agent session 继承 Mode / Model / Permission / Config controls（只继承 metadata，不继承 history/sessionId）。
+  bridge 启动完成会给这些会话发「已启动」，`stop` 时发「正在停止」，`restart` 时发「正在重启」和「已重启」；若捕获到未处理异常 / Promise rejection，会写入 `bridge.log` 并发「Humming 发生未捕获错误」通知。通知是 best-effort，发送失败只记日志，不阻塞进程管理。每次 repo 绑定成功也会发「已绑定 repo」通知并列出修改明细；通过 CLI 绑定 topic session 成功时会发「已绑定 session」通知，包含 session title 和 Agent / Mode / Model / Permission / Controls 修改明细；`session configure` 成功时会发「Session profile 已更新」通知，展示当前 Agent、Mode、Model、Permission 和 Config controls。
+- **Agent 切换通知**：`session configure --agent <preset>` 会在当前 Turn 到达完成边界后停止当前 topic runtime、清掉旧 session 绑定，并写入新 Agent 的 profile-only boundary。成功后发送「Agent 已切换」通知，说明旧 Agent 历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。切换时会从当前 chat 最近的目标 Agent session 继承 Mode / Model / Permission / Config controls（只继承 metadata，不继承 history/sessionId）。
 - **初始化模板**：执行 `humming init` 会创建/刷新 `~/.humming/AGENTS.md`、`~/.humming/CLAUDE.md`，并创建 `~/.humming/settings.back.json`、`~/.humming/sessions.back.json` 作为可复制参考模板。官方 install 脚本会在全局命令安装完成后自动执行一次 `humming init`；手动安装或换 home 时也可以单独运行。`settings.json` / `sessions.json` 仍只在真实配置或会话产生时创建；`.back.json` 不含真实凭据。
-- **Linux / WSL 上是真后台托管**：如果 `systemctl --user` 可用，`start` 会用
-  `systemd-run --user` 启动一个 transient service（unit 名会显示在 `status` 里），bridge
+- **Linux / WSL 上是真后台托管**：如果 `systemctl --user` 可用，`bridge start` 会用
+  `systemd-run --user` 启动一个 transient service（unit 名会显示在 `bridge status` 里），bridge
   不再挂在当前 terminal 下面；关闭终端不会停。没有 systemd 的平台才回退到普通 detached
   子进程。
 - **`start` 后的存活检查是安全网、不是健康检查**：它只捕获启动阶段就同步崩溃的情况
   （如 settings.json 无法解析）。凭据错误、agent 命令错误、网络问题不会让 bridge 立刻
-  退出（分别会被 SDK 重试、在首条消息时才懒启动、被重试），请用 `logs` / `status`
+  退出（分别会被 SDK 重试、在首条消息时才懒启动、被重试），请用 `bridge logs` / `bridge status`
   确认是否真的连上了 Lark（日志里出现 `WebSocket connected` 即为已连接）。
 - **优雅停止仅限 POSIX**：Linux 上 `stop` 走 `SIGTERM` 优雅关闭；Windows 上 `process.kill`
   是硬终止。
 - **崩溃自愈 / 开机自启不在此范围**：交给平台原生托管（Linux systemd unit、Windows 计划
-  任务），由它们调用 `humming start`（见下文「systemd 托管」）。
+  任务），由它们调用 `humming bridge start`（见下文「systemd 托管」）。
 
 ### 升级：`humming update`
 
@@ -254,8 +268,8 @@ HUMMING_REF=some-branch humming update   # 同步非默认分支
 4. **刷新全局命令**：`npm link`（幂等，确保全局 `humming` 仍指向这个 checkout）。
 5. **自动重启**：读取 `<home>/bridge.launch.json` 拿到原始启动 argv——
    - bridge 在跑 → 用**完全相同**的参数（含 `--agent` 等）`stop` 再 `start`。
-   - bridge 没跑 → 跳过重启，打印 `humming start` 提示。
-   - bridge 在跑但 launch 文件缺失/损坏 → 报错让你手动 `humming restart`，绝不瞎猜参数。
+   - bridge 没跑 → 跳过重启，打印 `humming bridge start` 提示。
+   - bridge 在跑但 launch 文件缺失/损坏 → 报错让你手动 `humming bridge restart`，绝不瞎猜参数。
 
 顺序上保证 git + build 成功之后才动正在跑的 bridge，所以**一次失败的 update 不会搞挂现有 bridge**。
 `update` 只针对新版持久化 checkout 布局；老的临时目录安装方式没有 managed checkout，请先重跑安装脚本。
@@ -266,70 +280,90 @@ HUMMING_REF=some-branch humming update   # 同步非默认分支
 
 Humming 会给 agent 子进程注入 `HUMMING_CHAT_ID` / `HUMMING_THREAD_ID`；CLI 会自动 fallback 到这两个 env vars。也就是说，从 Humming agent 内执行下面这些命令时，通常不需要显式传 `--chat-id` / `--thread-id`，这可以避免 Windows PowerShell/cmd 与 bash 的环境变量语法差异。只有在你要操作另一个 chat/topic 时才显式传 id。
 
+`humming agent ...` 与 `humming session ...` 是两条不同的数据路径，互不替代：
+
+```text
+humming agent capabilities    -> 短生命周期地 probe 任意 Agent
+humming session capabilities  -> 查询当前 Topic Session 的 live 状态
+```
+
 #### 绑定 topic 到已有 agent session
 
-`humming sessions list` 用于列出 agent 已有 sessions。默认 cwd 解析顺序是 `--cwd` → 当前 chat binding → `runtime.cwd`；因此在普通项目 chat 里不用指定 cwd，在 host/reception chat 里也可以显式查询某个 repo：
+`humming session list` 用于列出 agent 已有 sessions。默认 cwd 解析顺序是 `--cwd` → 当前 chat binding → `runtime.cwd`；因此在普通项目 chat 里不用指定 cwd，在 host/reception chat 里也可以显式查询某个 repo：
 
 ```bash
 # 当前 chat 绑定 repo 内的 Claude sessions
-humming sessions list \
+humming session list \
   --agent claude \
   --json
 
 # 只查询某个 repo，不绑定
-humming sessions list --agent codex --cwd /absolute/path/to/repo --json
+humming session list --agent codex --cwd /absolute/path/to/repo --json
 ```
 
-`humming sessions bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title、Agent、Mode、Model、Permission、Controls 与修改明细的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
+`humming session bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title、Agent、Mode、Model、Permission、Controls 与修改明细的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
 
 如果目标 session 已经绑定到另一个 chat/thread，本次 bind 会被拒绝，并发送「Session 已被绑定」冲突通知；不要通过手改 `sessions.json` 绕过，应先在原 thread `/new` 重置或确认原绑定不再需要。
 
 ```bash
-humming sessions bind \
+humming session bind \
   --agent claude \
-  --session-id "<sessions.list[].sessionId>"
+  --session-id "<session list[].sessionId>"
 ```
 
 `sessions.json` 里的记录会保留 `title`、`sessionUpdatedAt`、`createdAt`、`updatedAt` 等 metadata，方便人工检查。
 
-#### 切换当前 topic 的 Agent
+#### 切换 Agent、更改 Model/Mode/Permission/Config，以及原子化的「切换 + 消息」请求
 
-Agent 属于 topic/session profile，不属于 chat binding。已经有 session record 的 topic 不会因为你修改 `settings.json` 的 `runtime.agent` 而切换 Agent；它会继续 resume 原来的 session。要真正从 Claude 切到 Copilot / Codex / 其他 agent，用：
+`humming session configure` 是唯一的 Session Profile 变更命令。它接受 `--agent` / `-m, --model` / `--mode` / `-p, --permission` / `-c, --config`（可重复）中任意组合，并且要求至少提供一个；额外还可以附带一条 Message（`--message` / `--message-file` / `--message-stdin`，三选一），这条 Message 只会在新 Profile 完全生效之后才发送：
 
 ```bash
-humming sessions set-agent \
-  --agent copilot
+# 纯粹切换 Agent，不带 controls、不带 message
+humming session configure --agent copilot
+
+# 只改 Model / Mode / Permission
+humming session configure --model <model-id> --mode <mode-id> --permission alwaysAsk
+
+# 切换 Agent 的同时设置 controls 并附带任务，三者作为一次原子操作生效
+humming session configure \
+  --agent copilot \
+  --model <model-id> \
+  --mode <mode-id> \
+  --message-file /absolute/path/to/task.md
 ```
 
-语义：
+语义（docs/cli-command-model-SPEC.md §9 有完整定义）：
 
-- 停止当前 topic 的 live runtime（如果正在运行）。
-- 清掉当前 topic 的旧 session binding。
-- 写入新 Agent 的 profile-only record；下一条消息会启动全新的 ACP session。
-- 从当前 chat 最近的目标 Agent session 继承 model/mode/permission/config metadata（只继承 controls，不继承 history 或 sessionId）。
-- 不自动迁移旧 Agent 的内部对话历史。
-- 切换前先 probe 目标 Agent。目标 Agent 无法启动或无法创建 session 时，切换中止，旧 topic session 保持不变，并发送「目标 Agent 不可用」通知。
-- 不复制旧 Agent 的 model/mode/config controls。Claude 的 `opus` / `default` / `acceptEdits` 等 id 对 Copilot 不一定有效；只继承当前 chat 内目标 Agent 自己最近 session 的 controls；如需进一步修改，应按新 Agent 的 live capabilities 再设置 controls。
+- Model/Mode/Config 永远针对这次请求解析出的 **Desired Agent**（本次 `--agent`，否则是已有 Pending Configuration 的 Agent，否则是当前 Topic Session 的 Agent）校验，绝不会拿当前正在跑的旧 Agent 去校验新 Agent 的取值。
+- 同一个 topic 最多只有一个 Pending Configuration；晚到的 `configure` 请求会按字段合并进去（后写覆盖），而不是维护三份互相独立的 pending 状态。
+- 若合并后 Desired Agent 发生变化，累积的 Model/Mode/Config 会针对新 Agent 重新校验。
+- Message 只有在完整的目标 Profile 成功生效之后才会发送；探测目标 Agent 失败、或启动/恢复目标 Agent 失败，都不会发送 Message，也不会影响当前仍在使用的 Session。
+- 切换 Agent 时会对目标 Agent 做一次短暂 probe 用于提前反馈（例如命令拼写错误），但这个 probe 结果不会被当作「当前 Agent 能力」去校验 Model/Mode/Config——完整校验始终由 Bridge 完成。
+- 不会自动迁移旧 Agent 的内部对话历史；下一条消息会用新 Agent 创建全新的 ACP session。
 
-如果只是想查看某个 Agent 支持哪些 model/mode/config，而不改变当前 topic，可以启动一次短暂 probe session：
+如果只是想查看某个 Agent 支持哪些 model/mode/config，而不改变当前 topic，用短生命周期 probe：
 
 ```bash
-humming control agent-capabilities \
+humming agent capabilities \
   --agent copilot \
   --json
 ```
 
-这个命令会启动所选 Agent、创建 throwaway ACP session 读取 capabilities，然后立即停止；不会修改 `sessions.json` 或当前 topic runtime。如果 probe 失败且提供了 chat id，Humming 会发送「目标 Agent 不可用」通知；这也正好充当切换前的可用性检查。
+这个命令会启动所选 Agent、创建 throwaway ACP session 读取 capabilities，然后立即停止；不会修改 `sessions.json` 或当前 topic runtime。如果 probe 失败且提供了 chat id，Humming 会发送「目标 Agent 不可用」通知。
+
+`humming agent models` / `humming agent modes` / `humming agent permissions` 是同一次 probe 结果的投影，不会另起一次 probe。
 
 #### Live capabilities / controls
 
 查询当前会话可用的 ACP 原生能力：
 
 ```bash
-humming control capabilities --json
+humming session capabilities --json
 ```
 
-如果当前 topic 还在 Claude session 上，这个命令返回的就是 Claude 的 live capabilities。要查 Copilot 等另一个 Agent 的能力，使用 `control agent-capabilities --agent <agent>` probe，不要凭记忆猜 id。
+如果当前 topic 还在 Claude session 上，这个命令返回的就是 Claude 的 live capabilities。要查 Copilot 等另一个 Agent 的能力，使用 `agent capabilities --agent <agent>` probe，不要凭记忆猜 id。
+
+`humming session models` / `humming session modes` / `humming session permissions` 是同一次 live 查询结果的投影，与 `agent models`/`agent modes`/`agent permissions`（probe 结果的投影）共享同一套格式化逻辑，但数据源始终不同。
 
 返回会尽量保持 ACP 原生结构：
 
@@ -338,35 +372,43 @@ humming control capabilities --json
 - `configOptions`: ACP `SessionConfigOption[]`。
 - `bridgePermissionModes` / `bridgePermissionMode`: humming 自己的 permission-card 策略，不是 ACP 原生字段。
 
-设置 session controls 时传一个完整 JSON payload；CLI 会写入 `sessions.json`，如果对应 runtime 正在运行，会立刻拆成 ACP 单项调用。成功后 Humming 会发送「Session profile 已更新」通知；runtime 正在运行时通知会回复到当前 topic 的最近消息，runtime 未运行时通知会直接发到 chat，下一条消息按已存 profile 启动/恢复。
+设置 controls 时用具名选项，而不是整段 JSON：
 
 ```bash
-humming sessions set-control \
-  --json '{
-    "modelId": "<models.availableModels[].modelId>",
-    "modeId": "<modes.availableModes[].id>",
-    "config": {
-      "<boolean-config-id>": { "type": "boolean", "value": true },
-      "<select-config-id>": { "value": "<select-option-value>" }
-    },
-    "bridgePermissionMode": "alwaysAsk"
-  }'
+humming session configure \
+  --model "<models.availableModels[].modelId>" \
+  --mode "<modes.availableModes[].id>" \
+  --config "<boolean-config-id>=true" \
+  --config "<select-config-id>=<select-option-value>" \
+  --permission alwaysAsk
 ```
 
 字段含义：
 
-- `modelId` → ACP `session/set_model`（unstable）。
-- `modeId` → ACP `session/set_mode`。
-- `config[configId]` → ACP `session/set_config_option`；select 类型按 ACP request shape 只需要 `{ "value": "..." }`。
-- `bridgePermissionMode` → humming 本地处理 ACP `requestPermission` 的策略：`alwaysAsk` / `alwaysAllow` / `alwaysDeny`。
+- `--model` → ACP `session/set_model`（unstable）；传 `auto` 表示清除显式 model 覆盖。
+- `--mode` → ACP `session/set_mode`。
+- `--config <id=value>` → ACP `session/set_config_option`；取值为 `true`/`false` 会被识别成 boolean 类型，其它字符串按 select 类型的 `{ "value": "..." }` 处理。可重复传多个 `--config`。
+- `--permission` → humming 本地处理 ACP `requestPermission` 的策略：`alwaysAsk` / `alwaysAllow` / `alwaysDeny`。
 
-注意：ACP 没有统一的全局 permission mode。Claude Code / Copilot 等 agent 可能把“plan / edit automatically / bypass permission”暴露成 mode，也可能暴露成 config option；以 `control capabilities` 的 live 返回为准，不要硬编码。
+成功后 Humming 会发送「Session profile 已更新」通知；runtime 正在运行时通知会回复到当前 topic 的最近消息，runtime 未运行时通知会直接发到 chat，下一条消息按已存 profile 启动/恢复。
+
+注意：ACP 没有统一的全局 permission mode。Claude Code / Copilot 等 agent 可能把"plan / edit automatically / bypass permission"暴露成 mode，也可能暴露成 config option；以 `session capabilities` 的 live 返回为准，不要硬编码。
+
+#### 只发消息，不改变 Profile
+
+```bash
+humming session send --message "Fix the failing test"
+humming session send --message-file /absolute/path/to/task.md
+humming session send --message-stdin < /absolute/path/to/task.md
+```
+
+`session send` 只在完全不需要变更 Profile 时使用。如果 Session 正忙，Humming 会在内部排队投递；如果已经存在一个校验通过的 Pending Configuration，这条 Message 不会插队到它前面。若同一个用户请求既要改 Profile 又要发消息，请改用上面的 `session configure --message...`，那才是原子操作。
 
 为了避免每轮 prompt 携带大段知识，bridge 会在 `~/.humming/AGENTS.md` 和 `~/.humming/CLAUDE.md` 写入完整操作指引；会话内只注入一句短提示，让 agent 在需要修改 settings 或 session controls 时先读这些文件。
 
 ### 配置文件
 
-CLI 读取一份配置文件（默认 `~/.humming/settings.json`；旧的 `~/.config/humming/config.json` 只会在默认 home 首次启动时迁移一次），里面包含凭据和运行时默认值。优先级：CLI flag > 环境变量 > 配置文件 > 内置默认。
+CLI 读取一份配置文件（默认 `~/.humming/settings.json`），里面包含凭据和运行时默认值。优先级：CLI flag > 环境变量 > 配置文件 > 内置默认。
 
 完整字段（都可选）：
 
@@ -407,7 +449,7 @@ CLI 读取一份配置文件（默认 `~/.humming/settings.json`；旧的 `~/.co
 
 凭据可以通过 `humming setup` 扫码生成并写入文件，也可以用环境变量代替文件：`HUMMING_APP_ID` / `HUMMING_APP_SECRET`。
 
-`humming agents` 会列出当前配置下所有可用的预设，并标出来源（`[built-in]` / `[user]` / `[overridden]`）。
+`humming agent list` 会列出当前配置下所有可用的预设，并标出来源（`[built-in]` / `[user]` / `[overridden]`）。
 
 > 推荐使用 `humming setup` 一键扫码创建应用。只有在扫码流程不可用、或你需要复用已有自建应用时，才需要到飞书开放平台 [开发者后台](https://open.larksuite.com/app) 手动创建应用，从「凭证与基础信息」页拿 `App ID` / `App Secret`；在「事件与回调」里把订阅模式切到 **长连接 (WebSocket)**。具体步骤见下文「飞书开发者后台配置」。
 
@@ -477,10 +519,10 @@ CLI 读取一份配置文件（默认 `~/.humming/settings.json`；旧的 `~/.co
 
 #### 5. 启用
 
-把 `App ID` / `App Secret` 填到 `config.json`（或环境变量 `HUMMING_APP_ID` / `HUMMING_APP_SECRET`），运行：
+把 `App ID` / `App Secret` 填到 `settings.json`（或环境变量 `HUMMING_APP_ID` / `HUMMING_APP_SECRET`），运行：
 
 ```bash
-humming proxy --agent claude
+humming bridge run --agent claude
 ```
 
 然后在飞书里搜到这个机器人、单聊或拉到群里直接发消息即可。
@@ -491,10 +533,10 @@ humming proxy --agent claude
 
 ```bash
 # 1. 准备目录（首次使用时一次性执行）
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/humming"
+mkdir -p "$HOME/.humming"
 
 # 2. 写入凭据
-cat > "${XDG_CONFIG_HOME:-$HOME/.config}/humming/config.json" <<'EOF'
+cat > "$HOME/.humming/settings.json" <<'EOF'
 {
   "credentials": {
     "appId":     "cli_a1b2c3d4e5f60001",
@@ -502,15 +544,15 @@ cat > "${XDG_CONFIG_HOME:-$HOME/.config}/humming/config.json" <<'EOF'
   }
 }
 EOF
-chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/humming/config.json"
+chmod 600 "$HOME/.humming/settings.json"
 
 # 3. 启动桥接
-humming proxy --agent claude
+humming bridge run --agent claude
 ```
 
 #### 完整配置（凭据 + 运行时默认值）
 
-把常用默认值固化到文件，命令行只剩 `proxy --agent`：
+把常用默认值固化到文件，命令行只剩 `bridge run --agent`：
 
 ```jsonc
 {
@@ -528,7 +570,7 @@ humming proxy --agent claude
 ```
 
 ```bash
-humming proxy --agent claude
+humming bridge run --agent claude
 ```
 
 CLI flag 会临时覆盖文件里的同名项。
@@ -536,41 +578,41 @@ CLI flag 会临时覆盖文件里的同名项。
 #### systemd 托管
 
 想要**开机自启 + 崩溃自愈**，用 systemd 之类的进程管理器托管。注意此时应让 systemd 直接
-管前台的 `proxy`（systemd 自己就是 supervisor，用 `start` 的后台模式反而会和它抢管理权）：
+管前台的 `bridge run`（systemd 自己就是 supervisor，用 `bridge start` 的后台模式反而会和它抢管理权）：
 
 ```ini
 [Service]
 Environment=HUMMING_APP_ID=cli_a1b2c3d4e5f60001
 Environment=HUMMING_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-ExecStart=/usr/local/bin/humming --cwd /srv/projects/main proxy --agent claude
+ExecStart=/usr/local/bin/humming bridge run --cwd /srv/projects/main --agent claude
 Restart=on-failure
 ```
 
 反之，如果只是想在自己机器上**手动**方便地启停、又不想开着终端，用内置的
-`humming start` / `stop` / `restart`（见上文「后台运行与进程管理」）即可，无需 systemd。
+`humming bridge start` / `stop` / `restart`（见上文「后台运行与进程管理」）即可，无需 systemd。
 
 ### 快速示例
 
 ```bash
 # 1. 接 Claude Code（最常用）
 #    会话自动持久化，重启不丢上下文。
-humming proxy --agent claude
+humming bridge run --agent claude
 
 # 2. 接 OpenCode，工作目录指向具体项目
-humming --cwd /work/project proxy --agent opencode
+humming bridge run --agent opencode --cwd /work/project
 
 # 3. 接 GitHub Copilot CLI，关掉思考输出
-humming --hide-thoughts proxy --agent copilot
+humming bridge run --agent copilot --hide-thoughts
 
 # 4. 自研 ACP server
-humming proxy -- node ./my-acp-server.js --port 9000
+humming bridge run -- node ./my-acp-server.js --port 9000
 
 # 5. 后台运行 + 管理（不占终端）
-humming start --agent claude
-humming status
-humming logs -f
-humming restart --agent claude
-humming stop
+humming bridge start --agent claude
+humming bridge status
+humming bridge logs -f
+humming bridge restart
+humming bridge stop
 ```
 
 ## 类似的项目

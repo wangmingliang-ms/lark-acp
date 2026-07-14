@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("BridgeControlServer", () => {
-  it("serves capabilities and setControls over a local socket", async () => {
+  it("serves capabilities, configureSession, and sendMessage over a local socket", async () => {
     const socketPath = path.join(dir, "control.sock");
     server = new BridgeControlServer({
       socketPath,
@@ -40,32 +40,22 @@ describe("BridgeControlServer", () => {
           bridgePermissionModes: ["alwaysAsk", "alwaysAllow", "alwaysDeny"],
           bridgePermissionMode: "alwaysAsk",
         }),
-        setControls: async (chatId, threadId, controls) => ({
+        configureSession: async (chatId, threadId, input, noticeMessageId) => ({
           applied: true,
           chatId,
           threadId,
-          controls,
+          input,
+          noticeMessageId,
         }),
-        setPendingTask: async (chatId, threadId, task) => ({
-          queued: true,
+        sendMessage: async (chatId, threadId, message, noticeMessageId) => ({
+          sent: true,
           chatId,
           threadId,
-          task,
-        }),
-        setPendingTargetProfile: async (chatId, threadId, profile, noticeMessageId) => ({
-          queued: true,
-          chatId,
-          threadId,
-          profile,
+          message,
           noticeMessageId,
         }),
         bindSession: async (record, noticeMessageId) => ({
           bound: true,
-          record,
-          noticeMessageId,
-        }),
-        setAgent: async (record, noticeMessageId) => ({
-          switched: true,
           record,
           noticeMessageId,
         }),
@@ -106,7 +96,7 @@ describe("BridgeControlServer", () => {
     });
 
     const set = await sendControlRequest(socketPath, {
-      method: "setControls",
+      method: "configureSession",
       params: {
         chatId: "oc_A",
         threadId: null,
@@ -119,56 +109,58 @@ describe("BridgeControlServer", () => {
         applied: true,
         chatId: "oc_A",
         threadId: null,
-        controls: { modeId: "agent" },
+        input: { controls: { modeId: "agent" } },
       },
     });
 
-    const task = await sendControlRequest(socketPath, {
-      method: "setPendingTask",
+    const message = await sendControlRequest(socketPath, {
+      method: "sendMessage",
       params: {
         chatId: "oc_A",
         threadId: "th_1",
-        task: { prompt: "continue this task", createdAt: 123 },
+        message: { prompt: "continue this task", createdAt: 123 },
       },
     });
-    expect(task).toMatchObject({
+    expect(message).toMatchObject({
       ok: true,
       result: {
-        queued: true,
+        sent: true,
         chatId: "oc_A",
         threadId: "th_1",
-        task: { prompt: "continue this task", createdAt: 123 },
+        message: { prompt: "continue this task", createdAt: 123 },
       },
     });
 
     const target = await sendControlRequest(socketPath, {
-      method: "setPendingTargetProfile",
+      method: "configureSession",
       params: {
         chatId: "oc_A",
         threadId: "th_1",
-        profile: {
+        targetAgent: {
           sessionId: "profile:1",
           profileOnly: true,
           agentCommand: "npx",
           agentArgs: ["-y", "@zed-industries/copilot-acp"],
           agentLabel: "copilot",
           cwd: "/repo",
-          controls: { modelId: "gpt-5.5" },
-          task: { prompt: "continue with copilot", createdAt: 123 },
-          createdAt: 123,
-          updatedAt: 123,
         },
+        controls: { modelId: "gpt-5.5" },
+        message: { prompt: "continue with copilot", createdAt: 123 },
         noticeMessageId: "om_notice",
       },
     });
     expect(target).toMatchObject({
       ok: true,
       result: {
-        queued: true,
+        applied: true,
         chatId: "oc_A",
         threadId: "th_1",
         noticeMessageId: "om_notice",
-        profile: { agentLabel: "copilot", controls: { modelId: "gpt-5.5" } },
+        input: {
+          targetAgent: { agentLabel: "copilot" },
+          controls: { modelId: "gpt-5.5" },
+          message: { prompt: "continue with copilot", createdAt: 123 },
+        },
       },
     });
 
@@ -200,19 +192,17 @@ describe("BridgeControlServer", () => {
     });
 
     const setAgent = await sendControlRequest(socketPath, {
-      method: "setAgent",
+      method: "configureSession",
       params: {
-        record: {
-          chatId: "oc_A",
-          threadId: "th_1",
+        chatId: "oc_A",
+        threadId: "th_1",
+        targetAgent: {
           sessionId: "profile:1",
           profileOnly: true,
           agentCommand: "npx",
           agentArgs: ["-y", "@zed-industries/copilot-acp"],
           agentLabel: "copilot",
           cwd: "/repo",
-          createdAt: 1,
-          updatedAt: 2,
         },
         noticeMessageId: "om_notice",
       },
@@ -220,9 +210,9 @@ describe("BridgeControlServer", () => {
     expect(setAgent).toMatchObject({
       ok: true,
       result: {
-        switched: true,
+        applied: true,
         noticeMessageId: "om_notice",
-        record: { sessionId: "profile:1", profileOnly: true, agentLabel: "copilot" },
+        input: { targetAgent: { agentLabel: "copilot" } },
       },
     });
 
@@ -281,11 +271,9 @@ describe("BridgeControlServer", () => {
       capabilities: async () => {
         throw new Error("not used");
       },
-      setControls: async () => ({ applied: true }),
-      setPendingTask: async () => ({ queued: true }),
-      setPendingTargetProfile: async () => ({ queued: true }),
+      configureSession: async () => ({ applied: true }),
+      sendMessage: async () => ({ sent: true }),
       bindSession: async () => ({ bound: true }),
-      setAgent: async () => ({ switched: true }),
       agentProbeFailed: async () => ({ notified: true }),
     };
     server = new BridgeControlServer({ socketPath, logger: createPinoLogger(), handlers });
@@ -349,11 +337,9 @@ describe("BridgeControlServer", () => {
           bridgePermissionModes: ["alwaysAsk", "alwaysAllow", "alwaysDeny"],
           bridgePermissionMode: "alwaysAsk",
         }),
-        setControls: async () => ({ applied: true }),
-        setPendingTask: async () => ({ queued: true }),
-        setPendingTargetProfile: async () => ({ queued: true }),
+        configureSession: async () => ({ applied: true }),
+        sendMessage: async () => ({ sent: true }),
         bindSession: async (record) => ({ bound: true, record }),
-        setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
       },
     });
@@ -401,8 +387,7 @@ describe("BridgeControlServer", () => {
 
   it("rejects malformed session control payloads before invoking handlers", async () => {
     const socketPath = path.join(dir, "control.sock");
-    let setControlsCalled = false;
-    let pendingTargetProfileCalled = false;
+    let configureSessionCalled = false;
     server = new BridgeControlServer({
       socketPath,
       logger: createPinoLogger(),
@@ -413,17 +398,12 @@ describe("BridgeControlServer", () => {
           bridgePermissionModes: ["alwaysAsk", "alwaysAllow", "alwaysDeny"],
           bridgePermissionMode: "alwaysAsk",
         }),
-        setControls: async () => {
-          setControlsCalled = true;
+        configureSession: async () => {
+          configureSessionCalled = true;
           return { applied: true };
         },
-        setPendingTask: async () => ({ queued: true }),
-        setPendingTargetProfile: async () => {
-          pendingTargetProfileCalled = true;
-          return { queued: true };
-        },
+        sendMessage: async () => ({ sent: true }),
         bindSession: async (record) => ({ bound: true, record }),
-        setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
         shutdown: async () => ({ accepted: true }),
         restart: async () => ({ accepted: true, restarting: true }),
@@ -433,34 +413,31 @@ describe("BridgeControlServer", () => {
 
     await expect(
       sendControlRequest(socketPath, {
-        method: "setControls",
+        method: "configureSession",
         params: {
           chatId: "oc_A",
           controls: { clearModelId: false },
         },
-      }),
+      } as never),
     ).resolves.toMatchObject({ ok: false, error: "invalid control request" });
 
     await expect(
       sendControlRequest(socketPath, {
-        method: "setPendingTargetProfile",
+        method: "configureSession",
         params: {
           chatId: "oc_A",
-          profile: {
+          targetAgent: {
             sessionId: "profile:bad",
             agentCommand: "npx",
             agentArgs: ["agent"],
             cwd: "/repo",
-            controls: { bridgePermissionMode: "bypass" },
-            createdAt: 1,
-            updatedAt: 1,
           },
+          controls: { bridgePermissionMode: "bypass" },
         },
-      }),
+      } as never),
     ).resolves.toMatchObject({ ok: false, error: "invalid control request" });
 
-    expect(setControlsCalled).toBe(false);
-    expect(pendingTargetProfileCalled).toBe(false);
+    expect(configureSessionCalled).toBe(false);
   });
 
   it("does not crash when a control client disconnects before the response", async () => {
@@ -482,11 +459,9 @@ describe("BridgeControlServer", () => {
             bridgePermissionMode: "alwaysAsk",
           };
         },
-        setControls: async () => ({ applied: true }),
-        setPendingTask: async () => ({ queued: true }),
-        setPendingTargetProfile: async () => ({ queued: true }),
+        configureSession: async () => ({ applied: true }),
+        sendMessage: async () => ({ sent: true }),
         bindSession: async (record) => ({ bound: true, record }),
-        setAgent: async (record) => ({ switched: true, record }),
         agentProbeFailed: async () => ({ notified: true }),
         shutdown: async () => ({ accepted: true }),
         restart: async () => ({ accepted: true, restarting: true }),

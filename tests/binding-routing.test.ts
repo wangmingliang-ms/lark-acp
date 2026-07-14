@@ -3,7 +3,7 @@
  *
  * Proves the core promise — "one Lark bot, each chat bound to its own repo" —
  * without Lark credentials or a real agent: a fake presenter records the
- * notice cards and the real FileBindingStore / FileSessionStore persist to a
+ * notice cards and the real SettingsBindingStore / FileSessionStore persist to a
  * temp dir.
  *
  * The bridge's inbound entry points (handleMessage / routeMessage) are private
@@ -19,7 +19,7 @@ import path from "node:path";
 import {
   LarkBridge,
   FileSessionStore,
-  FileBindingStore,
+  SettingsBindingStore,
   type LarkPresenter,
   type NoticeCardSpec,
   type AgentResolver,
@@ -87,10 +87,11 @@ const resolver: AgentResolver = (selection: string): ResolvedAgentInvocation => 
 };
 
 let dataDir: string;
+let settingsPath: string;
 let repoA: string;
 let repoB: string;
 let presenter: RecordingPresenter;
-let bindingStore: FileBindingStore;
+let bindingStore: SettingsBindingStore;
 let sessionStore: FileSessionStore;
 let bridge: LarkBridge;
 
@@ -115,13 +116,14 @@ function makeBridge(defaults?: {
 beforeEach(async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "humming-e2e-"));
   dataDir = path.join(root, "data");
+  settingsPath = path.join(root, "settings.json");
   repoA = path.join(root, "repo-a");
   repoB = path.join(root, "repo-b");
   fs.mkdirSync(repoA, { recursive: true });
   fs.mkdirSync(repoB, { recursive: true });
 
   presenter = new RecordingPresenter();
-  bindingStore = new FileBindingStore(dataDir);
+  bindingStore = new SettingsBindingStore(settingsPath);
   sessionStore = new FileSessionStore(dataDir);
   await bindingStore.init();
   await sessionStore.init();
@@ -175,7 +177,7 @@ describe("per-chat repo routing (integration)", () => {
     );
     await bindingStore.close();
 
-    const store2 = new FileBindingStore(dataDir);
+    const store2 = new SettingsBindingStore(settingsPath);
     await store2.init();
     const restored = await store2.get("oc_A");
     expect(restored).toMatchObject({ cwd: repoA });

@@ -105,10 +105,14 @@ interface BridgeInternals {
     messageId: string,
     from: NonNullable<ReceptionBinding["fallbackFrom"]>,
   ): Promise<void>;
-  controlSetControls(
+  controlConfigureSession(
     chatId: string,
     threadId: string | null,
-    controls: SessionControlPatch,
+    input: {
+      readonly targetAgent?: unknown;
+      readonly controls?: SessionControlPatch;
+      readonly message?: unknown;
+    },
     noticeMessageId?: string | null,
   ): Promise<unknown>;
   controlBindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
@@ -720,7 +724,7 @@ describe("compact slash session profile commands", () => {
     expect(notice?.body).toContain("runtime 和 sessions.json 未更新");
   });
 
-  it("uses the same controlSetControls validation path for humming sessions set-control", async () => {
+  it("uses the same configureSession validation path for humming sessions set-control", async () => {
     bridge = makeBridge({ unboundCwd: home });
     const b = asInternals(bridge);
     await bindingStore.set({ chatId: "oc_x", cwd: repoA, createdAt: 1, updatedAt: 1 });
@@ -738,13 +742,13 @@ describe("compact slash session profile commands", () => {
     });
 
     await expect(
-      b.controlSetControls(
+      b.controlConfigureSession(
         "oc_x",
         "th_topic",
-        { modelId: "missing-model" },
+        { controls: { modelId: "missing-model" } },
         "om_control_bad_model",
       ),
-    ).resolves.toMatchObject({ applied: false, rejected: true });
+    ).resolves.toMatchObject({ rejected: true });
 
     expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
       controls: { modelId: "model-old" },
@@ -797,7 +801,7 @@ describe("compact slash session profile commands", () => {
       agentLabel: CODEX.label,
       cwd: repoA,
       controls: { modeId: "agent", bridgePermissionMode: "alwaysAllow" },
-      pendingControls: { clearModelId: true },
+      pendingConfiguration: { controls: { clearModelId: true }, createdAt: 1, updatedAt: 1 },
       createdAt: 1,
       updatedAt: 1,
     });

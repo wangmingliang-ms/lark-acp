@@ -18,13 +18,18 @@ import { LarkCardPresenter } from "../presenter/lark-presenter.js";
 import {
   createWipNoticeCard,
   finalizeWipNoticeCard,
+  restoreWipNoticeCard,
   updateWipNoticeCard,
   type WipNoticeCardRef,
 } from "../presenter/notice-card-lifecycle.js";
 import { installHomeTemplates } from "../home-templates.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
 import { renderCommandHelpBody } from "../interpreter/commands.js";
-import { BridgeControlServer, type AgentProbeFailureTarget } from "./control-server.js";
+import {
+  BridgeControlServer,
+  type AgentProbeFailureTarget,
+  type ConfigureSessionInput,
+} from "./control-server.js";
 import {
   interpretLarkMessage,
   type InterpretedMessage,
@@ -55,16 +60,26 @@ import type {
   NoticeCardSpec,
 } from "../presenter/presenter.js";
 import type {
-  PendingSessionTask,
-  PendingTargetProfile,
+  PendingSessionConfiguration,
+  PendingSessionMessage,
+  PendingTargetAgent,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionControls,
   SessionRecord,
   SessionStore,
 } from "../session-store/session-store.js";
-import { mergeSessionControls } from "../session-store/session-controls.js";
+import {
+  mergePendingSessionConfiguration,
+  mergeSessionControls,
+  pendingConfigurationHasProfileField,
+} from "../session-store/session-controls.js";
 import type { BindingStore, ChatBinding } from "../binding-store/binding-store.js";
+import {
+  readSettingsFileObject,
+  readSettingsObjectField,
+  writeSettingsFileObject,
+} from "../settings-file/settings-file.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
 const DEFAULT_MAX_CONCURRENT_CHATS = 10;
@@ -475,15 +490,35 @@ interface PendingAgentSwitch {
   readonly persistGlobalDefault?: boolean;
 }
 
-interface CommandContext {
-  readonly isDirectMessage: boolean;
+/** Which trigger is applying a topic's persisted Pending Configuration (spec §9.5). */
+type PendingConfigurationApplyTrigger = "idle" | "turn-boundary" | "recovery";
+
+/**
+ * Whether {@link LarkBridge.acquireRuntime} runs restart recovery of a
+ * persisted Pending Configuration before building a runtime.
+ *
+ * - `recover-on-acquire`: ordinary path (message ingress, the applier's own
+ *   nested acquisition). Recovery runs unless the applier is already mid-flight
+ *   for this key ({@link LarkBridge.pendingConfigurationApplyInFlight}).
+ * - `pending-observed-under-lock`: the caller already holds
+ *   {@link LarkBridge.withPendingConfigurationLock} and read the (absent)
+ *   Pending Configuration under it, so recovery would only deadlock on that
+ *   lock. Distinct from `pendingConfigurationApplyInFlight`, which means "the
+ *   applier is running", not "the lock is held".
+ */
+type RuntimeAcquisitionRecovery = "recover-on-acquire" | "pending-observed-under-lock";
+
+/** Outcome of applying a topic's persisted Pending Configuration. */
+interface PendingConfigurationApplyResult {
+  /** `false` when there was nothing to apply (no pending config, or quiescing). */
+  readonly applied: boolean;
+  /** Present when a target Agent switch was applied. */
+  readonly agent?: string;
+  readonly messageSent: boolean;
 }
 
-interface PendingPostTurnAgentSwitch {
-  readonly record: SessionRecord;
-  readonly noticeMessageId: string | null;
-  readonly targetProfile?: PendingTargetProfile;
-  readonly queuedNotice?: WipNoticeCardRef | null;
+interface CommandContext {
+  readonly isDirectMessage: boolean;
 }
 
 export type BridgeLifecycleState =
@@ -549,7 +584,22 @@ export class LarkBridge {
 
   private readonly chats = new Map<string, ChatRuntime>();
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
-  private readonly pendingPostTurnAgentSwitches = new Map<string, PendingPostTurnAgentSwitch>();
+  /**
+   * Serializes each chat/thread's `configureSession`/`sendMessage`
+   * merge-validate-persist so concurrent requests cannot race the read of the
+   * current Pending Configuration (spec §9.3). The persisted
+   * `SessionRecord.pendingConfiguration` — not this map — is the source of truth.
+   */
+  private readonly pendingConfigurationLocks = new Map<string, Promise<unknown>>();
+  /**
+   * Chat/thread keys whose Pending Configuration the canonical applier is
+   * currently applying. Delivering its attached Message can re-enter
+   * `acquireRuntime` (and `handleRuntimeTurnComplete`) for the same key; both
+   * skip while the key is marked here, so the Message is never re-applied and
+   * recovery does not loop. Means "the applier is mid-flight", not "the lock is
+   * held" — lock-held callers use {@link RuntimeAcquisitionRecovery} instead.
+   */
+  private readonly pendingConfigurationApplyInFlight = new Set<string>();
   private readonly promptIngress = new Map<string, Promise<void>>();
   private readonly runtimeTurnCompletions = new Set<Promise<void>>();
   private lifecycleState: BridgeLifecycleState = { kind: "running" };
@@ -857,25 +907,27 @@ export class LarkBridge {
         },
 
         capabilities: (chatId, threadId) => this.controlCapabilities(chatId, threadId),
-        setControls: async (chatId, threadId, controls) => {
-          const result = await this.controlSetControls(chatId, threadId, controls);
-          if (!result.rejected && this.globalDefaultControlChatIds.includes(chatId)) {
-            await this.persistGlobalDefaultControls(controls, null);
+        configureSession: async (chatId, threadId, input, noticeMessageId) => {
+          const result = await this.controlConfigureSession(
+            chatId,
+            threadId,
+            input,
+            noticeMessageId,
+          );
+          if (!("rejected" in result) && this.globalDefaultControlChatIds.includes(chatId)) {
+            if (input.targetAgent) {
+              await this.persistGlobalDefaultAgent(
+                input.targetAgent.agentLabel ?? input.targetAgent.agentCommand,
+                null,
+              );
+            }
+            if (input.controls) await this.persistGlobalDefaultControls(input.controls, null);
           }
           return result;
         },
-        setPendingTask: (chatId, threadId, task) =>
-          this.controlSetPendingTask(chatId, threadId, task),
-        setPendingTargetProfile: (chatId, threadId, profile, noticeMessageId) =>
-          this.controlSetPendingTargetProfile(chatId, threadId, profile, noticeMessageId),
+        sendMessage: (chatId, threadId, message, noticeMessageId) =>
+          this.controlSendMessage(chatId, threadId, message, noticeMessageId),
         bindSession: (record, noticeMessageId) => this.controlBindSession(record, noticeMessageId),
-        setAgent: async (record, noticeMessageId) => {
-          const result = await this.controlSetAgent(record, noticeMessageId);
-          if (this.globalDefaultControlChatIds.includes(record.chatId)) {
-            await this.persistGlobalDefaultAgent(record.agentLabel ?? record.agentCommand, null);
-          }
-          return result;
-        },
         agentProbeFailed: (chatId, threadId, agent, error, noticeMessageId) =>
           this.controlAgentProbeFailed(chatId, threadId, agent, error, noticeMessageId),
       },
@@ -892,141 +944,238 @@ export class LarkBridge {
     return runtime.capabilities();
   }
 
-  private async controlSetControls(
+  /**
+   * Merge a desired target Agent / controls / message into the chat/thread's
+   * single Pending Configuration, validate the complete candidate against the
+   * resolved Desired Agent, and either apply it now (idle) or queue it for
+   * the next Turn boundary (busy). See docs/cli-command-model-SPEC.md §9.
+   *
+   * @throws never — failures are reported via the returned `rejected` result.
+   */
+  private async controlConfigureSession(
     chatId: string,
     threadId: string | null,
-    controls: SessionControlPatch,
+    input: ConfigureSessionInput,
     noticeMessageId?: string | null,
-  ): Promise<{
-    readonly applied: boolean;
-    readonly queued?: boolean;
-    readonly rejected?: boolean;
-    readonly recordSessionId?: string;
-    readonly reason?: string;
-  }> {
-    const key = runtimeKey(chatId, threadId);
-    const runtime = this.chats.get(key);
-    if (runtime) {
-      if (runtime.processing) {
-        const pendingAgentSwitch = this.pendingPostTurnAgentSwitches.get(key);
-        if (pendingAgentSwitch) {
-          const validation = await this.validateControlPatchForStoredProfile(
-            chatId,
-            threadId,
-            pendingAgentSwitch.record,
-            controls,
-            noticeMessageId ?? runtime.lastMessageId,
-          );
-          if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
+  ): Promise<
+    | { readonly applied: true; readonly agent?: string; readonly messageSent: boolean }
+    | { readonly queued: true; readonly agent?: string }
+    | { readonly rejected: true; readonly reason: string }
+  > {
+    return this.withPendingConfigurationLock(chatId, threadId, async () => {
+      const key = runtimeKey(chatId, threadId);
+      const before = await this.sessionStore.getLatest(chatId, threadId);
+      const existingPending = before?.pendingConfiguration;
+      const runtime = this.chats.get(key);
+      const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
 
-          const updatedControls = mergeSessionControls(
-            pendingAgentSwitch.record.controls,
-            controls,
-          );
-          const updatedRecord: SessionRecord = {
-            ...pendingAgentSwitch.record,
-            controls: updatedControls,
-            updatedAt: Date.now(),
-          };
-          const updatedProfile: PendingTargetProfile | undefined = pendingAgentSwitch.targetProfile
-            ? {
-                ...pendingAgentSwitch.targetProfile,
-                controls: updatedControls,
-                updatedAt: updatedRecord.updatedAt,
-              }
-            : undefined;
-          const latest = await this.sessionStore.getLatest(chatId, threadId);
-          if (latest?.pendingTargetProfile && updatedProfile) {
-            await this.sessionStore.setPendingTargetProfile({ chatId, threadId }, updatedProfile);
-          }
-          const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-          const queuedNoticeSpec = buildPendingAgentSwitchControlQueuedNotice(
-            pendingAgentSwitch.record,
-            updatedRecord,
-            controls,
-          );
-          let queuedNotice = pendingAgentSwitch.queuedNotice ?? null;
-          if (queuedNotice) {
-            await updateWipNoticeCard(this.presenter, queuedNotice, queuedNoticeSpec).catch((err) =>
-              this.logger.warn(
-                { err, chatId, threadId },
-                "pending target control queue notice update failed",
-              ),
-            );
-          } else {
-            queuedNotice = await createWipNoticeCard(
-              this.presenter,
-              replyTo,
-              queuedNoticeSpec,
-            ).catch((err) => {
-              this.logger.warn(
-                { err, chatId, threadId },
-                "pending target control queue notice failed",
-              );
-              return null;
-            });
-          }
-          this.pendingPostTurnAgentSwitches.set(key, {
-            ...pendingAgentSwitch,
-            record: updatedRecord,
-            ...(updatedProfile ? { targetProfile: updatedProfile } : {}),
-            queuedNotice,
-          });
-          return { applied: false, queued: true, recordSessionId: updatedRecord.sessionId };
-        }
+      const trimmedMessage = input.message
+        ? { prompt: input.message.prompt.trim(), createdAt: input.message.createdAt }
+        : undefined;
+      if (trimmedMessage && trimmedMessage.prompt.length === 0) {
+        return { rejected: true, reason: "message prompt must not be empty" };
+      }
 
-        const before = await this.sessionStore.getLatest(chatId, threadId);
-        const snapshot = runtime.capabilities();
-        const validation = await this.validateControlPatchForSnapshot(
-          snapshot,
-          controls,
-          noticeMessageId ?? runtime.lastMessageId,
-        );
-        if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
-        const record = await this.sessionStore.setPendingControls({ chatId, threadId }, controls);
-        const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-        const queuedNotice = await createWipNoticeCard(
-          this.presenter,
+      const merged = mergePendingSessionConfiguration(existingPending, {
+        ...(input.targetAgent ? { targetAgent: input.targetAgent } : {}),
+        ...(input.controls ? { controls: input.controls } : {}),
+        ...(trimmedMessage ? { message: trimmedMessage } : {}),
+      });
+
+      if (!pendingConfigurationHasProfileField(merged)) {
+        return {
+          rejected: true,
+          reason:
+            "configure requires at least one of Agent, Model, Mode, Permission, or Config; use sendMessage for a message-only request",
+        };
+      }
+
+      const desiredAgentRecord = merged.targetAgent
+        ? pendingTargetAgentToSessionRecord(chatId, threadId, merged.targetAgent)
+        : before;
+
+      if (merged.controls) {
+        const validation = await this.validateControlPatchForStoredProfile(
+          chatId,
+          threadId,
+          desiredAgentRecord,
+          merged.controls,
           replyTo,
-          buildPendingControlQueuedNotice(before, record, controls),
-        ).catch((err) => {
-          this.logger.warn({ err, chatId, threadId }, "pending control queue notice failed");
-          return null;
-        });
-        if (queuedNotice) {
-          await this.sessionStore.save({
-            ...record,
-            pendingControlsNoticeMessageId: queuedNotice.messageId,
-          });
-        }
-        return { applied: false, queued: true, recordSessionId: record.sessionId };
+        );
+        if (!validation.ok) return { rejected: true, reason: validation.reason };
       }
-      try {
-        await runtime.applyControls(controls, noticeMessageId ?? undefined);
-        return { applied: true, recordSessionId: runtime.capabilities().session.sessionId };
-      } catch (err) {
-        return { applied: false, rejected: true, reason: formatControlFailure(err) };
-      }
-    }
 
-    const before = await this.sessionStore.getLatest(chatId, threadId);
-    const validation = await this.validateControlPatchForStoredProfile(
-      chatId,
-      threadId,
-      before,
-      controls,
-      noticeMessageId ?? null,
+      if (runtime?.processing) {
+        return this.queuePendingConfiguration(chatId, threadId, before, merged, replyTo);
+      }
+
+      // Idle: persist the merged candidate as the single source of truth, then
+      // apply it through the canonical applier (which re-reads the persisted
+      // snapshot, not this local object). A brand-new topic with a target Agent
+      // has no Session to attach it to, so first persist a profile-only carrier
+      // derived from that target Agent.
+      try {
+        if (merged.targetAgent && !before) {
+          await this.sessionStore.save({
+            ...pendingTargetAgentToSessionRecord(chatId, threadId, merged.targetAgent),
+            profileOnly: true,
+            pendingConfiguration: merged,
+          });
+        } else {
+          await this.sessionStore.setPendingConfiguration({ chatId, threadId }, merged);
+        }
+        const outcome = await this.applyPersistedPendingConfiguration(
+          chatId,
+          threadId,
+          replyTo,
+          "idle",
+        );
+        return {
+          applied: true,
+          ...(outcome.agent !== undefined ? { agent: outcome.agent } : {}),
+          messageSent: outcome.messageSent,
+        };
+      } catch (err) {
+        return { rejected: true, reason: formatControlFailure(err) };
+      }
+    });
+  }
+
+  /**
+   * Send a Message to the current Topic Session without changing its
+   * configuration (spec §10). Must not overtake an existing Pending
+   * Configuration — if one exists (or this chat/thread is busy), the Message
+   * is merged into / queued alongside it instead of sent directly.
+   */
+  private async controlSendMessage(
+    chatId: string,
+    threadId: string | null,
+    message: PendingSessionMessage,
+    noticeMessageId?: string | null,
+  ): Promise<{ readonly sent: true } | { readonly queued: true }> {
+    const prompt = message.prompt.trim();
+    if (!prompt) throw new Error("message prompt must not be empty");
+    return this.withPendingConfigurationLock(chatId, threadId, async () => {
+      const key = runtimeKey(chatId, threadId);
+      const before = await this.sessionStore.getLatest(chatId, threadId);
+      const existingPending = before?.pendingConfiguration;
+      const runtime = this.chats.get(key);
+      const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
+
+      if (existingPending) {
+        const candidate: PendingSessionConfiguration = {
+          ...existingPending,
+          message: { prompt, createdAt: message.createdAt },
+          updatedAt: Date.now(),
+        };
+        await this.sessionStore.setPendingConfiguration({ chatId, threadId }, candidate);
+        return { queued: true };
+      }
+
+      if (runtime?.processing) {
+        const candidate: PendingSessionConfiguration = {
+          message: { prompt, createdAt: message.createdAt },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        await this.sessionStore.setPendingConfiguration({ chatId, threadId }, candidate);
+        return { queued: true };
+      }
+
+      // Nothing to recover — we read the absent Pending Configuration under the
+      // lock we hold — so tell acquisition to skip the recovery pass, which
+      // would otherwise re-enter this same lock and deadlock.
+      const targetRuntime =
+        runtime ??
+        (await this.acquireRuntimeForSend(chatId, replyTo, before, "pending-observed-under-lock"));
+      if (!targetRuntime) return { queued: true };
+      await this.enqueueRuntimeMessage(targetRuntime, chatId, threadId, {
+        prompt: [{ type: "text", text: prompt }],
+        messageId: replyTo ?? chatId,
+        chatId,
+      });
+      return { sent: true };
+    });
+  }
+
+  private async acquireRuntimeForSend(
+    chatId: string,
+    replyTo: string | null,
+    before: SessionRecord | null,
+    recovery: RuntimeAcquisitionRecovery = "recover-on-acquire",
+  ): Promise<ChatRuntime | null> {
+    const threadId = before?.threadId ?? null;
+    const binding = before
+      ? sessionRecordToEffectiveBinding(before, true, true)
+      : await this.resolveBinding(chatId);
+    if (!binding) {
+      if (replyTo) {
+        await this.presenter
+          .replyNoticeCard(
+            replyTo,
+            buildProfileCommandFailureNotice(
+              "⚠️ 发送失败",
+              "当前 chat 没有可用 repo/session。请先 /bind <路径> 或 session configure --agent。",
+            ),
+          )
+          .catch((err) => this.logger.warn({ err, chatId }, "send message failure notice failed"));
+      }
+      return null;
+    }
+    return this.acquireRuntime(chatId, threadId, binding, recovery);
+  }
+
+  /** Runs `fn` serialized per chat/thread key; see {@link pendingConfigurationLocks}. */
+  private async withPendingConfigurationLock<T>(
+    chatId: string,
+    threadId: string | null,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const key = runtimeKey(chatId, threadId);
+    const prior = this.pendingConfigurationLocks.get(key) ?? Promise.resolve();
+    const run = prior.catch(() => undefined).then(fn);
+    this.pendingConfigurationLocks.set(
+      key,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
     );
-    if (!validation.ok) return { applied: false, rejected: true, reason: validation.reason };
-    const record = await this.sessionStore.setControls({ chatId, threadId }, controls);
-    const notice = buildStoredControlUpdatedNotice(before, record, controls);
-    const sendStoredNotice = noticeMessageId
-      ? this.presenter.replyNoticeCard(noticeMessageId, notice)
-      : this.presenter.sendNoticeCard(chatId, notice);
-    await sendStoredNotice.catch((err) =>
-      this.logger.warn({ err, chatId, threadId }, "stored control notice failed"),
-    );
-    return { applied: false, recordSessionId: record.sessionId };
+    return run;
+  }
+
+  private async queuePendingConfiguration(
+    chatId: string,
+    threadId: string | null,
+    before: SessionRecord | null,
+    candidate: PendingSessionConfiguration,
+    replyTo: string | null,
+  ): Promise<{ readonly queued: true; readonly agent?: string }> {
+    const notice = buildPendingConfigurationQueuedNotice(before, candidate);
+    let noticeMessageId = candidate.noticeMessageId;
+    const existingCard = noticeMessageId ? restoreWipNoticeCard(noticeMessageId) : null;
+    if (existingCard) {
+      await updateWipNoticeCard(this.presenter, existingCard, notice).catch((err) =>
+        this.logger.warn(
+          { err, chatId, threadId },
+          "pending configuration queue notice update failed",
+        ),
+      );
+    } else if (replyTo) {
+      const created = await createWipNoticeCard(this.presenter, replyTo, notice).catch((err) => {
+        this.logger.warn({ err, chatId, threadId }, "pending configuration queue notice failed");
+        return null;
+      });
+      if (created) noticeMessageId = created.messageId;
+    }
+    const toPersist: PendingSessionConfiguration = {
+      ...candidate,
+      ...(noticeMessageId ? { noticeMessageId } : {}),
+    };
+    const saved = await this.sessionStore.setPendingConfiguration({ chatId, threadId }, toPersist);
+    const targetAgent = saved.pendingConfiguration?.targetAgent;
+    const agent = targetAgent ? (targetAgent.agentLabel ?? targetAgent.agentCommand) : undefined;
+    return { queued: true, ...(agent !== undefined ? { agent } : {}) };
   }
 
   private async validateControlPatchForStoredProfile(
@@ -1148,99 +1297,6 @@ export class LarkBridge {
       .catch((err) => this.logger.warn({ err }, "control validation failure notice failed"));
   }
 
-  private async controlSetPendingTask(
-    chatId: string,
-    threadId: string | null,
-    task: PendingSessionTask,
-  ): Promise<{ readonly queued: true; readonly promptLength: number }> {
-    const prompt = task.prompt.trim();
-    if (!prompt) throw new Error("pending task prompt must not be empty");
-    const record = await this.sessionStore.setPendingTask(
-      { chatId, threadId },
-      { prompt, createdAt: task.createdAt },
-    );
-    this.logger.info(
-      { chatId, threadId, sessionId: record.sessionId, promptLength: prompt.length },
-      "pending task queued",
-    );
-    return { queued: true, promptLength: prompt.length };
-  }
-
-  private async controlSetPendingTargetProfile(
-    chatId: string,
-    threadId: string | null,
-    profile: PendingTargetProfile,
-    noticeMessageId?: string | null,
-  ): Promise<{ readonly queued: true; readonly agent: string; readonly hasTask: boolean }> {
-    const runtime = this.chats.get(runtimeKey(chatId, threadId));
-    if (!runtime?.processing) {
-      const record = pendingTargetProfileToSessionRecord(chatId, threadId, profile);
-      const pendingTask = profile.task;
-      await this.applyAgentSwitchNow(
-        record,
-        await this.sessionStore.getLatest(chatId, threadId),
-        null,
-        noticeMessageId ?? null,
-        pendingTask,
-      );
-      if (this.globalDefaultControlChatIds.includes(chatId)) {
-        await this.persistGlobalDefaultPendingTargetProfile(profile, noticeMessageId ?? null);
-      }
-      return {
-        queued: true,
-        agent: record.agentLabel ?? record.agentCommand,
-        hasTask: pendingTask !== undefined,
-      };
-    }
-
-    const baseRecord = pendingTargetProfileToSessionRecord(chatId, threadId, profile);
-    const validation = profile.controls
-      ? await this.validateControlPatchForStoredProfile(
-          chatId,
-          threadId,
-          baseRecord,
-          profile.controls,
-          noticeMessageId ?? runtime.lastMessageId,
-        )
-      : { ok: true as const };
-    if (!validation.ok) throw new Error(validation.reason);
-
-    const previous = await this.sessionStore.getLatest(chatId, threadId);
-    const saved = await this.sessionStore.setPendingTargetProfile(
-      { chatId, threadId },
-      {
-        ...profile,
-        ...(profile.task ? { task: { ...profile.task, prompt: profile.task.prompt.trim() } } : {}),
-      },
-    );
-    const replyTo = noticeMessageId ?? runtime.lastMessageId ?? chatId;
-    const queuedNotice = await createWipNoticeCard(
-      this.presenter,
-      replyTo,
-      buildPendingTargetProfileQueuedNotice(previous, baseRecord, saved.pendingTargetProfile),
-    ).catch((err) => {
-      this.logger.warn({ err, chatId, threadId }, "pending target profile notice failed");
-      return null;
-    });
-    this.pendingPostTurnAgentSwitches.set(runtimeKey(chatId, threadId), {
-      record: baseRecord,
-      noticeMessageId: noticeMessageId ?? runtime.lastMessageId ?? null,
-      targetProfile: profile,
-      queuedNotice,
-    });
-    if (this.globalDefaultControlChatIds.includes(chatId)) {
-      await this.persistGlobalDefaultPendingTargetProfile(
-        profile,
-        noticeMessageId ?? runtime.lastMessageId ?? null,
-      );
-    }
-    return {
-      queued: true,
-      agent: baseRecord.agentLabel ?? baseRecord.agentCommand,
-      hasTask: profile.task !== undefined,
-    };
-  }
-
   private async controlAgentProbeFailed(
     chatId: string,
     threadId: string | null,
@@ -1270,47 +1326,56 @@ export class LarkBridge {
     | { readonly switched: true; readonly agent: string }
     | { readonly queued: true; readonly agent: string }
   > {
-    const key = runtimeKey(record.chatId, record.threadId);
-    const runtime = this.chats.get(key);
-    const replyTo = noticeMessageId ?? runtime?.lastMessageId ?? null;
-    const previous = await this.sessionStore.getLatest(record.chatId, record.threadId);
-
-    const inherited = await this.findRecentAgentSessionProfile(record);
-    const nextRecord: SessionRecord = inherited?.controls
-      ? { ...record, controls: inherited.controls }
-      : record;
-
-    if (runtime?.processing) {
-      let queuedNotice: WipNoticeCardRef | null = null;
-      if (replyTo) {
-        queuedNotice = await createWipNoticeCard(
-          this.presenter,
-          replyTo,
-          buildPendingAgentSwitchQueuedNotice(nextRecord, previous, inherited),
-        ).catch((err) => {
-          this.logger.warn({ err }, "pending agent switch notice failed");
-          return null;
-        });
-      }
-      this.pendingPostTurnAgentSwitches.set(key, {
-        record: nextRecord,
-        noticeMessageId: replyTo,
-        queuedNotice,
-      });
-      return { queued: true, agent: record.agentLabel ?? record.agentCommand };
-    }
-
-    await this.applyAgentSwitchNow(nextRecord, previous, inherited, replyTo);
-    return { switched: true, agent: record.agentLabel ?? record.agentCommand };
+    const targetAgent: PendingTargetAgent = {
+      sessionId: record.sessionId,
+      ...(record.profileOnly !== undefined ? { profileOnly: record.profileOnly } : {}),
+      agentCommand: record.agentCommand,
+      agentArgs: record.agentArgs,
+      ...(record.agentEnv ? { agentEnv: record.agentEnv } : {}),
+      ...(record.agentLabel !== undefined ? { agentLabel: record.agentLabel } : {}),
+      cwd: record.cwd,
+    };
+    const result = await this.controlConfigureSession(
+      record.chatId,
+      record.threadId,
+      { targetAgent },
+      noticeMessageId,
+    );
+    if ("rejected" in result) throw new Error(result.reason);
+    const agent = record.agentLabel ?? record.agentCommand;
+    if ("applied" in result) return { switched: true, agent };
+    return { queued: true, agent };
   }
 
+  /**
+   * Apply an Agent switch (target profile becoming the current session), for
+   * an idle immediate switch or a queued one at the Turn boundary / restart
+   * recovery: tear down any live runtime, replace the persisted session,
+   * deliver the attached Message, and finalize the outcome notice.
+   *
+   * `rollback` and `previous` are deliberately separate: `rollback` is the
+   * record physically restored on failure; `previous` is the prior Session
+   * shown in the notice. For a brand-new topic's profile-only carrier (spec
+   * §9.3) `rollback` is the carrier — restoring it re-arms its Pending
+   * Configuration for retry — while `previous` is null so the notice does not
+   * read as a same-Agent self-switch.
+   *
+   * The persisted switch and Message delivery are one ordered operation (spec
+   * §9.5, §9.6): on failure the session is rolled back to `rollback` (which
+   * also restores its Pending Configuration) before the error propagates, so
+   * the Message is never reported sent.
+   *
+   * @throws when the switch or Message delivery fails, after `rollback` is
+   *         restored; the caller surfaces the failure notice and leaves the
+   *         Pending Configuration in place.
+   */
   private async applyAgentSwitchNow(
     record: SessionRecord,
     previous: SessionRecord | null,
+    rollback: SessionRecord | null,
     inherited: SessionRecord | null,
     replyTo: string | null,
-    pendingTask?: PendingSessionTask,
-    noticeKind: "agent-switch" | "pending-target-profile" = "agent-switch",
+    message?: PendingSessionMessage,
     queuedNotice?: WipNoticeCardRef | null,
   ): Promise<void> {
     const key = runtimeKey(record.chatId, record.threadId);
@@ -1324,19 +1389,30 @@ export class LarkBridge {
     await this.sessionStore.clearThread(record.chatId, record.threadId);
     await this.sessionStore.save(record);
 
-    if (pendingTask) await this.enqueueTaskForSwitchedAgent(record, pendingTask, replyTo);
-
-    const notice =
-      noticeKind === "pending-target-profile"
-        ? buildPendingTargetProfileAppliedNotice(record, previous, pendingTask)
-        : buildSessionAgentSwitchedNotice(record, previous, inherited, pendingTask);
-    if (queuedNotice) {
-      await finalizeWipNoticeCard(this.presenter, queuedNotice, notice, async () => {
-        await this.sendAgentSwitchNotice(record.chatId, replyTo, notice);
-      });
-    } else {
-      await this.sendAgentSwitchNotice(record.chatId, replyTo, notice);
+    if (message) {
+      try {
+        await this.enqueueMessageForSession(record, message, replyTo);
+      } catch (err) {
+        await this.restorePreviousSessionAfterFailedSwitch(record, rollback);
+        throw err;
+      }
     }
+
+    const notice = buildSessionAgentSwitchedNotice(record, previous, inherited, message);
+    await this.finalizeOrSendNotice(record.chatId, replyTo, queuedNotice ?? null, notice);
+  }
+
+  /**
+   * Restore `rollback` as the current Session after a failed switch (spec
+   * §9.6), verbatim — which also restores whatever Pending Configuration it
+   * carried for retry.
+   */
+  private async restorePreviousSessionAfterFailedSwitch(
+    failed: SessionRecord,
+    rollback: SessionRecord | null,
+  ): Promise<void> {
+    await this.sessionStore.clearThread(failed.chatId, failed.threadId);
+    if (rollback) await this.sessionStore.save(rollback);
   }
 
   private async sendAgentSwitchNotice(
@@ -1355,52 +1431,253 @@ export class LarkBridge {
     }
   }
 
+  /** Finalize a "queued" WIP notice card in place, or send a fresh notice when none was queued. */
+  private async finalizeOrSendNotice(
+    chatId: string,
+    replyTo: string | null,
+    queuedNotice: WipNoticeCardRef | null,
+    notice: NoticeCardSpec,
+  ): Promise<void> {
+    if (queuedNotice) {
+      await finalizeWipNoticeCard(this.presenter, queuedNotice, notice, async () => {
+        await this.sendAgentSwitchNotice(chatId, replyTo, notice);
+      });
+    } else {
+      await this.sendAgentSwitchNotice(chatId, replyTo, notice);
+    }
+  }
+
+  /**
+   * Apply a controls/message-only Pending Configuration (no Agent switch):
+   * controls first, then the attached Message (spec §9.5). Idle application
+   * reports through the live runtime's own notice; Turn-boundary/recovery
+   * bypasses the busy guard and the Bridge owns the notice. A controls failure
+   * must not send the Message, and Message-delivery failure fails the whole
+   * application — the caller only clears the Pending Configuration on success.
+   *
+   * @returns whether the attached Message was delivered.
+   * @throws when applying controls or delivering the Message fails.
+   */
+  private async applyPendingControlsAndMessage(
+    chatId: string,
+    threadId: string | null,
+    before: SessionRecord,
+    configuration: PendingSessionConfiguration,
+    replyTo: string | null,
+    queuedNotice: WipNoticeCardRef | null,
+    trigger: PendingConfigurationApplyTrigger,
+  ): Promise<boolean> {
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+
+    if (configuration.controls) {
+      if (runtime && trigger === "idle") {
+        await runtime.applyControls(configuration.controls, replyTo ?? undefined);
+      } else if (runtime) {
+        const beforeSnapshot = runtime.capabilities();
+        await runtime.applyControlsAtTurnBoundary(configuration.controls);
+        const afterSnapshot = runtime.capabilities();
+        const notice = buildPendingControlsAppliedNotice(
+          beforeSnapshot,
+          afterSnapshot,
+          configuration.controls,
+        );
+        await this.finalizeOrSendNotice(chatId, replyTo, queuedNotice, notice);
+      } else {
+        const record = await this.sessionStore.setControls(
+          { chatId, threadId },
+          configuration.controls,
+        );
+        const notice = buildStoredControlUpdatedNotice(before, record, configuration.controls);
+        await this.finalizeOrSendNotice(chatId, replyTo, queuedNotice, notice);
+      }
+    }
+
+    if (!configuration.message) return false;
+    const targetRuntime = runtime ?? (await this.acquireRuntimeForSend(chatId, replyTo, before));
+    if (!targetRuntime) {
+      throw new Error("no repo/session available to deliver the pending message");
+    }
+    await this.enqueueRuntimeMessage(targetRuntime, chatId, threadId, {
+      prompt: [{ type: "text", text: configuration.message.prompt }],
+      messageId: replyTo ?? chatId,
+      chatId,
+    });
+    return true;
+  }
+
+  /**
+   * Turn-boundary trigger (spec §9.5): apply any persisted Pending
+   * Configuration the just-completed Turn left behind. A nested completion
+   * fired while that application delivers its own Message is skipped via
+   * {@link pendingConfigurationApplyInFlight}.
+   */
   private async handleRuntimeTurnComplete(
     chatId: string,
     threadId: string | null,
     messageId: string,
   ): Promise<void> {
     if (this.lifecycleState.kind !== "running") return;
-    const key = runtimeKey(chatId, threadId);
-    const pending = this.pendingPostTurnAgentSwitches.get(key);
-    const previous = await this.sessionStore.getLatest(chatId, threadId);
-    if (this.lifecycleState.kind !== "running") return;
-    const storedTarget = previous?.pendingTargetProfile;
-    if (!pending && !storedTarget) return;
-    this.pendingPostTurnAgentSwitches.delete(key);
+    if (this.pendingConfigurationApplyInFlight.has(runtimeKey(chatId, threadId))) return;
+    await this.withPendingConfigurationLock(chatId, threadId, () =>
+      this.applyPersistedPendingConfiguration(chatId, threadId, messageId, "turn-boundary"),
+    );
+  }
 
-    const targetProfile = pending?.targetProfile ?? storedTarget;
-    const targetRecord =
-      pending?.record ?? pendingTargetProfileToSessionRecord(chatId, threadId, targetProfile!);
-    const pendingTask = targetProfile?.task ?? previous?.pendingTask;
+  /**
+   * Canonical read -> apply -> conditional-clear for a topic's persisted
+   * Pending Configuration, shared by idle configure, the Turn-boundary
+   * consumer, and restart recovery. The persisted store — not a caller object
+   * — is the single source of truth (spec §9.3), so this also recovers after a
+   * Bridge restart. Callers must already hold
+   * {@link withPendingConfigurationLock}.
+   *
+   * Order is target profile -> controls -> Message (spec §9.5); the Pending
+   * Configuration is cleared only on full success, and only conditionally so a
+   * newer request written meanwhile is never clobbered (spec §9.3). On failure
+   * it is left in place for retry; Turn-boundary/recovery surface a failure
+   * notice while idle propagates a `rejected` result. The key is marked in
+   * {@link pendingConfigurationApplyInFlight} while applying so the attached
+   * Message's nested `acquireRuntime` does not re-enter recovery and loop.
+   *
+   * @throws when applying the target profile, controls, or Message fails.
+   */
+  private async applyPersistedPendingConfiguration(
+    chatId: string,
+    threadId: string | null,
+    replyTo: string | null,
+    trigger: PendingConfigurationApplyTrigger,
+  ): Promise<PendingConfigurationApplyResult> {
+    const before = await this.sessionStore.getLatest(chatId, threadId);
+    const configuration = before?.pendingConfiguration;
+    if (!before || !configuration) return { applied: false, messageSent: false };
+    if (trigger === "turn-boundary" && this.lifecycleState.kind !== "running") {
+      return { applied: false, messageSent: false };
+    }
+
+    const key = runtimeKey(chatId, threadId);
+    const queuedNotice = configuration.noticeMessageId
+      ? restoreWipNoticeCard(configuration.noticeMessageId)
+      : null;
+
+    this.pendingConfigurationApplyInFlight.add(key);
     try {
-      const inherited = pending?.record.controls
-        ? await this.findRecentAgentSessionProfile(pending.record)
-        : null;
-      if (this.lifecycleState.kind !== "running") return;
-      await this.applyAgentSwitchNow(
-        targetRecord,
-        previous,
-        inherited,
-        pending?.noticeMessageId ?? messageId,
-        pendingTask,
-        targetProfile ? "pending-target-profile" : "agent-switch",
-        pending?.queuedNotice ?? null,
+      const targetAgent = configuration.targetAgent;
+      if (targetAgent) {
+        const { record, inherited } = await this.resolveTargetAgentApplyRecord(
+          chatId,
+          threadId,
+          targetAgent,
+          configuration.controls,
+        );
+        if (trigger === "turn-boundary" && this.lifecycleState.kind !== "running") {
+          return { applied: false, messageSent: false };
+        }
+        // Carrier (profile-only, same sessionId as its target): the switch is
+        // "from no previous Session", so previous=null, but rollback stays the
+        // carrier to re-arm its Pending Configuration. See applyAgentSwitchNow.
+        const fromCarrier =
+          before.profileOnly === true && before.sessionId === targetAgent.sessionId;
+        const previous = fromCarrier ? null : before;
+        await this.applyAgentSwitchNow(
+          record,
+          previous,
+          before,
+          inherited,
+          replyTo,
+          configuration.message,
+          queuedNotice,
+        );
+        return {
+          applied: true,
+          agent: record.agentLabel ?? record.agentCommand,
+          messageSent: configuration.message !== undefined,
+        };
+      }
+
+      const messageSent = await this.applyPendingControlsAndMessage(
+        chatId,
+        threadId,
+        before,
+        configuration,
+        replyTo,
+        queuedNotice,
+        trigger,
       );
+      await this.sessionStore.clearPendingConfigurationIfMatches(
+        { chatId, threadId },
+        configuration,
+      );
+      return { applied: true, messageSent };
     } catch (err) {
-      if (pending?.queuedNotice) {
-        const failure = buildPendingAgentSwitchFailedNotice(err);
-        await finalizeWipNoticeCard(this.presenter, pending.queuedNotice, failure, async () => {
-          await this.sendAgentSwitchNotice(chatId, pending.noticeMessageId ?? messageId, failure);
-        });
+      if (trigger !== "idle") {
+        await this.reportPendingConfigurationFailure(chatId, replyTo, queuedNotice, err, trigger);
       }
       throw err;
+    } finally {
+      this.pendingConfigurationApplyInFlight.delete(key);
     }
   }
 
-  private async enqueueTaskForSwitchedAgent(
+  /**
+   * Resolve the target Session record (and any inherited controls) for a
+   * target-Agent switch: an explicit control patch wins; otherwise the most
+   * recent same-Agent Session's controls are inherited (spec §9.5).
+   */
+  private async resolveTargetAgentApplyRecord(
+    chatId: string,
+    threadId: string | null,
+    targetAgent: PendingTargetAgent,
+    explicitControls: SessionControlPatch | undefined,
+  ): Promise<{ readonly record: SessionRecord; readonly inherited: SessionRecord | null }> {
+    const targetRecordBase = pendingTargetAgentToSessionRecord(chatId, threadId, targetAgent);
+    const inherited =
+      explicitControls === undefined
+        ? await this.findRecentAgentSessionProfile(targetRecordBase)
+        : null;
+    const controls = explicitControls ?? inherited?.controls;
+    const record: SessionRecord = { ...targetRecordBase, ...(controls ? { controls } : {}) };
+    return { record, inherited };
+  }
+
+  /**
+   * Surface a failed Pending Configuration application (spec §9.6). The
+   * Pending Configuration remains persisted for retry; the caller rethrows so
+   * a new Message cannot overtake it during restart recovery.
+   */
+  private async reportPendingConfigurationFailure(
+    chatId: string,
+    replyTo: string | null,
+    queuedNotice: WipNoticeCardRef | null,
+    err: unknown,
+    mode: "turn-boundary" | "recovery",
+  ): Promise<void> {
+    const failure = buildPendingAgentSwitchFailedNotice(err);
+    await this.finalizeOrSendNotice(chatId, replyTo, queuedNotice, failure);
+    if (mode === "recovery") {
+      this.logger.warn({ err, chatId }, "pending configuration restart recovery failed");
+    }
+  }
+
+  /**
+   * Restart recovery (spec §9.3): apply a leftover persisted Pending
+   * Configuration before building a runtime — exactly when a Bridge restart
+   * would otherwise strand it, since the Turn-boundary consumer
+   * ({@link handleRuntimeTurnComplete}) only fires for a Turn that now never
+   * runs. A failed recovery rejects the triggering acquire so a new Message
+   * cannot overtake the still-pending configuration.
+   */
+  private async recoverPendingConfigurationOnAcquire(
+    chatId: string,
+    threadId: string | null,
+  ): Promise<void> {
+    await this.withPendingConfigurationLock(chatId, threadId, () =>
+      this.applyPersistedPendingConfiguration(chatId, threadId, null, "recovery"),
+    );
+  }
+
+  private async enqueueMessageForSession(
     record: SessionRecord,
-    task: PendingSessionTask,
+    message: PendingSessionMessage,
     messageId: string | null,
   ): Promise<void> {
     const runtime = await this.acquireRuntime(record.chatId, record.threadId, {
@@ -1413,14 +1690,37 @@ export class LarkBridge {
       reception: false,
       ...(record.controls ? { inheritedControls: record.controls } : {}),
     });
-    await runtime.enqueue({
+    await this.enqueueRuntimeMessage(runtime, record.chatId, record.threadId, {
       prompt: [
-        { type: "text", text: task.prompt },
+        { type: "text", text: message.prompt },
         { type: "text", text: POST_TURN_AGENT_SWITCH_TASK_HINT },
       ],
       messageId: messageId ?? record.chatId,
       chatId: record.chatId,
     });
+  }
+
+  /**
+   * Deliver a Message and discard a runtime that failed during lazy Agent
+   * bootstrap/resume. Keeping that runtime would let the next Message retry
+   * the failed target invocation after persisted Session selection rolled
+   * back.
+   *
+   * @throws when the runtime cannot process the Message.
+   */
+  private async enqueueRuntimeMessage(
+    runtime: ChatRuntime,
+    chatId: string,
+    threadId: string | null,
+    input: Parameters<ChatRuntime["enqueue"]>[0],
+  ): Promise<void> {
+    try {
+      await runtime.enqueue(input);
+    } catch (err) {
+      const key = runtimeKey(chatId, threadId);
+      if (this.chats.get(key) === runtime) this.chats.delete(key);
+      throw err;
+    }
   }
 
   private async controlBindSession(
@@ -1799,8 +2099,8 @@ export class LarkBridge {
     messageId: string,
     context: CommandContext = { isDirectMessage: false },
   ): Promise<void> {
-    const result = await this.controlSetControls(chatId, threadId, controls, messageId);
-    if (!result.rejected && this.shouldPersistGlobalDefaults(chatId, context)) {
+    const result = await this.controlConfigureSession(chatId, threadId, { controls }, messageId);
+    if (!("rejected" in result) && this.shouldPersistGlobalDefaults(chatId, context)) {
       await this.persistGlobalDefaultControls(controls, messageId);
     }
   }
@@ -2496,6 +2796,7 @@ export class LarkBridge {
     chatId: string,
     threadId: string | null,
     binding: EffectiveBinding,
+    recovery: RuntimeAcquisitionRecovery = "recover-on-acquire",
   ): Promise<ChatRuntime> {
     if (this.lifecycleState.kind !== "running") {
       throw new Error("bridge lifecycle is quiescing; runtime acquisition rejected");
@@ -2503,6 +2804,21 @@ export class LarkBridge {
     const key = runtimeKey(chatId, threadId);
     const existing = this.chats.get(key);
     if (existing) return existing;
+
+    // Run restart recovery before building a runtime, skipping two proven-safe
+    // cases: (1) the applier is already mid-flight for this key
+    // (`pendingConfigurationApplyInFlight`) and its own Message delivery can
+    // call back here; (2) the caller holds `withPendingConfigurationLock` and
+    // read the absent Pending Configuration under it, so recovery would only
+    // deadlock (`recovery === "pending-observed-under-lock"`).
+    if (recovery === "recover-on-acquire" && !this.pendingConfigurationApplyInFlight.has(key)) {
+      await this.recoverPendingConfigurationOnAcquire(chatId, threadId);
+      // Recovery may have delivered the attached Message via a nested
+      // `acquireRuntime` that already built the runtime — reuse it rather than
+      // building a second, orphaning one.
+      const recovered = this.chats.get(key);
+      if (recovered) return recovered;
+    }
 
     if (this.chats.size >= this.maxConcurrentChats) this.evictOldest();
 
@@ -2554,7 +2870,17 @@ export class LarkBridge {
       ...(effective.inheritedControls ? { inheritedControls: effective.inheritedControls } : {}),
       ...(usesGlobalDefaults ? { persistInheritedControls: true } : {}),
       onTurnComplete: (messageId) => {
-        const completion = this.handleRuntimeTurnComplete(chatId, threadId, messageId);
+        // The Turn-boundary consumer already surfaces its own failure notice
+        // (reportPendingConfigurationFailure); consume the rejection here so
+        // ChatRuntime does not also send a generic Agent-failure card, while
+        // still tracking the completion for lifecycle drain.
+        const completion = this.handleRuntimeTurnComplete(chatId, threadId, messageId).catch(
+          (err) =>
+            this.logger.warn(
+              { err, chatId, threadId },
+              "pending configuration application failed after turn",
+            ),
+        );
         this.runtimeTurnCompletions.add(completion);
         void completion.finally(() => this.runtimeTurnCompletions.delete(completion));
         return completion;
@@ -2738,27 +3064,6 @@ export class LarkBridge {
     );
   }
 
-  private async persistGlobalDefaultPendingTargetProfile(
-    profile: PendingTargetProfile,
-    messageId: string | null,
-  ): Promise<void> {
-    await this.mutateSettingsRuntime(
-      (runtime) => {
-        runtime["agent"] = profile.agentLabel ?? profile.agentCommand;
-        if (profile.controls) {
-          const existingControls = readSettingsControls(runtime["defaultControls"]);
-          const nextControls = mergeSessionControls(existingControls, profile.controls);
-          runtime["defaultControls"] = nextControls;
-          if (profile.controls.bridgePermissionMode !== undefined) {
-            runtime["permissionMode"] = profile.controls.bridgePermissionMode;
-          }
-        }
-      },
-      messageId,
-      "Pending target profile",
-    );
-  }
-
   private async mutateSettingsRuntime(
     mutate: (runtime: Record<string, unknown>) => void,
     messageId: string | null,
@@ -2766,10 +3071,10 @@ export class LarkBridge {
   ): Promise<void> {
     if (!this.settingsPath) return;
     try {
-      const root = readJsonObjectForSettingsWrite(this.settingsPath);
-      const runtime = readObjectFieldForSettingsWrite(root, "runtime");
+      const root = readSettingsFileObject(this.settingsPath);
+      const runtime = readSettingsObjectField(root, "runtime");
       mutate(runtime);
-      atomicWritePrivateJson(this.settingsPath, { ...root, runtime });
+      writeSettingsFileObject(this.settingsPath, { ...root, runtime });
       if (messageId) {
         await this.presenter.replyNoticeCard(messageId, {
           title: "✅ 全局默认已更新",
@@ -2792,8 +3097,8 @@ export class LarkBridge {
   private refreshRuntimeDefaultsFromSettings(): void {
     if (!this.settingsPath) return;
     try {
-      const root = readJsonObjectForSettingsWrite(this.settingsPath);
-      const runtime = readObjectFieldForSettingsWrite(root, "runtime");
+      const root = readSettingsFileObject(this.settingsPath);
+      const runtime = readSettingsObjectField(root, "runtime");
       const agentSelection = runtime["agent"];
       if (agentSelection !== undefined) {
         if (typeof agentSelection !== "string" || agentSelection.length === 0) {
@@ -3100,24 +3405,24 @@ function controlPatchNeedsAgentCapabilities(controls: SessionControlPatch): bool
   );
 }
 
-function pendingTargetProfileToSessionRecord(
+function pendingTargetAgentToSessionRecord(
   chatId: string,
   threadId: string | null,
-  profile: PendingTargetProfile,
+  target: PendingTargetAgent,
 ): SessionRecord {
+  const now = Date.now();
   return {
     chatId,
     threadId,
-    sessionId: profile.sessionId,
-    ...(profile.profileOnly !== undefined ? { profileOnly: profile.profileOnly } : {}),
-    agentCommand: profile.agentCommand,
-    agentArgs: [...profile.agentArgs],
-    ...(profile.agentEnv ? { agentEnv: { ...profile.agentEnv } } : {}),
-    ...(profile.agentLabel !== undefined ? { agentLabel: profile.agentLabel } : {}),
-    cwd: profile.cwd,
-    ...(profile.controls ? { controls: profile.controls } : {}),
-    createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt,
+    sessionId: target.sessionId,
+    ...(target.profileOnly !== undefined ? { profileOnly: target.profileOnly } : {}),
+    agentCommand: target.agentCommand,
+    agentArgs: [...target.agentArgs],
+    ...(target.agentEnv ? { agentEnv: { ...target.agentEnv } } : {}),
+    ...(target.agentLabel !== undefined ? { agentLabel: target.agentLabel } : {}),
+    cwd: target.cwd,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
@@ -3293,96 +3598,44 @@ function buildStoredControlUpdatedNotice(
   };
 }
 
-function buildPendingControlQueuedNotice(
+function buildPendingConfigurationQueuedNotice(
   before: SessionRecord | null,
-  after: SessionRecord,
-  changed: SessionControlPatch,
+  candidate: PendingSessionConfiguration,
 ): NoticeCardSpec {
-  const pending = after.pendingControls;
+  const messageLine = candidate.message
+    ? "• Message：已保存，将在目标 profile 生效后发送"
+    : "• Message：—";
+  const targetAgent = candidate.targetAgent;
+
+  if (targetAgent) {
+    const targetLabel = targetAgent.agentLabel ?? targetAgent.agentCommand;
+    const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
+    const lines = [
+      `已排队切换到 **${targetLabel}**。当前 Agent 这一轮会先正常结束；结束后 Humming 会应用完整目标 profile，再处理已保存的 message（如果有）。`,
+      "",
+      "**目标 profile**",
+      `• Agent：${beforeAgent} → ${targetLabel}`,
+      `• Repo：${targetAgent.cwd}`,
+      `• Controls：${displayControlPatch(candidate.controls)}`,
+      messageLine,
+      "",
+      "**生效顺序**",
+      "1. 应用目标 profile（启动 / 切换 Agent + controls）",
+      "2. 发送已保存的 message",
+    ];
+    return { title: "⏳ Pending configuration 已排队", body: lines.join("\n"), template: "blue" };
+  }
+
   const lines = [
     "当前 topic 正在处理上一条消息，新的 session profile 已保存为下一轮生效。",
     "",
-    "当前任务会继续使用旧 profile；下一次向 agent 发送 prompt 前，Humming 会先应用这些设置，成功后自动清掉 pendingControls。",
+    "当前任务会继续使用旧 profile；下一次向 agent 发送 prompt 前，Humming 会先应用这些设置，成功后自动清掉 pending configuration。",
     "",
-    "**排队修改**",
-    ...storedControlChangeLines(before?.pendingControls, pending, changed),
-    "",
-    "**当前已排队 profile**",
-    `• Agent：${after.agentLabel ?? after.agentCommand}`,
-    `• Mode：${displayControlMode(pending)}`,
-    `• Model：${displayControlModel(pending)}`,
-    `• Permission：${displayControlPermission(pending)}`,
-    `• Controls：${displayControlConfig(pending)}`,
+    "**已排队 Controls 变更**",
+    `• ${displayControlPatch(candidate.controls)}`,
+    messageLine,
   ];
-  return {
-    title: "⏳ Session profile 已排队",
-    body: lines.join("\n"),
-    template: "blue",
-  };
-}
-
-function buildPendingAgentSwitchControlQueuedNotice(
-  before: SessionRecord,
-  after: SessionRecord,
-  changed: SessionControlPatch,
-): NoticeCardSpec {
-  const lines = [
-    "检测到当前 topic 已有待生效 Agent 切换；新的 session control 已合并到目标 profile，并基于目标 Agent capabilities 校验。",
-    "",
-    "当前任务会继续使用旧 profile；当前 turn 结束后，Humming 会切换 Agent 并应用这些目标 profile 设置。",
-    "",
-    "**排队修改**",
-    ...storedControlChangeLines(before.controls, after.controls, changed),
-    "",
-    "**目标 profile**",
-    `• Agent：${after.agentLabel ?? after.agentCommand}`,
-    `• Mode：${displayControlMode(after.controls)}`,
-    `• Model：${displayControlModel(after.controls)}`,
-    `• Permission：${displayControlPermission(after.controls)}`,
-    `• Controls：${displayControlConfig(after.controls)}`,
-  ];
-  return {
-    title: "⏳ 目标 Session profile 已更新",
-    body: lines.join("\n"),
-    template: "blue",
-  };
-}
-
-function buildPendingTargetProfileQueuedNotice(
-  before: SessionRecord | null,
-  target: SessionRecord,
-  stored: PendingTargetProfile | undefined,
-): NoticeCardSpec {
-  const taskLine = stored?.task ? "• Task：已保存，将在目标 profile 生效后执行" : "• Task：—";
-  const lines = [
-    "已保存同一句请求形成的 pending target profile。当前 Agent 这一轮会先正常结束；结束后 Humming 会先应用目标 profile，再把任务交给目标 Agent。",
-    "",
-    "**当前 profile**",
-    `• Agent：${before ? (before.agentLabel ?? before.agentCommand) : "未绑定"}`,
-    `• Mode：${displayControlMode(before?.controls)}`,
-    `• Model：${displayControlModel(before?.controls)}`,
-    `• Permission：${displayControlPermission(before?.controls)}`,
-    `• Controls：${displayControlConfig(before?.controls)}`,
-    "",
-    "**目标 profile**",
-    `• Agent：${target.agentLabel ?? target.agentCommand}`,
-    `• Repo：${target.cwd}`,
-    `• Mode：${displayControlMode(target.controls)}`,
-    `• Model：${displayControlModel(target.controls)}`,
-    `• Permission：${displayControlPermission(target.controls)}`,
-    `• Controls：${displayControlConfig(target.controls)}`,
-    taskLine,
-    "",
-    "**生效顺序**",
-    "1. 应用目标 profile",
-    "2. 启动 / 切换到目标 Agent",
-    "3. 执行已保存的 task",
-  ];
-  return {
-    title: "⏳ Pending target profile 已排队",
-    body: lines.join("\n"),
-    template: "blue",
-  };
+  return { title: "⏳ Session profile 已排队", body: lines.join("\n"), template: "blue" };
 }
 
 function storedControlChangeLines(
@@ -3444,12 +3697,12 @@ function buildSessionAgentSwitchedNotice(
   record: SessionRecord,
   before?: SessionRecord | null,
   inherited?: SessionRecord | null,
-  pendingTask?: PendingSessionTask,
+  message?: PendingSessionMessage,
 ): NoticeCardSpec {
   const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
   const currentAgent = record.agentLabel ?? record.agentCommand;
-  const continuationLine = pendingTask
-    ? "已携带同一条用户请求中的任务内容，正在交给新 Agent 继续执行。"
+  const continuationLine = message
+    ? "已携带同一条请求中的 message，正在交给新 Agent 继续执行。"
     : "请发送下一条消息开始新的任务。触发切换的纯控制消息不会作为任务发送给新 Agent。";
   const lines = [
     `当前 topic 的 Agent 已切换为 **${currentAgent}**。旧 Agent 的内部对话历史不会自动迁移，内部 session context 没有迁移；后续消息会用新 Agent 创建全新 ACP session。`,
@@ -3476,32 +3729,30 @@ function buildSessionAgentSwitchedNotice(
   };
 }
 
-function buildPendingTargetProfileAppliedNotice(
-  record: SessionRecord,
-  before: SessionRecord | null,
-  pendingTask?: PendingSessionTask,
+function buildPendingControlsAppliedNotice(
+  before: SessionCapabilitiesSnapshot,
+  after: SessionCapabilitiesSnapshot,
+  changed: SessionControlPatch,
 ): NoticeCardSpec {
-  const currentAgent = record.agentLabel ?? record.agentCommand;
-  const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
-  const beforeControls = before?.controls;
-  const afterControls = record.controls;
-  const lines = [
-    "Pending target profile 已应用。",
-    "",
-    pendingTask
-      ? "正在交给目标 Agent 执行 pending task。"
-      : "没有 pending task；下一条消息会使用目标 profile。",
-    "",
-    "**本次 Profile 更新**",
-    `• Agent：${beforeAgent} → ${currentAgent}`,
-    `• Repo：${before?.cwd ?? "—"} → ${record.cwd}`,
-    `• Mode：${displayControlMode(beforeControls)} → ${displayControlMode(afterControls)}`,
-    `• Model：${displayControlModel(beforeControls)} → ${displayControlModel(afterControls)}`,
-    `• Permission：${displayControlPermission(beforeControls)} → ${displayControlPermission(afterControls)}`,
-    `• Controls：${displayControlConfig(beforeControls)} → ${displayControlConfig(afterControls)}`,
-  ];
+  const lines = ["之前排队的 session profile 已在本轮结束后生效。", "", "**修改明细**"];
+  if (changed.modeId !== undefined) {
+    lines.push(`• Mode：${displaySnapshotMode(before)} → ${displaySnapshotMode(after)}`);
+  }
+  if (changed.clearModelId === true || changed.modelId !== undefined) {
+    lines.push(`• Model：${displaySnapshotModel(before)} → ${displaySnapshotModel(after)}`);
+  }
+  if (changed.bridgePermissionMode !== undefined) {
+    lines.push(
+      `• Permission：${displaySnapshotPermission(before)} → ${displaySnapshotPermission(after)}`,
+    );
+  }
+  if (changed.config !== undefined && Object.keys(changed.config).length > 0) {
+    lines.push(
+      `• Controls：${displaySnapshotControls(before)} → ${displaySnapshotControls(after)}`,
+    );
+  }
   return {
-    title: "✅ Pending target profile 已生效",
+    title: "✅ 排队的 Session profile 已生效",
     body: lines.join("\n"),
     template: "green",
   };
@@ -3510,33 +3761,8 @@ function buildPendingTargetProfileAppliedNotice(
 function buildPendingAgentSwitchFailedNotice(err: unknown): NoticeCardSpec {
   return {
     title: "⚠️ 排队的 Session 操作未完成",
-    body: `当前 turn 已结束，但应用目标 profile 或启动 pending task 时失败。目标 profile 可能已经写入，请用 /profile 确认当前状态后重试任务。\n\n原因：${formatBootstrapError(err)}`,
+    body: `当前 turn 已结束，但应用目标 profile 或发送 message 时失败。目标 profile 可能已经写入，请用 /profile 确认当前状态后重试任务。\n\n原因：${formatBootstrapError(err)}`,
     template: "red",
-  };
-}
-
-function buildPendingAgentSwitchQueuedNotice(
-  record: SessionRecord,
-  before?: SessionRecord | null,
-  inherited?: SessionRecord | null,
-): NoticeCardSpec {
-  const targetAgent = record.agentLabel ?? record.agentCommand;
-  const fromAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
-  const lines = [
-    `已排队切换到 **${targetAgent}**。当前 Agent 这一轮会先正常结束；结束后 Humming 会切换 Agent，再执行已登记的 pending task（如果有）。`,
-    "",
-    "**排队结果**",
-    `• Agent：${fromAgent} → ${targetAgent}`,
-    `• Repo：${record.cwd}`,
-    "• 时机：当前 turn 结束后立即生效",
-  ];
-  if (inherited?.controls) {
-    lines.push(`• Metadata：将从当前 chat 最近的 ${targetAgent} session 继承 controls`);
-  }
-  return {
-    title: "⏳ Agent 切换已排队",
-    body: lines.join("\n"),
-    template: "blue",
   };
 }
 
@@ -3823,40 +4049,6 @@ function modelCommandToPatch(model: string | "auto"): SessionControlPatch {
   return model === "auto" ? { clearModelId: true } : { modelId: model };
 }
 
-const SETTINGS_FILE_MODE = 0o600;
-
-function readJsonObjectForSettingsWrite(settingsPath: string): Record<string, unknown> {
-  if (!fs.existsSync(settingsPath)) return {};
-  const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("settings file must contain a JSON object");
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function readObjectFieldForSettingsWrite(
-  root: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> {
-  const value = root[key];
-  if (value === undefined) return {};
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`settings file ${key} must be a JSON object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function atomicWritePrivateJson(filePath: string, value: Readonly<Record<string, unknown>>): void {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf-8",
-    mode: SETTINGS_FILE_MODE,
-  });
-  fs.renameSync(tmp, filePath);
-}
-
 function readSettingsControls(value: unknown): SessionControls | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -3957,6 +4149,10 @@ function buildLiveProfileNotice(snapshot: SessionCapabilitiesSnapshot): NoticeCa
 }
 
 function buildStoredProfileNotice(record: SessionRecord): NoticeCardSpec {
+  const pending = record.pendingConfiguration;
+  const pendingLine = pending
+    ? `${displayControlPatch(pending.controls)}${pending.targetAgent ? ` · Agent → ${pending.targetAgent.agentLabel ?? pending.targetAgent.agentCommand}` : ""}${pending.message ? " · message 已保存" : ""}`
+    : "—";
   return {
     title: "📋 当前 Session profile",
     body: [
@@ -3971,7 +4167,7 @@ function buildStoredProfileNotice(record: SessionRecord): NoticeCardSpec {
       `• Model：${displayControlModel(record.controls)}`,
       `• Permission：${displayControlPermission(record.controls)}`,
       `• Controls：${displayControlConfig(record.controls)}`,
-      `• Pending：${displayControlPatch(record.pendingControls)}`,
+      `• Pending：${pendingLine}`,
       `• 状态：${record.profileOnly ? "profile-only" : "stored"}`,
     ].join("\n"),
     template: "blue",

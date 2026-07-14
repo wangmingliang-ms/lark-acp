@@ -46,8 +46,9 @@ export { LarkCardPresenter } from "./presenter/lark-presenter.js";
 export type { LarkCardPresenterOptions } from "./presenter/lark-presenter.js";
 
 export type {
-  PendingSessionTask,
-  PendingTargetProfile,
+  PendingSessionConfiguration,
+  PendingSessionMessage,
+  PendingTargetAgent,
   PermissionMode as SessionPermissionMode,
   SessionCapabilitiesSnapshot,
   SessionConfigControlValue,
@@ -61,16 +62,25 @@ export {
   FileSessionStore,
   SessionAlreadyBoundError,
   SessionStoreControlError,
+  SessionStoreFormatError,
 } from "./session-store/file-session-store.js";
 export {
   hasSessionControls,
+  isPendingSessionMessage,
+  isPendingTargetAgent,
+  mergePendingSessionConfiguration,
   isSessionControlPatch,
   mergeSessionControlPatches,
+  mergeSessionControlPatchesOrUndefined,
   mergeSessionControls,
+  pendingConfigurationHasProfileField,
 } from "./session-store/session-controls.js";
+export {
+  permissionModeSchema,
+  sessionControlsSchema,
+} from "./session-store/session-record-schema.js";
 
 export type { BindingStore, ChatBinding } from "./binding-store/binding-store.js";
-export { FileBindingStore, BindingStoreIoError } from "./binding-store/file-binding-store.js";
 export { SettingsBindingStore } from "./binding-store/settings-binding-store.js";
 
 export { LarkHttpClient } from "./lark/lark-http.js";

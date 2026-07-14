@@ -8,7 +8,7 @@
  * chat pointed at", of which there is exactly one per chat.
  *
  * The library does **not** ship a default — callers construct a
- * {@link FileBindingStore} (or their own implementation) and pass it to
+ * {@link SettingsBindingStore} (or their own implementation) and pass it to
  * `LarkBridge`.
  */
 

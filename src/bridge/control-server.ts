@@ -3,13 +3,17 @@ import net from "node:net";
 import path from "node:path";
 import type { LarkLogger } from "../logger/logger.js";
 import type {
-  PendingSessionTask,
-  PendingTargetProfile,
+  PendingSessionMessage,
+  PendingTargetAgent,
   SessionCapabilitiesSnapshot,
   SessionControlPatch,
   SessionRecord,
 } from "../session-store/session-store.js";
-import { isSessionControlPatch } from "../session-store/session-controls.js";
+import {
+  isPendingSessionMessage,
+  isPendingTargetAgent,
+  isSessionControlPatch,
+} from "../session-store/session-controls.js";
 import {
   isLifecycleTransaction,
   type LifecycleTransaction,
@@ -20,6 +24,13 @@ export interface AgentProbeFailureTarget {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
+}
+
+/** Wire payload for `configureSession` — see docs/cli-command-model-SPEC.md §9. */
+export interface ConfigureSessionInput {
+  readonly targetAgent?: PendingTargetAgent;
+  readonly controls?: SessionControlPatch;
+  readonly message?: PendingSessionMessage;
 }
 
 export type ControlRequest =
@@ -50,40 +61,29 @@ export type ControlRequest =
     }
   | {
       readonly id?: string | number;
-      readonly method: "setControls";
+      readonly method: "configureSession";
       readonly params: {
         readonly chatId: string;
         readonly threadId?: string | null;
-        readonly controls: SessionControlPatch;
+        readonly targetAgent?: PendingTargetAgent;
+        readonly controls?: SessionControlPatch;
+        readonly message?: PendingSessionMessage;
+        readonly noticeMessageId?: string | null;
       };
     }
   | {
       readonly id?: string | number;
-      readonly method: "setPendingTask";
+      readonly method: "sendMessage";
       readonly params: {
         readonly chatId: string;
         readonly threadId?: string | null;
-        readonly task: PendingSessionTask;
-      };
-    }
-  | {
-      readonly id?: string | number;
-      readonly method: "setPendingTargetProfile";
-      readonly params: {
-        readonly chatId: string;
-        readonly threadId?: string | null;
-        readonly profile: PendingTargetProfile;
+        readonly message: PendingSessionMessage;
         readonly noticeMessageId?: string | null;
       };
     }
   | {
       readonly id?: string | number;
       readonly method: "bindSession";
-      readonly params: { readonly record: SessionRecord; readonly noticeMessageId?: string | null };
-    }
-  | {
-      readonly id?: string | number;
-      readonly method: "setAgent";
       readonly params: { readonly record: SessionRecord; readonly noticeMessageId?: string | null };
     }
   | {
@@ -111,24 +111,30 @@ export interface BridgeControlHandlers {
   shutdown(): Promise<unknown>;
   restart(): Promise<unknown>;
   capabilities(chatId: string, threadId: string | null): Promise<SessionCapabilitiesSnapshot>;
-  setControls(
+  /**
+   * Merge a desired target Agent / controls / message into the chat/thread's
+   * single Pending Configuration, validate the complete candidate against the
+   * resolved Desired Agent, and either apply it now (idle) or queue it for
+   * the next Turn boundary (busy). See docs/cli-command-model-SPEC.md §9.
+   */
+  configureSession(
     chatId: string,
     threadId: string | null,
-    controls: SessionControlPatch,
+    input: ConfigureSessionInput,
+    noticeMessageId?: string | null,
   ): Promise<unknown>;
-  setPendingTask(
+  /**
+   * Send a Message to the current Topic Session without changing its
+   * configuration. Must not overtake an existing Pending Configuration (spec
+   * §10).
+   */
+  sendMessage(
     chatId: string,
     threadId: string | null,
-    task: PendingSessionTask,
-  ): Promise<unknown>;
-  setPendingTargetProfile(
-    chatId: string,
-    threadId: string | null,
-    profile: PendingTargetProfile,
+    message: PendingSessionMessage,
     noticeMessageId?: string | null,
   ): Promise<unknown>;
   bindSession(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
-  setAgent(record: SessionRecord, noticeMessageId?: string | null): Promise<unknown>;
   agentProbeFailed(
     chatId: string,
     threadId: string | null,
@@ -264,34 +270,29 @@ export class BridgeControlServer {
               parsed.params.threadId ?? null,
             ),
           };
-        case "setControls":
+        case "configureSession":
           return {
             ok: true,
             id: parsed.id,
-            result: await this.handlers.setControls(
+            result: await this.handlers.configureSession(
               parsed.params.chatId,
               parsed.params.threadId ?? null,
-              parsed.params.controls,
+              {
+                ...(parsed.params.targetAgent ? { targetAgent: parsed.params.targetAgent } : {}),
+                ...(parsed.params.controls ? { controls: parsed.params.controls } : {}),
+                ...(parsed.params.message ? { message: parsed.params.message } : {}),
+              },
+              parsed.params.noticeMessageId ?? null,
             ),
           };
-        case "setPendingTask":
+        case "sendMessage":
           return {
             ok: true,
             id: parsed.id,
-            result: await this.handlers.setPendingTask(
+            result: await this.handlers.sendMessage(
               parsed.params.chatId,
               parsed.params.threadId ?? null,
-              parsed.params.task,
-            ),
-          };
-        case "setPendingTargetProfile":
-          return {
-            ok: true,
-            id: parsed.id,
-            result: await this.handlers.setPendingTargetProfile(
-              parsed.params.chatId,
-              parsed.params.threadId ?? null,
-              parsed.params.profile,
+              parsed.params.message,
               parsed.params.noticeMessageId ?? null,
             ),
           };
@@ -300,15 +301,6 @@ export class BridgeControlServer {
             ok: true,
             id: parsed.id,
             result: await this.handlers.bindSession(
-              parsed.params.record,
-              parsed.params.noticeMessageId ?? null,
-            ),
-          };
-        case "setAgent":
-          return {
-            ok: true,
-            id: parsed.id,
-            result: await this.handlers.setAgent(
               parsed.params.record,
               parsed.params.noticeMessageId ?? null,
             ),
@@ -402,35 +394,29 @@ function isControlRequest(value: unknown): value is ControlRequest {
     const params = value["params"];
     return isRecord(params) && typeof params["chatId"] === "string";
   }
-  if (value["method"] === "setControls") {
+  if (value["method"] === "configureSession") {
     const params = value["params"];
-    return (
-      isRecord(params) &&
-      typeof params["chatId"] === "string" &&
-      isSessionControlPatch(params["controls"])
-    );
+    if (!isRecord(params) || typeof params["chatId"] !== "string") return false;
+    if (params["targetAgent"] !== undefined && !isPendingTargetAgent(params["targetAgent"])) {
+      return false;
+    }
+    if (params["controls"] !== undefined && !isSessionControlPatch(params["controls"])) {
+      return false;
+    }
+    if (params["message"] !== undefined && !isPendingSessionMessage(params["message"])) {
+      return false;
+    }
+    return true;
   }
-  if (value["method"] === "setPendingTask") {
+  if (value["method"] === "sendMessage") {
     const params = value["params"];
     return (
       isRecord(params) &&
       typeof params["chatId"] === "string" &&
-      isPendingSessionTask(params["task"])
-    );
-  }
-  if (value["method"] === "setPendingTargetProfile") {
-    const params = value["params"];
-    return (
-      isRecord(params) &&
-      typeof params["chatId"] === "string" &&
-      isPendingTargetProfile(params["profile"])
+      isPendingSessionMessage(params["message"])
     );
   }
   if (value["method"] === "bindSession") {
-    const params = value["params"];
-    return isRecord(params) && isSessionRecord(params["record"]);
-  }
-  if (value["method"] === "setAgent") {
     const params = value["params"];
     return isRecord(params) && isSessionRecord(params["record"]);
   }
@@ -444,30 +430,6 @@ function isControlRequest(value: unknown): value is ControlRequest {
     );
   }
   return false;
-}
-
-function isPendingSessionTask(value: unknown): value is PendingSessionTask {
-  return (
-    isRecord(value) &&
-    typeof value["prompt"] === "string" &&
-    value["prompt"].trim().length > 0 &&
-    typeof value["createdAt"] === "number"
-  );
-}
-
-function isPendingTargetProfile(value: unknown): value is PendingTargetProfile {
-  return (
-    isRecord(value) &&
-    typeof value["sessionId"] === "string" &&
-    typeof value["agentCommand"] === "string" &&
-    Array.isArray(value["agentArgs"]) &&
-    value["agentArgs"].every((item) => typeof item === "string") &&
-    typeof value["cwd"] === "string" &&
-    (value["controls"] === undefined || isSessionControlPatch(value["controls"])) &&
-    (value["task"] === undefined || isPendingSessionTask(value["task"])) &&
-    typeof value["createdAt"] === "number" &&
-    typeof value["updatedAt"] === "number"
-  );
 }
 
 function isWindowsNamedPipe(socketPath: string): boolean {

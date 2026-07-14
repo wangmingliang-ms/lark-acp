@@ -39,33 +39,56 @@ export interface SessionRecord {
   agentLabel?: string;
   cwd: string;
   controls?: SessionControls;
-  /** One-shot next-turn control changes, consumed before the next ACP prompt. */
-  pendingControls?: SessionControlPatch;
-  /** Card id for the queued pendingControls notice, patched when the controls apply/fail. */
-  pendingControlsNoticeMessageId?: string;
-  /** One-shot task prompt to run automatically after queued controls become live. */
-  pendingTask?: PendingSessionTask;
-  /** Atomic Agent + controls + optional task target to apply after the current turn. */
-  pendingTargetProfile?: PendingTargetProfile;
+  /**
+   * The single canonical not-yet-applied desired profile change for this
+   * chat/thread (see docs/cli-command-model-SPEC.md §9.3). The Bridge is its
+   * sole semantic owner: it merges later `configure`/`send` requests into
+   * this field and validates the complete candidate before replacing it.
+   */
+  pendingConfiguration?: PendingSessionConfiguration;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface PendingSessionTask {
+/**
+ * A Message queued to run once its associated target profile (Pending
+ * Configuration, or the current profile for a plain `send`) is fully active.
+ */
+export interface PendingSessionMessage {
   readonly prompt: string;
   readonly createdAt: number;
 }
 
-export interface PendingTargetProfile {
+/** Desired Agent invocation captured by a Pending Configuration. */
+export interface PendingTargetAgent {
   readonly sessionId: string;
   readonly profileOnly?: boolean;
   readonly agentCommand: string;
-  readonly agentArgs: string[];
+  readonly agentArgs: readonly string[];
   readonly agentEnv?: Readonly<Record<string, string>>;
   readonly agentLabel?: string;
   readonly cwd: string;
-  readonly controls?: SessionControls;
-  readonly task?: PendingSessionTask;
+}
+
+/**
+ * The single canonical representation of a Topic's not-yet-applied desired
+ * profile change (spec §9.3). At most one exists per chat/thread. A later
+ * `configure`/`send` request merges into it field-by-field with
+ * last-write-wins semantics (spec §9.4); the complete merged candidate is
+ * validated against the resolved Desired Agent before it replaces the
+ * previous value. It is applied — target profile, then controls, then the
+ * attached Message — at the next Turn boundary while busy, or immediately
+ * while idle (spec §9.5).
+ */
+export interface PendingSessionConfiguration {
+  /** Present only when the desired change includes an Agent switch/start. */
+  readonly targetAgent?: PendingTargetAgent;
+  /** Accumulated Model/Mode/Permission/Config patch, validated against the Desired Agent. */
+  readonly controls?: SessionControlPatch;
+  /** Message to send once the target profile is fully active. */
+  readonly message?: PendingSessionMessage;
+  /** Card id of the "queued" notice; patched in place when applied or rejected. */
+  readonly noticeMessageId?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -168,35 +191,38 @@ export interface SessionStore {
    */
   bindThreadSession(record: SessionRecord): Promise<SessionRecord>;
 
-  /** Merge control fields into one existing/current session record. */
+  /** Merge control fields into one existing/current session record's live (already-applied) profile. */
   setControls(target: SessionControlTarget, controls: SessionControlPatch): Promise<SessionRecord>;
 
-  /** Merge control fields into the one-shot next-turn queue for one existing/current session. */
-  setPendingControls(
+  /**
+   * Replace the single canonical Pending Configuration for one
+   * existing/current session. Callers (the Bridge) must have already merged
+   * and validated the complete candidate (spec §9.4) — this store performs
+   * no merging or validation of its own.
+   *
+   * @throws when no session exists yet for this chat/thread.
+   */
+  setPendingConfiguration(
     target: SessionControlTarget,
-    controls: SessionControlPatch,
+    configuration: PendingSessionConfiguration,
   ): Promise<SessionRecord>;
 
-  /** Consume the one-shot next-turn controls for one existing/current session. */
-  consumePendingControls(target: SessionControlTarget): Promise<{
-    readonly record: SessionRecord;
-    readonly pendingControls?: SessionControlPatch;
-    readonly noticeMessageId?: string;
-  }>;
-
-  /** Store/replace the one-shot task prompt to run after queued controls apply. */
-  setPendingTask(target: SessionControlTarget, task: PendingSessionTask): Promise<SessionRecord>;
-
-  /** Store/replace an atomic Agent + controls + optional task target profile. */
-  setPendingTargetProfile(
+  /**
+   * Clear the persisted Pending Configuration for one chat/thread, but only
+   * when it is still deep-equal to `expected` — the value the caller read
+   * before applying it. A later `configure`/`send` request may have already
+   * replaced it with a newer candidate (spec §9.3); this conditional clear
+   * ensures an in-progress application can never silently discard that newer
+   * request. Applying a Pending Configuration must read it, apply target
+   * profile -> controls -> Message in order, and only then call this — never
+   * clear eagerly before application completes (spec §9.5, §9.6).
+   *
+   * @throws when no session exists yet for this chat/thread.
+   */
+  clearPendingConfigurationIfMatches(
     target: SessionControlTarget,
-    profile: PendingTargetProfile,
-  ): Promise<SessionRecord>;
-
-  /** Consume the one-shot task prompt for one existing/current session. */
-  consumePendingTask(
-    target: SessionControlTarget,
-  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }>;
+    expected: PendingSessionConfiguration,
+  ): Promise<{ readonly record: SessionRecord; readonly cleared: boolean }>;
 
   /** Drop all persisted ACP sessions for one chat/thread. */
   clearThread(chatId: string, threadId: string | null): Promise<void>;

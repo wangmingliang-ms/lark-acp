@@ -1,11 +1,14 @@
 import type {
+  PendingSessionConfiguration,
+  PendingSessionMessage,
+  PendingTargetAgent,
   PermissionMode,
   SessionConfigControlValue,
   SessionControlPatch,
   SessionControls,
 } from "./session-store.js";
 
-const SESSION_PERMISSION_MODES: readonly PermissionMode[] = [
+export const SESSION_PERMISSION_MODES: readonly PermissionMode[] = [
   "alwaysAllow",
   "alwaysDeny",
   "alwaysAsk",
@@ -55,6 +58,66 @@ export function mergeSessionControlPatches(
   return out;
 }
 
+/**
+ * Merge a control patch into an already-accumulated patch, returning
+ * `undefined` when the merged result has no fields at all (as opposed to
+ * {@link mergeSessionControlPatches}, which always returns an object).
+ */
+export function mergeSessionControlPatchesOrUndefined(
+  existing: SessionControlPatch | undefined,
+  patch: SessionControlPatch | undefined,
+): SessionControlPatch | undefined {
+  if (existing === undefined && patch === undefined) return undefined;
+  const merged = mergeSessionControlPatches(existing, patch ?? {});
+  return hasSessionControls(merged) ? merged : undefined;
+}
+
+/** Incoming fields for a single `configure`/`send` request, before merging. */
+export interface PendingSessionConfigurationInput {
+  readonly targetAgent?: PendingTargetAgent;
+  readonly controls?: SessionControlPatch;
+  readonly message?: PendingSessionMessage;
+}
+
+/**
+ * Merge a new `configure`/`send` request into an existing Pending
+ * Configuration field-by-field, last-write-wins (spec §9.4): later scalars
+ * (Agent, Message) and Config keys win, unmentioned fields are retained, and
+ * omitting a field never clears it. Does not validate — the caller validates
+ * the merged candidate against the resolved Desired Agent (spec §9.3, §9.6).
+ */
+export function mergePendingSessionConfiguration(
+  existing: PendingSessionConfiguration | undefined,
+  incoming: PendingSessionConfigurationInput,
+): PendingSessionConfiguration {
+  const targetAgent = incoming.targetAgent ?? existing?.targetAgent;
+  const controls = mergeSessionControlPatchesOrUndefined(existing?.controls, incoming.controls);
+  const message = incoming.message ?? existing?.message;
+  const now = Date.now();
+  return {
+    ...(targetAgent ? { targetAgent } : {}),
+    ...(controls ? { controls } : {}),
+    ...(message ? { message } : {}),
+    ...(existing?.noticeMessageId ? { noticeMessageId: existing.noticeMessageId } : {}),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Whether a Pending Configuration candidate contains at least one desired
+ * profile field (Agent, Model, Mode, Permission, or Config). A Message by
+ * itself is not a configuration (spec §9.1).
+ */
+export function pendingConfigurationHasProfileField(
+  configuration: Pick<PendingSessionConfiguration, "targetAgent" | "controls">,
+): boolean {
+  return (
+    configuration.targetAgent !== undefined ||
+    (configuration.controls !== undefined && hasSessionControls(configuration.controls))
+  );
+}
+
 export function hasSessionControls(controls: SessionControlPatch | SessionControls): boolean {
   return (
     ("clearModelId" in controls && controls.clearModelId === true) ||
@@ -92,6 +155,30 @@ export function isSessionControlPatch(value: unknown): value is SessionControlPa
     modeId !== undefined ||
     bridgePermissionMode !== undefined ||
     config !== undefined
+  );
+}
+
+/** Type guard for the wire-level {@link PendingTargetAgent} shape used by `configureSession`. */
+export function isPendingTargetAgent(value: unknown): value is PendingTargetAgent {
+  return (
+    isRecord(value) &&
+    typeof value["sessionId"] === "string" &&
+    (value["profileOnly"] === undefined || typeof value["profileOnly"] === "boolean") &&
+    typeof value["agentCommand"] === "string" &&
+    Array.isArray(value["agentArgs"]) &&
+    value["agentArgs"].every((item) => typeof item === "string") &&
+    typeof value["cwd"] === "string" &&
+    (value["agentLabel"] === undefined || typeof value["agentLabel"] === "string")
+  );
+}
+
+/** Type guard for the wire-level {@link PendingSessionMessage} shape used by `configureSession`/`sendMessage`. */
+export function isPendingSessionMessage(value: unknown): value is PendingSessionMessage {
+  return (
+    isRecord(value) &&
+    typeof value["prompt"] === "string" &&
+    value["prompt"].trim().length > 0 &&
+    typeof value["createdAt"] === "number"
   );
 }
 

@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FileSessionStore, SessionAlreadyBoundError } from "./file-session-store.js";
+import {
+  FileSessionStore,
+  SessionAlreadyBoundError,
+  SessionStoreFormatError,
+} from "./file-session-store.js";
 import type { SessionRecord } from "./session-store.js";
 
 /**
@@ -103,7 +107,7 @@ describe("FileSessionStore thread scoping", () => {
     }
   });
 
-  it("backfills threadId:null for records written before topic support", async () => {
+  it("rejects a pre-topic record persisted without an explicit threadId", async () => {
     // Simulate an on-disk file whose records predate the threadId field.
     await store.close();
     const filePath = path.join(dir, "sessions.json");
@@ -123,14 +127,122 @@ describe("FileSessionStore thread scoping", () => {
     fs.writeFileSync(filePath, JSON.stringify(legacyShaped), "utf-8");
 
     const reopened = new FileSessionStore(dir);
+    const initResult = reopened.init();
+    await expect(initResult).rejects.toBeInstanceOf(SessionStoreFormatError);
+    await expect(initResult).rejects.toThrow(/threadId/);
+  });
+
+  it("rejects the pre-multi-session single-record-per-chat shape", async () => {
+    await store.close();
+    const filePath = path.join(dir, "sessions.json");
+    const oldShaped = {
+      oc_A: { sessionId: "s_old", cwd: "/tmp", updatedAt: 1 },
+    };
+    fs.writeFileSync(filePath, JSON.stringify(oldShaped), "utf-8");
+
+    const reopened = new FileSessionStore(dir);
+    const initResult = reopened.init();
+    await expect(initResult).rejects.toBeInstanceOf(SessionStoreFormatError);
+    await expect(initResult).rejects.toThrow(/must be an array/);
+  });
+
+  it("round-trips a record with controls and a pending configuration across reopen", async () => {
+    await store.save(
+      record({
+        chatId: "oc_A",
+        threadId: "th_1",
+        sessionId: "s_t1",
+        controls: { modelId: "gpt-5.5", config: { approval: { value: "ask" } } },
+        pendingConfiguration: {
+          targetAgent: {
+            sessionId: "profile:1",
+            profileOnly: true,
+            agentCommand: "npx",
+            agentArgs: ["-y", "codex"],
+            agentLabel: "codex",
+            cwd: "/tmp",
+          },
+          controls: { clearModelId: true },
+          message: { prompt: "resume", createdAt: 7 },
+          createdAt: 7,
+          updatedAt: 7,
+        },
+      }),
+    );
+    await store.close();
+
+    const reopened = new FileSessionStore(dir);
     await reopened.init();
     try {
-      // A pre-topic record resumes as the chat's main (null) conversation.
-      const latest = await reopened.getLatest("oc_A", null);
-      expect(latest).toMatchObject({ sessionId: "s_legacy", threadId: null });
+      expect(await reopened.getLatest("oc_A", "th_1")).toMatchObject({
+        controls: { modelId: "gpt-5.5", config: { approval: { value: "ask" } } },
+        pendingConfiguration: {
+          targetAgent: { agentLabel: "codex" },
+          controls: { clearModelId: true },
+          message: { prompt: "resume", createdAt: 7 },
+        },
+      });
     } finally {
       await reopened.close();
     }
+  });
+
+  it("rejects a record whose pending configuration is missing required timestamps", async () => {
+    await store.close();
+    const filePath = path.join(dir, "sessions.json");
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        oc_A: [
+          {
+            chatId: "oc_A",
+            threadId: "th_1",
+            sessionId: "s_t1",
+            agentCommand: "node",
+            agentArgs: [],
+            cwd: "/tmp",
+            createdAt: 1,
+            updatedAt: 1,
+            pendingConfiguration: { controls: { modeId: "agent" } },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const reopened = new FileSessionStore(dir);
+    const initResult = reopened.init();
+    await expect(initResult).rejects.toBeInstanceOf(SessionStoreFormatError);
+    await expect(initResult).rejects.toThrow(/pendingConfiguration/);
+  });
+
+  it("rejects a record whose controls carry a non-string modelId", async () => {
+    await store.close();
+    const filePath = path.join(dir, "sessions.json");
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        oc_A: [
+          {
+            chatId: "oc_A",
+            threadId: null,
+            sessionId: "s_main",
+            agentCommand: "node",
+            agentArgs: [],
+            cwd: "/tmp",
+            createdAt: 1,
+            updatedAt: 1,
+            controls: { modelId: 42 },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const reopened = new FileSessionStore(dir);
+    const initResult = reopened.init();
+    await expect(initResult).rejects.toBeInstanceOf(SessionStoreFormatError);
+    await expect(initResult).rejects.toThrow(/controls/);
   });
 });
 
@@ -229,48 +341,102 @@ describe("FileSessionStore session controls", () => {
     });
   });
 
-  it("queues and consumes pending controls as one-shot next-turn state", async () => {
+  it("replaces the pending configuration for the latest thread session", async () => {
     await store.save(
       record({
         chatId: "oc_A",
         threadId: "th_1",
         sessionId: "s_t1",
         controls: { modelId: "model-old" },
-        pendingControls: { config: { approval_mode: { value: "ask" } } },
+        pendingConfiguration: {
+          controls: { config: { approval_mode: { value: "ask" } } },
+          createdAt: 1,
+          updatedAt: 1,
+        },
       }),
     );
 
-    const queued = await store.setPendingControls(
+    const queued = await store.setPendingConfiguration(
       { chatId: "oc_A", threadId: "th_1" },
       {
-        modeId: "agent",
-        config: {
-          approval_mode: { value: "auto" },
-          auto_edit: { type: "boolean", value: true },
+        controls: {
+          modeId: "agent",
+          config: {
+            approval_mode: { value: "auto" },
+            auto_edit: { type: "boolean", value: true },
+          },
         },
+        createdAt: 1,
+        updatedAt: 2,
       },
     );
     expect(queued).toMatchObject({
       controls: { modelId: "model-old" },
-      pendingControls: {
-        modeId: "agent",
-        config: {
-          approval_mode: { value: "auto" },
-          auto_edit: { type: "boolean", value: true },
+      pendingConfiguration: {
+        controls: {
+          modeId: "agent",
+          config: {
+            approval_mode: { value: "auto" },
+            auto_edit: { type: "boolean", value: true },
+          },
         },
       },
     });
 
-    const consumed = await store.consumePendingControls({ chatId: "oc_A", threadId: "th_1" });
-    expect(consumed.pendingControls).toMatchObject({ modeId: "agent" });
-    expect(consumed.record.pendingControls).toBeUndefined();
+    const queuedConfiguration = queued.pendingConfiguration;
+    expect(queuedConfiguration).toBeDefined();
+    const cleared = await store.clearPendingConfigurationIfMatches(
+      { chatId: "oc_A", threadId: "th_1" },
+      queuedConfiguration!,
+    );
+    expect(cleared.cleared).toBe(true);
+    expect(cleared.record.pendingConfiguration).toBeUndefined();
     expect(await store.getLatest("oc_A", "th_1")).toMatchObject({
       controls: { modelId: "model-old" },
-      pendingControls: undefined,
+      pendingConfiguration: undefined,
     });
   });
 
-  it("queues and consumes a pending task as one-shot continuation state", async () => {
+  it("clearPendingConfigurationIfMatches is a no-op when nothing is pending", async () => {
+    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_t1" }));
+
+    const cleared = await store.clearPendingConfigurationIfMatches(
+      { chatId: "oc_A", threadId: "th_1" },
+      { createdAt: 1, updatedAt: 1 },
+    );
+    expect(cleared.cleared).toBe(false);
+    expect(cleared.record.sessionId).toBe("s_t1");
+  });
+
+  it("clearPendingConfigurationIfMatches preserves a newer pending configuration instead of clobbering it", async () => {
+    await store.save(record({ chatId: "oc_A", threadId: "th_1", sessionId: "s_t1" }));
+
+    const stale = await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "th_1" },
+      { controls: { modeId: "agent" }, createdAt: 1, updatedAt: 1 },
+    );
+    const staleConfiguration = stale.pendingConfiguration!;
+
+    // Simulate a later `configure`/`send` request replacing the Pending
+    // Configuration while an earlier application (holding only the stale
+    // snapshot) is still in flight.
+    const fresher = await store.setPendingConfiguration(
+      { chatId: "oc_A", threadId: "th_1" },
+      { controls: { modeId: "ask" }, createdAt: 1, updatedAt: 2 },
+    );
+
+    const cleared = await store.clearPendingConfigurationIfMatches(
+      { chatId: "oc_A", threadId: "th_1" },
+      staleConfiguration,
+    );
+    expect(cleared.cleared).toBe(false);
+    expect(cleared.record.pendingConfiguration).toMatchObject(fresher.pendingConfiguration!);
+    expect(await store.getLatest("oc_A", "th_1")).toMatchObject({
+      pendingConfiguration: { controls: { modeId: "ask" } },
+    });
+  });
+
+  it("stores an atomic target Agent + controls + message pending configuration", async () => {
     await store.save(
       record({
         chatId: "oc_A",
@@ -279,52 +445,29 @@ describe("FileSessionStore session controls", () => {
       }),
     );
 
-    const queued = await store.setPendingTask(
-      { chatId: "oc_A", threadId: "th_1" },
-      { prompt: "continue after controls", createdAt: 123 },
-    );
-    expect(queued).toMatchObject({
-      pendingTask: { prompt: "continue after controls", createdAt: 123 },
-    });
-
-    const consumed = await store.consumePendingTask({ chatId: "oc_A", threadId: "th_1" });
-    expect(consumed.pendingTask).toEqual({ prompt: "continue after controls", createdAt: 123 });
-    expect(consumed.record.pendingTask).toBeUndefined();
-    expect(await store.getLatest("oc_A", "th_1")).toMatchObject({
-      pendingTask: undefined,
-    });
-  });
-
-  it("stores an atomic pending target profile", async () => {
-    await store.save(
-      record({
-        chatId: "oc_A",
-        threadId: "th_1",
-        sessionId: "s_t1",
-      }),
-    );
-
-    const queued = await store.setPendingTargetProfile(
+    const queued = await store.setPendingConfiguration(
       { chatId: "oc_A", threadId: "th_1" },
       {
-        sessionId: "profile:1",
-        profileOnly: true,
-        agentCommand: "npx",
-        agentArgs: ["-y", "@github/copilot", "--acp"],
-        agentLabel: "copilot",
-        cwd: "/tmp",
+        targetAgent: {
+          sessionId: "profile:1",
+          profileOnly: true,
+          agentCommand: "npx",
+          agentArgs: ["-y", "@github/copilot", "--acp"],
+          agentLabel: "copilot",
+          cwd: "/tmp",
+        },
         controls: { modelId: "gpt-5.5" },
-        task: { prompt: "continue with target", createdAt: 123 },
+        message: { prompt: "continue with target", createdAt: 123 },
         createdAt: 123,
         updatedAt: 123,
       },
     );
 
     expect(queued).toMatchObject({
-      pendingTargetProfile: {
-        agentLabel: "copilot",
+      pendingConfiguration: {
+        targetAgent: { agentLabel: "copilot" },
         controls: { modelId: "gpt-5.5" },
-        task: { prompt: "continue with target", createdAt: 123 },
+        message: { prompt: "continue with target", createdAt: 123 },
       },
     });
   });
@@ -354,7 +497,7 @@ describe("FileSessionStore session controls", () => {
     expect(updated.controls).not.toHaveProperty("clearModelId");
   });
 
-  it("queues model clearing as a pending control patch", async () => {
+  it("stores model clearing in a pending configuration patch", async () => {
     await store.save(
       record({
         chatId: "oc_A",
@@ -364,12 +507,12 @@ describe("FileSessionStore session controls", () => {
       }),
     );
 
-    const updated = await store.setPendingControls(
+    const updated = await store.setPendingConfiguration(
       { chatId: "oc_A", threadId: "th_1" },
-      { clearModelId: true },
+      { controls: { clearModelId: true }, createdAt: 1, updatedAt: 1 },
     );
 
-    expect(updated.pendingControls).toEqual({ clearModelId: true });
+    expect(updated.pendingConfiguration?.controls).toEqual({ clearModelId: true });
   });
 
   it("clears only one thread and removes profile-only records when the real session is saved", async () => {

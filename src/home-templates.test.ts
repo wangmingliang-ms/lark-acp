@@ -35,14 +35,17 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain("## Settings contents");
     expect(agents).toContain("runtime.defaultControls");
     expect(agents).toContain("runtime.globalControlChatIds");
-    expect(agents).toContain("Use Humming CLI/control commands for Agent/session state");
+    expect(agents).toContain("Use Humming CLI commands for Agent/session state");
     expect(agents).toContain("Chat binding is repo-only");
     expect(agents).toContain("/agent <agent>");
     expect(agents).toContain("/model auto");
     expect(agents).toContain("/capabilities <agent>");
-    expect(agents).toContain("humming sessions set-control --model <model-id>");
-    expect(agents).toContain("humming sessions set-pending-target-profile --agent <agent>");
-    expect(agents).toContain("set-pending-target-profile` requires `--agent");
+    expect(agents).toContain("humming session configure --model <model-id>");
+    expect(agents).toContain("humming session configure --agent <agent>");
+    expect(agents).not.toContain("sessions set-control");
+    expect(agents).not.toContain("sessions queue-task");
+    expect(agents).not.toContain("set-pending-target-profile");
+    expect(agents).not.toContain("humming control ");
     expect(agents).toContain("Do not explain Humming internals to the user");
 
     expect(fs.existsSync(settingsPath)).toBe(false);

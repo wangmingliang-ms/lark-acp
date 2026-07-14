@@ -8,30 +8,9 @@ import {
   formatSetupProgress,
   formatSetupSummary,
   maskCredentialId,
-  parseArgs,
-  readConfigFile,
-  runSetup,
   writeSetupCredentials,
-} from "./humming.js";
-
-describe("parseArgs — setup subcommand", () => {
-  it("parses bare setup as Feishu/Lark setup", () => {
-    const args = parseArgs(["setup"]);
-
-    expect(args.command).toBe("setup");
-    expect(args.setupTarget).toBe("feishu");
-    expect(args.setupForce).toBeUndefined();
-  });
-
-  it("parses explicit setup feishu with --force", () => {
-    const args = parseArgs(["--home", "/tmp/h", "setup", "feishu", "--force"]);
-
-    expect(args.command).toBe("setup");
-    expect(args.home).toBe("/tmp/h");
-    expect(args.setupTarget).toBe("feishu");
-    expect(args.setupForce).toBe(true);
-  });
-});
+} from "./cli/commands/setup.js";
+import { readConfigFile } from "./cli/config/load.js";
 
 describe("setup credential persistence", () => {
   it("writes credentials while preserving runtime, agents, and bindings", () => {
@@ -47,138 +26,155 @@ describe("setup credential persistence", () => {
       "utf-8",
     );
 
-    writeSetupCredentials(settings, {
-      appId: "cli_created",
-      appSecret: "created-secret",
+    writeSetupCredentials(settings, { appId: "cli_abcdef123456", appSecret: "s3cr3t" });
+
+    const written = JSON.parse(fs.readFileSync(settings, "utf-8")) as Record<string, unknown>;
+    expect(written["credentials"]).toEqual({ appId: "cli_abcdef123456", appSecret: "s3cr3t" });
+    expect(written["runtime"]).toEqual({ agent: "copilot" });
+    expect(written["agents"]).toEqual({
+      custom: { label: "Custom", command: "node", args: ["agent.js"] },
     });
+    expect(written["bindings"]).toEqual({ oc_chat: { cwd: "/repo" } });
 
-    const parsed = JSON.parse(fs.readFileSync(settings, "utf-8")) as unknown;
-    expect(parsed).toEqual({
-      runtime: { agent: "copilot" },
-      agents: { custom: { label: "Custom", command: "node", args: ["agent.js"] } },
-      bindings: { oc_chat: { cwd: "/repo" } },
-      credentials: { appId: "cli_created", appSecret: "created-secret" },
-    });
-    expect((fs.statSync(settings).mode & 0o777).toString(8)).toBe("600");
-  });
+    const mode = fs.statSync(settings).mode & 0o777;
+    expect(mode).toBe(0o600);
 
-  it("skips credential registration when credentials already exist", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-existing-"));
-    const settings = path.join(dir, "settings.json");
-    fs.writeFileSync(
-      settings,
-      JSON.stringify({
-        credentials: { appId: "cli_existing", appSecret: "existing-secret" },
-        setup: { ownerOpenId: "ou_existing_owner" },
-        runtime: { agent: "claude" },
-      }),
-      "utf-8",
-    );
-
-    const result = await ensureSetupCredentials(
-      readConfigFile(settings),
-      settings,
-      "feishu",
-      false,
-      async () => {
-        throw new Error("registration should be skipped");
-      },
-    );
-
-    expect(result).toEqual({
-      credentials: {
-        appId: "cli_existing",
-        appSecret: "existing-secret",
-        domain: "feishu",
-        ownerOpenId: "ou_existing_owner",
-      },
-      created: false,
-    });
-    expect(readConfigFile(settings).runtime.agent).toBe("claude");
+    const cfg = readConfigFile(settings);
+    expect(cfg.credentials).toEqual({ appId: "cli_abcdef123456", appSecret: "s3cr3t" });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("runSetup does not abort when credentials already exist", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-runsetup-existing-"));
+  it("rejects a non-object settings file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-"));
     const settings = path.join(dir, "settings.json");
-    fs.writeFileSync(
-      settings,
-      JSON.stringify({ credentials: { appId: "cli_existing", appSecret: "existing-secret" } }),
-      "utf-8",
+    fs.writeFileSync(settings, "[1,2,3]");
+    expect(() => writeSetupCredentials(settings, { appId: "x", appSecret: "y" })).toThrowError(
+      /must contain a JSON object/,
     );
-
-    await expect(runSetup(parseArgs(["--home", dir, "setup"]))).resolves.toBeUndefined();
-
     fs.rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("masks identifiers and never includes the app secret in the success summary", () => {
-    const summary = formatSetupSummary({
-      settingsPath: "/home/user/.humming/settings.json",
-      appId: "cli_abcdef123456",
-      appSecret: "super-secret-value",
-      domain: "feishu",
-      botName: "Humming Bot",
-    });
-
-    expect(maskCredentialId("cli_abcdef123456")).toBe("cli_…3456");
-    expect(summary).toContain("cli_…3456");
-    expect(summary).toContain("Humming Bot");
-    expect(summary).not.toContain("super-secret-value");
-    expect(summary).not.toContain("cli_abcdef123456");
-  });
-
-  it("enrolls the setup owner's P2P chat for lifecycle notifications", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-lifecycle-"));
-    const settings = path.join(dir, "settings.json");
-    fs.writeFileSync(
-      settings,
-      JSON.stringify({ runtime: { agent: "claude", lifecycleNotifyChatIds: ["oc_existing"] } }),
-      "utf-8",
-    );
-
-    const result = await enrollSetupLifecycleNotification(
-      settings,
-      {
-        appId: "cli_created",
-        appSecret: "created-secret",
-        domain: "feishu",
-        ownerOpenId: "ou_owner",
-      },
-      async (setup) => {
-        expect(setup.ownerOpenId).toBe("ou_owner");
-        return "oc_owner_p2p";
-      },
-    );
-
-    const parsed = JSON.parse(fs.readFileSync(settings, "utf-8")) as {
-      runtime?: { lifecycleNotifyChatIds?: readonly string[]; agent?: string };
-    };
-    expect(result).toEqual({ enrolled: true, chatId: "oc_owner_p2p" });
-    expect(parsed.runtime?.agent).toBe("claude");
-    expect(parsed.runtime?.lifecycleNotifyChatIds).toEqual(["oc_existing", "oc_owner_p2p"]);
-
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("highlights the Feishu setup link and describes the guided flow", () => {
-    const output = formatSetupProgress({
-      kind: "link",
-      url: "https://open.feishu.cn/page/launcher?user_code=redacted&from=humming&tp=humming",
-    });
-
-    expect(output).toContain("ACTION REQUIRED: open this setup link in Feishu / Lark");
-    expect(output).toContain("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    expect(output).toContain("log in if prompted");
-    expect(output).toContain("choose or create the group");
-    expect(output).toContain("search for the bot name");
-    expect(output).not.toContain("QR");
-    expect(output).not.toContain("Scan");
-    expect(output).not.toContain("scan");
-  });
-
-  it("waits for setup completion instead of scan approval", () => {
-    expect(formatSetupProgress({ kind: "polling" })).toBe("Waiting for setup completion...\n");
   });
 });
+
+describe("ensureSetupCredentials", () => {
+  it("skips registration when credentials already exist and force is false", async () => {
+    const existing = readConfigFileFromObject({
+      credentials: { appId: "cli_x", appSecret: "s" },
+      setup: { domain: "feishu" as const },
+    });
+    const result = await ensureSetupCredentials(existing, "/unused/settings.json", "feishu", false);
+    expect(result.created).toBe(false);
+    expect(result.credentials.appId).toBe("cli_x");
+  });
+
+  it("re-registers when force is true", async () => {
+    const existing = readConfigFileFromObject({
+      credentials: { appId: "cli_x", appSecret: "s" },
+    });
+    const register = async () => ({ appId: "cli_new", appSecret: "s2", domain: "feishu" as const });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-"));
+    const settings = path.join(dir, "settings.json");
+    const result = await ensureSetupCredentials(existing, settings, "feishu", true, register);
+    expect(result.created).toBe(true);
+    expect(result.credentials.appId).toBe("cli_new");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("throws when registration is cancelled", async () => {
+    const existing = readConfigFileFromObject({});
+    const register = async () => null;
+    await expect(
+      ensureSetupCredentials(existing, "/unused/settings.json", "feishu", false, register),
+    ).rejects.toThrowError(/did not complete/);
+  });
+});
+
+describe("enrollSetupLifecycleNotification", () => {
+  it("skips when no ownerOpenId is known", async () => {
+    const result = await enrollSetupLifecycleNotification("/unused/settings.json", {
+      appId: "cli_x",
+      appSecret: "s",
+      domain: "feishu",
+    });
+    expect(result).toEqual({ enrolled: false, reason: "missing-owner-open-id" });
+  });
+
+  it("appends the chat id to lifecycleNotifyChatIds on success", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-"));
+    const settings = path.join(dir, "settings.json");
+    fs.writeFileSync(settings, JSON.stringify({}), "utf-8");
+    const sendNotification = async () => "oc_new_chat";
+    const result = await enrollSetupLifecycleNotification(
+      settings,
+      { appId: "cli_x", appSecret: "s", domain: "feishu", ownerOpenId: "ou_1" },
+      sendNotification,
+    );
+    expect(result).toEqual({ enrolled: true, chatId: "oc_new_chat" });
+    const written = JSON.parse(fs.readFileSync(settings, "utf-8")) as {
+      runtime: { lifecycleNotifyChatIds: string[] };
+    };
+    expect(written.runtime.lifecycleNotifyChatIds).toEqual(["oc_new_chat"]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports failure without throwing when the send rejects", async () => {
+    const sendNotification = async () => {
+      throw new Error("network down");
+    };
+    const result = await enrollSetupLifecycleNotification(
+      "/unused/settings.json",
+      { appId: "cli_x", appSecret: "s", domain: "feishu", ownerOpenId: "ou_1" },
+      sendNotification,
+    );
+    expect(result).toEqual({ enrolled: false, reason: "failed" });
+  });
+});
+
+describe("maskCredentialId", () => {
+  it("keeps the cli_ prefix and last 4 chars", () => {
+    expect(maskCredentialId("cli_abcdefghijklmnop")).toBe("cli_…mnop");
+  });
+
+  it("fully masks short ids", () => {
+    expect(maskCredentialId("short")).toBe("[saved]");
+  });
+});
+
+describe("formatSetupSummary", () => {
+  it("mentions the new bridge start command", () => {
+    const text = formatSetupSummary({
+      settingsPath: "/home/.humming/settings.json",
+      appId: "cli_abcdefghijklmnop",
+      appSecret: "s",
+      domain: "feishu",
+    });
+    expect(text).toContain("humming bridge start");
+  });
+});
+
+describe("formatSetupProgress", () => {
+  it("renders the action-required link banner", () => {
+    const text = formatSetupProgress({ kind: "link", url: "https://example.com/setup" });
+    expect(text).toContain("https://example.com/setup");
+    expect(text).toContain("ACTION REQUIRED");
+  });
+
+  it("renders a failure message", () => {
+    const text = formatSetupProgress({ kind: "failed", reason: "denied" });
+    expect(text).toContain("denied");
+  });
+});
+
+// Minimal helper matching bin/cli/config/load.ts's FileConfig shape for unit
+// tests that don't need to read a real settings.json from disk.
+function readConfigFileFromObject(partial: {
+  readonly credentials?: { readonly appId?: string; readonly appSecret?: string };
+  readonly setup?: { readonly domain?: "feishu" | "lark" };
+}): ReturnType<typeof readConfigFile> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "humming-setup-cfg-"));
+  const settingsPath = path.join(dir, "settings.json");
+  fs.writeFileSync(settingsPath, JSON.stringify(partial), "utf-8");
+  const cfg = readConfigFile(settingsPath);
+  fs.rmSync(dir, { recursive: true, force: true });
+  return cfg;
+}

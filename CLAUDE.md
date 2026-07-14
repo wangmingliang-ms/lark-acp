@@ -20,25 +20,31 @@ npm test           # vitest run（单元 src/**、bin/**；集成 tests/**）
 
 ## 运行 / 管理 bridge
 
-CLI 入口是 `bin/humming.ts`（构建到 `dist/bin/humming.js`）。日常用内置子命令管理，
-状态文件都在 `~/.humming/`（`bridge.pid`、`bridge.log`、`settings.json`、`sessions.json`）：
+CLI 入口是 `bin/humming.ts`（构建到 `dist/bin/humming.js`），仅做 bootstrap；真正的命令树在
+`bin/cli/**` 下用 Commander + Zod 实现（见 `docs/cli-command-model-SPEC.md`）。命令树是
+`humming bridge|agent|session|setup|init|update`；Bridge 命令另有顶层快捷方式
+`run|start|stop|restart|status|logs`。状态文件都在
+`~/.humming/`（`bridge.pid`、`bridge.log`、`settings.json`、`sessions.json`）：
 
 ```bash
 humming start --agent claude    # 后台启动
 humming status                  # 是否在跑 + PID + 运行时长
 humming logs -f                 # 实时日志
-humming restart --agent claude  # 改代码后重启
+humming restart                 # 改代码后重启（沿用上次启动参数）
 humming stop                    # 停止
-humming proxy --agent claude    # 前台运行（占终端，Ctrl-C 停）
+humming run --agent claude      # 前台运行（占终端，Ctrl-C 停）
 ```
 
 - **开发工作流**：仓库根 `npm link` 一次，让全局 `humming` 软链到本地 `dist/`；此后
-  改代码只需 `npm run build && humming restart --agent claude` 即可生效。
+  改代码只需 `npm run build && humming restart` 即可生效；换 `--agent` 等选项需要
+  先 `humming stop` 再 `humming start --agent <new>`（`restart` 目前只复用上次持久化的启动参数，不接受新选项）。
 - **进程管理实现**在 `bin/process-control.ts`（跨平台：`process.kill(pid,0)` 探活、
-  detached spawn、PID 文件）；`start`/`restart` 通过替换 argv 里的子命令 token 复用
-  `proxy`，把所有选项原样转发。崩溃自愈 / 开机自启不在此层，交给 systemd / 计划任务。
-- **改动 CLI 行为后**务必手动 E2E（`start`→`status`→`restart`→`stop`），并确认
-  `logs` 里出现 `WebSocket connected`；单元测试只覆盖纯函数（`bin/process-control.test.ts`）。
+  detached spawn、PID 文件），被 `bin/cli/commands/bridge.ts` 调用；`bridge start`/`restart`
+  会把 Commander 解析出的选项重写成一份规范的 `bridge run ...` argv 转发到后台。崩溃自愈 /
+  开机自启不在此层，交给 systemd / 计划任务。
+- **改动 CLI 行为后**务必手动 E2E（`start`→`status`→`restart`→`stop`），
+  并确认 `logs` 里出现 `WebSocket connected`；单元测试覆盖纯函数与 Commander
+  `parseAsync` 行为（`bin/humming*.test.ts`、`bin/process-control.test.ts`）。
 
 ## humming 自身操作指南
 
@@ -55,40 +61,42 @@ humming proxy --agent claude    # 前台运行（占终端，Ctrl-C 停）
   - per-topic session state 不写 `settings.json`，写 `sessions.json`。
 - Chat binding 只写 repo：`settings.json` 的 `bindings.<chatId>` 只保存 `{ "cwd": "/absolute/path/to/repo" }`。不要在 binding 里写 Agent / Model / Mode / Permission / Config。
 - 查看 Humming 状态只用这些命令，不要翻各 Agent 缓存目录：
-  - `humming agents`
-  - `humming control capabilities --json`
-  - `humming control agent-capabilities --agent <agent> --json`
-  - `humming sessions list --agent <agent> --json`
+  - `humming agent list`
+  - `humming session capabilities --json`
+  - `humming agent capabilities --agent <agent> --json`
+  - `humming session list --agent <agent> --json`
 - 在 Humming Agent 内执行命令时优先省略 `--chat-id` / `--thread-id`；CLI 会读取 `HUMMING_CHAT_ID` / `HUMMING_THREAD_ID`。只有明确要操作别的 chat/topic 时才手动传 ID。
-- 修改 Model / Mode / Permission / Config：先查 capabilities，确认 id/value 后用 split flags：
+- `humming agent ...` 是短生命周期 probe 任意 Agent，`humming session ...` 是读取/改变当前 Topic Session；两者数据源不同，不要互相替代。
+- 修改 Agent / Model / Mode / Permission / Config 统一用 `session configure`：先查 capabilities 确认 id/value，再用具名 flag：
 
   ```bash
-  humming control capabilities --json
-  humming sessions set-control --model <model-id>
-  humming sessions set-control --model auto
-  humming sessions set-control --mode <mode-id>
-  humming sessions set-control --permission alwaysAsk
-  humming sessions set-control --config <select-config-id>=<value-id>
-  humming sessions set-control --bool-config <boolean-config-id>=true
+  humming session capabilities --json
+  humming session configure --model <model-id>
+  humming session configure --model auto
+  humming session configure --mode <mode-id>
+  humming session configure --permission alwaysAsk
+  humming session configure --config <select-config-id>=<value-id>
+  humming session configure --config <boolean-config-id>=true
   ```
 
-  多个 control 合并到一个命令；复杂批量 config 才用 `--json-file` / `--json-stdin`。如果同一请求还有后续任务，`set-control` 成功后再 `humming sessions queue-task --prompt-file <task.md>`；没有任务不要 queue。
+  多个 control 合并到一个命令。Model/Mode/Config 始终针对本次 `--agent`（或已有 pending/当前 Agent）校验，绝不用旧 Agent 的能力去校验新 Agent 的取值。
 
-- 纯 Agent 切换：`humming sessions set-agent --agent <agent>`。
-- 自然语言 handoff（Agent + controls/task 同一句）：使用一个 pending target profile 命令：
+- 纯 Agent 切换：`humming session configure --agent <agent>`。
+- 自然语言 handoff（Agent + controls/message 同一句）：用一次 `session configure` 调用，把 Message 挂在同一条命令上，这样 Profile 完全生效后才会发送 Message：
 
   ```bash
-  humming sessions set-pending-target-profile --agent <agent> \
+  humming session configure --agent <agent> \
     --model <model-id> \
     --mode <mode-id> \
     --permission alwaysAsk \
-    --prompt-file <task.md>
+    --message-file <task.md>
   ```
 
-  `set-pending-target-profile` 必须带 `--agent`。只有 Model/Mode/Permission/Config 变化时，始终用 `set-control`，即使当前已有 pending Agent switch。
+  不要把一次 handoff 拆成分开的 Agent 切换 + controls 调用，除非单次 `configure` 确实无法表达。
 
-- `set-agent` / `set-pending-target-profile` 不加 `--cwd`；不要改 `runtime.agent`，不要把 Agent 写进 `bindings`。
-- `sessions bind` 只绑定当前 chat repo 内的 session；不接受 `--cwd`。session 已绑定到别处时不要手改 `sessions.json` 绕过。
+- `session configure` 默认不加 `--cwd`；不要改 `runtime.agent`，不要把 Agent 写进 `bindings`。
+- 只发消息、不改变 Profile 时用 `humming session send --message ...`（或 `--message-file` / `--message-stdin`），不要把它和 `session configure` 的语义混用。
+- `session bind` 只绑定当前 chat repo 内的 session；不接受 `--cwd`。session 已绑定到别处时不要手改 `sessions.json` 绕过。
 - 群聊里不要打印完整 session/chat/thread id。
 
 # TypeScript 工程准则（TypeScript 5.x / Strict Mode）

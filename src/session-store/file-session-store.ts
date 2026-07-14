@@ -1,23 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import type {
   SessionControlPatch,
   SessionControlTarget,
-  PendingSessionTask,
-  PendingTargetProfile,
+  PendingSessionConfiguration,
   SessionRecord,
   SessionStore,
 } from "./session-store.js";
-import { mergeSessionControlPatches, mergeSessionControls } from "./session-controls.js";
+import { mergeSessionControls } from "./session-controls.js";
+import { sessionsFileSchema } from "./session-record-schema.js";
 
 const SESSIONS_FILE_NAME = "sessions.json";
-
-/** Pre-multi-session legacy on-disk shape. */
-interface LegacyRecord {
-  sessionId: string;
-  cwd: string;
-  updatedAt: number;
-}
 
 /**
  * JSON-file backed {@link SessionStore}. Writes are coalesced via
@@ -32,6 +27,15 @@ export class FileSessionStore implements SessionStore {
     this.filePath = path.join(storageDir, SESSIONS_FILE_NAME);
   }
 
+  /**
+   * @throws {SessionStoreFormatError} when the file parses as JSON but its
+   *         shape does not match the current `Record<chatId, SessionRecord[]>`
+   *         format (e.g. a pre-multi-session single-record-per-chat shape, or
+   *         an entry missing an explicit `threadId`). A file that fails to
+   *         parse as JSON at all is treated as empty rather than thrown —
+   *         the same tolerance applied to a transient half-written file
+   *         elsewhere (e.g. `SettingsBindingStore`).
+   */
   async init(): Promise<void> {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (!fs.existsSync(this.filePath)) return;
@@ -41,45 +45,24 @@ export class FileSessionStore implements SessionStore {
       const raw = fs.readFileSync(this.filePath, "utf-8");
       parsed = JSON.parse(raw);
     } catch {
-      // Corrupt file — treat as empty rather than crashing.
+      // Unparseable file — treat as empty rather than crashing (e.g. a
+      // concurrent writer caught mid-write).
       return;
     }
 
-    if (!parsed || typeof parsed !== "object") return;
-
-    const record = parsed as Record<string, unknown>;
-    const firstValue = Object.values(record)[0];
-
-    const isLegacy =
-      firstValue !== undefined &&
-      typeof firstValue === "object" &&
-      firstValue !== null &&
-      "sessionId" in (firstValue as Record<string, unknown>) &&
-      !("chatId" in (firstValue as Record<string, unknown>));
-
-    if (isLegacy) {
-      this.migrateLegacy(record as Record<string, LegacyRecord>);
-      return;
+    const result = sessionsFileSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new SessionStoreFormatError(describeSessionsFileError(this.filePath, result.error));
     }
-
-    for (const [chatId, entries] of Object.entries(record)) {
-      if (Array.isArray(entries)) {
-        // Backfill `threadId: null` on records persisted before topic support
-        // (they belong to the chat's "main" conversation). Newer records
-        // already carry their own threadId, which we preserve.
-        const normalized = (entries as SessionRecord[]).map((r) => ({
-          ...r,
-          threadId: r.threadId ?? null,
-        }));
-        this.data.set(chatId, normalized);
-      }
+    for (const [chatId, records] of Object.entries(result.data)) {
+      this.data.set(chatId, [...records]);
     }
   }
 
   async close(): Promise<void> {
     // Flush any pending write synchronously so a deferred setImmediate can't
     // fire after the caller considers the store closed (and, in tests, after
-    // the temp dir is gone) — same contract as FileBindingStore.close().
+    // the temp dir is gone).
     if (this.flushScheduled) this.flushNow();
   }
 
@@ -169,86 +152,35 @@ export class FileSessionStore implements SessionStore {
     return updated;
   }
 
-  async setPendingControls(
+  async setPendingConfiguration(
     target: SessionControlTarget,
-    controls: SessionControlPatch,
+    configuration: PendingSessionConfiguration,
   ): Promise<SessionRecord> {
     const record = await this.findControlTarget(target);
     const updated: SessionRecord = {
       ...record,
-      pendingControls: mergeSessionControlPatches(record.pendingControls, controls),
+      pendingConfiguration: configuration,
       updatedAt: Date.now(),
     };
     await this.save(updated);
     return updated;
   }
 
-  async consumePendingControls(target: SessionControlTarget): Promise<{
-    readonly record: SessionRecord;
-    readonly pendingControls?: SessionControlPatch;
-    readonly noticeMessageId?: string;
-  }> {
+  async clearPendingConfigurationIfMatches(
+    target: SessionControlTarget,
+    expected: PendingSessionConfiguration,
+  ): Promise<{ readonly record: SessionRecord; readonly cleared: boolean }> {
     const record = await this.findControlTarget(target);
-    const pendingControls = record.pendingControls;
-    const noticeMessageId = record.pendingControlsNoticeMessageId;
-    if (pendingControls === undefined) {
-      return { record, ...(noticeMessageId !== undefined ? { noticeMessageId } : {}) };
+    if (!isDeepStrictEqual(record.pendingConfiguration, expected)) {
+      return { record, cleared: false };
     }
     const updated: SessionRecord = {
       ...record,
-      pendingControls: undefined,
-      pendingControlsNoticeMessageId: undefined,
+      pendingConfiguration: undefined,
       updatedAt: Date.now(),
     };
     await this.save(updated);
-    return {
-      record: updated,
-      pendingControls,
-      ...(noticeMessageId !== undefined ? { noticeMessageId } : {}),
-    };
-  }
-
-  async setPendingTask(
-    target: SessionControlTarget,
-    task: PendingSessionTask,
-  ): Promise<SessionRecord> {
-    const record = await this.findControlTarget(target);
-    const updated: SessionRecord = {
-      ...record,
-      pendingTask: task,
-      updatedAt: Date.now(),
-    };
-    await this.save(updated);
-    return updated;
-  }
-
-  async setPendingTargetProfile(
-    target: SessionControlTarget,
-    profile: PendingTargetProfile,
-  ): Promise<SessionRecord> {
-    const record = await this.findControlTarget(target);
-    const updated: SessionRecord = {
-      ...record,
-      pendingTargetProfile: profile,
-      updatedAt: Date.now(),
-    };
-    await this.save(updated);
-    return updated;
-  }
-
-  async consumePendingTask(
-    target: SessionControlTarget,
-  ): Promise<{ readonly record: SessionRecord; readonly pendingTask?: PendingSessionTask }> {
-    const record = await this.findControlTarget(target);
-    const pendingTask = record.pendingTask;
-    if (pendingTask === undefined) return { record };
-    const updated: SessionRecord = {
-      ...record,
-      pendingTask: undefined,
-      updatedAt: Date.now(),
-    };
-    await this.save(updated);
-    return { record: updated, pendingTask };
+    return { record: updated, cleared: true };
   }
 
   async clearThread(chatId: string, threadId: string | null): Promise<void> {
@@ -318,24 +250,11 @@ export class FileSessionStore implements SessionStore {
     }
     fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), "utf-8");
   }
+}
 
-  private migrateLegacy(legacy: Record<string, LegacyRecord>): void {
-    for (const [oldKey, val] of Object.entries(legacy)) {
-      this.data.set(oldKey, [
-        {
-          chatId: oldKey,
-          threadId: null,
-          sessionId: val.sessionId,
-          agentCommand: "",
-          agentArgs: [],
-          cwd: val.cwd,
-          createdAt: val.updatedAt,
-          updatedAt: val.updatedAt,
-        },
-      ]);
-    }
-    this.scheduleFlush();
-  }
+/** Raised when a persisted `sessions.json` entry does not match the current {@link SessionRecord} shape. */
+export class SessionStoreFormatError extends Error {
+  override readonly name = "SessionStoreFormatError";
 }
 
 export class SessionStoreControlError extends Error {
@@ -351,6 +270,37 @@ export class SessionAlreadyBoundError extends Error {
   ) {
     super("该 session 已经绑定到另一个 thread，请先重置原 thread 后再重新绑定。");
   }
+}
+
+/**
+ * Translate a {@link sessionsFileSchema} validation failure into a
+ * path-based message for {@link SessionStoreFormatError}. The first issue's
+ * path pinpoints the container level (whole file / chat entry) or the exact
+ * record field that is malformed. A malformed session record fails the whole
+ * `init()` rather than being dropped or backfilled — there is no compatibility
+ * adapter for older shapes.
+ */
+function describeSessionsFileError(filePath: string, error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return `${filePath} is not a valid sessions.json file`;
+  const segments = issue.path;
+  if (segments.length === 0) {
+    return `${filePath} must contain a JSON object mapping chatId to an array of session records`;
+  }
+  const chatId = String(segments[0]);
+  if (segments.length === 1) {
+    return (
+      `${filePath}: entry for chat "${chatId}" must be an array of session records ` +
+      `(pre-multi-session single-record-per-chat storage is no longer supported)`
+    );
+  }
+  const where = `${filePath}: chat "${chatId}" record[${String(segments[1])}]`;
+  if (segments.length === 2) return `${where} must be an object`;
+  const field = segments
+    .slice(2)
+    .map((segment) => String(segment))
+    .join(".");
+  return `${where}: "${field}" is invalid (${issue.message})`;
 }
 
 function sameAgentInvocation(a: SessionRecord, b: SessionRecord): boolean {

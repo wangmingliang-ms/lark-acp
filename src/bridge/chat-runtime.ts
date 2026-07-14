@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { LarkLogger } from "../logger/logger.js";
 import type { AgentStatus, LarkPresenter, SessionCardMeta } from "../presenter/presenter.js";
-import { finalizeWipNoticeCard, restoreWipNoticeCard } from "../presenter/notice-card-lifecycle.js";
 import { HummingClient, PERMISSION_MODES, type PermissionMode } from "../acp/humming-client.js";
 import {
   spawnAgent,
@@ -94,9 +93,6 @@ export interface ChatRuntimeOptions {
   lifecycleDiagnostics?: LifecycleDiagnosticSink;
   acknowledgement?: AcknowledgementPort;
 }
-
-const HANDOFF_TASK_HINT =
-  "[humming: this prompt is the task portion of an already-applied pending task continuation. Do not call Humming session-control commands again unless the user explicitly requests another Agent/Model/Mode/Permission/Config change.]";
 
 interface ChatRuntimeState {
   client: HummingClient;
@@ -1212,9 +1208,6 @@ export class ChatRuntime {
         this.hydratedByMessageId.delete(pending.messageId);
         state.lastMessageId = pending.messageId;
 
-        await this.applyPendingControlsBeforePrompt(state, pending.messageId);
-        if (this.aborted || this.state !== state) return;
-
         this.promptInFlight = true;
         try {
           await this.runPrompt(state, pending);
@@ -1250,156 +1243,28 @@ export class ChatRuntime {
     }
   }
 
-  private async applyPendingControlsBeforePrompt(
-    state: ChatRuntimeState,
-    messageId: string,
-  ): Promise<boolean> {
-    let consumed: Awaited<ReturnType<SessionStore["consumePendingControls"]>>;
-    try {
-      consumed = await this.opts.sessionStore.consumePendingControls({
-        chatId: this.opts.chatId,
-        threadId: this.opts.threadId,
-        sessionId: state.agent.sessionId,
-      });
-    } catch (err) {
-      this.logger.warn({ err }, "pending session controls lookup failed");
-      return false;
+  /**
+   * Apply an already-validated control patch to the live ACP session,
+   * bypassing the "not busy" guard used by {@link applyControls}. Used by
+   * the Bridge to apply a queued Pending Configuration exactly at the Turn
+   * boundary — after the prompt has resolved but before `processing` resets.
+   * The Bridge owns notification of the outcome; this method does not send
+   * any notice itself.
+   *
+   * @throws {ControlApplyError} when the patch is invalid for the live
+   *         session's current capabilities.
+   * @throws when the ACP agent rejects the control call.
+   */
+  async applyControlsAtTurnBoundary(controls: SessionControlPatch): Promise<void> {
+    const state = this.state;
+    if (!state) throw new Error("session runtime is not started yet");
+    this.validateControls(state.sessionCapabilities, controls);
+    const nextCapabilities = await this.applyControlsToState(state, controls);
+    if (controls.bridgePermissionMode !== undefined) {
+      state.client.setPermissionMode(controls.bridgePermissionMode);
     }
-    const pendingControls = consumed.pendingControls;
-    if (pendingControls === undefined || !hasSessionControls(pendingControls)) return false;
-
-    const beforeSnapshot = cloneCapabilitiesSnapshot({
-      ...state.sessionCapabilities,
-      bridgePermissionMode: state.client.getPermissionMode(),
-    });
-    try {
-      this.validateControls(state.sessionCapabilities, pendingControls);
-      const nextCapabilities = await this.applyControlsToState(state, pendingControls);
-      if (pendingControls.bridgePermissionMode !== undefined) {
-        state.client.setPermissionMode(pendingControls.bridgePermissionMode);
-      }
-      state.sessionCapabilities = nextCapabilities;
-      await this.persistSession(state.agent.sessionId, pendingControls);
-      await this.notifyPendingControlSuccess(
-        messageId,
-        state,
-        beforeSnapshot,
-        {
-          ...state.sessionCapabilities,
-          bridgePermissionMode: state.client.getPermissionMode(),
-        },
-        pendingControls,
-        consumed.noticeMessageId,
-      );
-      return true;
-    } catch (err) {
-      this.logger.warn({ err }, "pending session controls apply failed");
-      await this.notifyPendingControlFailure(messageId, err, consumed.noticeMessageId);
-      return false;
-    }
-  }
-
-  private async enqueuePendingTaskAfterControls(
-    state: ChatRuntimeState,
-    messageId: string,
-  ): Promise<void> {
-    let consumed: Awaited<ReturnType<SessionStore["consumePendingTask"]>>;
-    try {
-      consumed = await this.opts.sessionStore.consumePendingTask({
-        chatId: this.opts.chatId,
-        threadId: this.opts.threadId,
-        sessionId: state.agent.sessionId,
-      });
-    } catch (err) {
-      this.logger.warn({ err }, "pending task lookup failed");
-      return;
-    }
-    const promptText = consumed.pendingTask?.prompt.trim();
-    if (!promptText) return;
-    const injected: PendingMessage = {
-      prompt: [
-        { type: "text", text: promptText },
-        { type: "text", text: HANDOFF_TASK_HINT },
-      ],
-      messageId,
-      chatId: this.opts.chatId,
-      response: this.acceptResponse({
-        messageId,
-        content: promptText,
-        profile: sessionMetaFromSnapshot({
-          ...state.sessionCapabilities,
-          bridgePermissionMode: state.client.getPermissionMode(),
-        }),
-      }),
-    };
-    if (injected.response !== undefined) {
-      this.hydratedByMessageId.set(injected.messageId, injected);
-      this.hydratedAdmissions.set(injected.response.responseId, {
-        message: injected,
-        resolve: () => undefined,
-        reject: (error) => this.logger.warn({ error }, "injected pending task admission failed"),
-      });
-      this.scheduleAdmissionDrain();
-      return;
-    }
-    state.queue.unshift(injected);
-  }
-
-  private async notifyPendingControlFailure(
-    messageId: string,
-    err: unknown,
-    queuedNoticeMessageId?: string,
-  ): Promise<void> {
-    const notice = {
-      title: "⚠️ 排队的 Session 设置未生效",
-      body: [
-        "之前排队的 session control 设置在本轮发送前应用失败，已丢弃；当前消息会继续使用旧 profile。",
-        "",
-        formatControlFailure(err),
-        "",
-        "请让 agent 重新查询 capabilities 后，使用有效的 modelId / modeId / config 值再试。",
-      ].join("\n"),
-      template: "orange" as const,
-    };
-    const queuedNotice = restoreWipNoticeCard(queuedNoticeMessageId);
-    if (queuedNotice) {
-      await finalizeWipNoticeCard(this.opts.presenter, queuedNotice, notice, async () => {
-        await this.opts.presenter.replyNoticeCard(messageId, notice);
-      });
-      return;
-    }
-    await this.opts.presenter
-      .replyNoticeCard(messageId, notice)
-      .catch((sendErr) =>
-        this.logger.warn({ err: sendErr }, "pending control failure notice failed"),
-      );
-  }
-
-  private async notifyPendingControlSuccess(
-    messageId: string,
-    state: ChatRuntimeState,
-    before: SessionCapabilitiesSnapshot,
-    after: SessionCapabilitiesSnapshot,
-    controls: SessionControls,
-    queuedNoticeMessageId?: string,
-  ): Promise<void> {
-    const notice = {
-      title: "✅ 排队的 Session profile 已生效",
-      body: renderControlSuccessBody(before, after, controls),
-      template: "green" as const,
-    };
-    const queuedNotice = restoreWipNoticeCard(queuedNoticeMessageId);
-    if (queuedNotice) {
-      await finalizeWipNoticeCard(this.opts.presenter, queuedNotice, notice, async () => {
-        await this.opts.presenter.replyNoticeCard(messageId, notice);
-      });
-      return;
-    }
-    await this.opts.presenter
-      .replyNoticeCard(messageId, notice)
-      .catch((sendErr) =>
-        this.logger.warn({ err: sendErr }, "pending control success notice failed"),
-      );
+    state.sessionCapabilities = nextCapabilities;
+    await this.persistSession(state.agent.sessionId, controls);
   }
 
   private async runPrompt(state: ChatRuntimeState, pending: PendingMessage): Promise<void> {
@@ -1469,12 +1334,6 @@ export class ChatRuntime {
       );
     }
     await this.persistSession(state.agent.sessionId);
-    const pendingControlsApplied = await this.applyPendingControlsBeforePrompt(
-      state,
-      pending.messageId,
-    );
-    if (pendingControlsApplied)
-      await this.enqueuePendingTaskAfterControls(state, pending.messageId);
     await this.opts.onTurnComplete?.(pending.messageId);
   }
 
@@ -1639,15 +1498,8 @@ export class ChatRuntime {
         ...(previous?.controls !== undefined || controls !== undefined
           ? { controls: mergeSessionControls(previous?.controls, controls) }
           : {}),
-        ...(previous?.pendingControls !== undefined
-          ? { pendingControls: previous.pendingControls }
-          : {}),
-        ...(previous?.pendingControlsNoticeMessageId !== undefined
-          ? { pendingControlsNoticeMessageId: previous.pendingControlsNoticeMessageId }
-          : {}),
-        ...(previous?.pendingTask !== undefined ? { pendingTask: previous.pendingTask } : {}),
-        ...(previous?.pendingTargetProfile !== undefined
-          ? { pendingTargetProfile: previous.pendingTargetProfile }
+        ...(previous?.pendingConfiguration !== undefined
+          ? { pendingConfiguration: previous.pendingConfiguration }
           : {}),
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
