@@ -995,7 +995,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
   });
 
-  it("completes the owner when end_turn wins a requested follow-up interrupt", async () => {
+  it("interrupts the owner when a requested follow-up interrupt returns end_turn", async () => {
     const states: RecordedConversationState[] = [];
     const fake = makeFakeAgent();
     spawnAgentMock.mockResolvedValue(fake.agent);
@@ -1021,8 +1021,8 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     fake.resolvePrompt("end_turn");
 
     await vi.waitFor(() => expect(fake.prompts()).toHaveLength(2));
-    expect(states.some((state) => state.status === "complete")).toBe(true);
-    expect(states.some((state) => state.status === "interrupted")).toBe(false);
+    expect(states.some((state) => state.status === "interrupted")).toBe(true);
+    expect(states.some((state) => state.status === "complete")).toBe(false);
   });
 
   it("respawns and preserves the queued follow-up if interrupt closes the agent", async () => {

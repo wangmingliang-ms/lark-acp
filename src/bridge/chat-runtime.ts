@@ -1426,12 +1426,12 @@ export class ChatRuntime {
           ? "cancelled"
           : this.permissionDisplayFailureResponse === response.responseId
             ? "failed"
-            : status === "complete"
-              ? "complete"
-              : status === "failed"
-                ? "failed"
-                : this.followupInterruptRequested
-                  ? "interrupted"
+            : this.followupInterruptRequested
+              ? "interrupted"
+              : status === "complete"
+                ? "complete"
+                : status === "failed"
+                  ? "failed"
                   : "cancelled",
         (handoff) => this.commitPendingCarrier(handoff),
       );
