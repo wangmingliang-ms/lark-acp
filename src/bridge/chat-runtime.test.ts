@@ -1899,7 +1899,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
         expect.objectContaining({ sessionId: "sess_fake", controls: undefined }),
       ]),
     );
-    expect(notices.at(-1)).toMatchObject({ title: "⚠️ 已忽略无效的 session 设置" });
+    expect(notices.at(-1)).toMatchObject({ title: "⚠️ 已忽略无效的会话配置" });
     expect(notices.at(-1)?.body).toContain("Mode bypassPermissions");
   });
 
@@ -1945,7 +1945,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(setModel).not.toHaveBeenCalledWith({ sessionId: "sess_fake", modelId: "auto" });
     expect(runtime.capabilities().models?.currentModelId).toBeUndefined();
     expect(saved.at(-1)?.controls).not.toHaveProperty("modelId");
-    expect(notices.at(-1)).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
+    expect(notices.at(-1)).toMatchObject({ title: "✅ 会话配置已更新", template: "green" });
     expect(notices.at(-1)?.body).toContain("Model：Old → —");
   });
 
@@ -2043,16 +2043,16 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       },
     });
     const notice = notices.at(-1);
-    expect(notice).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
-    expect(notice?.body).toContain("当前 topic 的 session profile 已切换");
+    expect(notice).toMatchObject({ title: "✅ 会话配置已更新", template: "green" });
+    expect(notice?.body).toContain("当前会话配置已更新");
     expect(notice?.body).toContain("Agent：node");
     expect(notice?.body).toContain("Mode：Ask → Agent");
     expect(notice?.body).toContain("Model：Old → New");
     expect(notice?.body).toContain("Permission：Auto approve → Ask approvals");
-    expect(notice?.body).toContain("Control Auto Edit：off → on");
-    expect(notice?.body).toContain("Control Approval Mode：Ask → Auto");
+    expect(notice?.body).toContain("Config Auto Edit：off → on");
+    expect(notice?.body).toContain("Config Approval Mode：Ask → Auto");
     expect(notice?.body).toContain("Permission：Auto Edit: on · Approval Mode: Auto");
-    expect(notice?.body).toContain("Controls：Auto Edit: on · Approval Mode: Auto");
+    expect(notice?.body).toContain("Config：Auto Edit: on · Approval Mode: Auto");
   });
 
   it("rejects invalid controls without mutating runtime or persisted session", async () => {
@@ -2097,9 +2097,9 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     expect(runtime.capabilities()).toMatchObject({ models: { currentModelId: "model-old" } });
     expect(saved).toHaveLength(2);
     expect(saved.at(-1)).not.toMatchObject({ controls: { modelId: "missing-model" } });
-    expect(notices.at(-1)).toMatchObject({ title: "⚠️ Session 设置失败", template: "red" });
+    expect(notices.at(-1)).toMatchObject({ title: "⚠️ 会话配置失败", template: "red" });
     expect(notices.at(-1)?.body).toContain("失败项: Model missing-model");
-    expect(notices.at(-1)?.body).toContain("runtime 和 sessions.json 未更新");
+    expect(notices.at(-1)?.body).toContain("会话配置未更新");
   });
 
   it("rolls back ACP changes when a later control fails", async () => {

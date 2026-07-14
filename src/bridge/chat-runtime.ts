@@ -1024,7 +1024,7 @@ export class ChatRuntime {
   private async notifyControlFailure(messageId: string | null, err: unknown): Promise<void> {
     if (!messageId) return;
     const body = [
-      "Session control 设置失败，当前 runtime 和 sessions.json 未更新。",
+      "会话配置未更新。",
       "",
       formatControlFailure(err),
       "",
@@ -1032,7 +1032,7 @@ export class ChatRuntime {
     ].join("\n");
     await this.opts.presenter
       .replyNoticeCard(messageId, {
-        title: "⚠️ Session 设置失败",
+        title: "⚠️ 会话配置失败",
         body,
         template: "red",
       })
@@ -1048,7 +1048,7 @@ export class ChatRuntime {
     if (!messageId) return;
     await this.opts.presenter
       .replyNoticeCard(messageId, {
-        title: "✅ Session profile 已更新",
+        title: "✅ 会话配置已更新",
         body: renderControlSuccessBody(before, after, controls),
         template: "green",
       })
@@ -1060,15 +1060,15 @@ export class ChatRuntime {
     ignored: readonly IgnoredInheritedControl[],
   ): Promise<void> {
     const body = [
-      "从当前 repo 最近 session 继承 profile 时，部分 session 设置在当前 agent 上无效，已忽略。",
+      "从当前 repo 最近的 session 继承会话配置时，部分设置不适用于当前 Agent，已忽略。",
       "",
       ...ignored.map((item) => `• ${item.kind} ${item.target}：${item.reason}`),
       "",
-      "其余可用设置已正常应用，session 会继续启动。",
+      "其余可用设置已正常应用，会话会继续启动。",
     ].join("\n");
     await this.opts.presenter
       .replyNoticeCard(messageId, {
-        title: "⚠️ 部分继承的 session 设置无效，已忽略",
+        title: "⚠️ 部分继承的会话配置已忽略",
         body,
         template: "orange",
       })
@@ -1082,15 +1082,15 @@ export class ChatRuntime {
     ignored: readonly IgnoredInheritedControl[],
   ): Promise<void> {
     const body = [
-      "sessions.json 中保存的部分 session 设置在当前 agent 上无效，已自动清理并忽略。",
+      "已保存的部分会话配置不适用于当前 Agent，已自动清理并忽略。",
       "",
       ...ignored.map((item) => `• ${item.kind} ${item.target}：${item.reason}`),
       "",
-      "当前消息会继续发送给 agent。请重新查询 capabilities 后再设置有效的 mode/model/config。",
+      "当前消息会继续发送给 Agent。请重新查询 capabilities 后再设置有效的 Mode / Model / Config。",
     ].join("\n");
     await this.opts.presenter
       .replyNoticeCard(messageId, {
-        title: "⚠️ 已忽略无效的 session 设置",
+        title: "⚠️ 已忽略无效的会话配置",
         body,
         template: "orange",
       })
@@ -1771,17 +1771,17 @@ function renderControlSuccessBody(
 ): string {
   const changed = controlChangeLines(before, after, controls);
   return [
-    "当前 topic 的 session profile 已切换。",
+    "当前会话配置已更新。",
     "",
     "**修改明细**",
     ...changed,
     "",
-    "**当前 profile**",
+    "**当前会话配置**",
     `• Agent：${displayAgent(after.agent)}`,
     `• Mode：${displayMode(after)}`,
     `• Model：${displayModel(after)}`,
     `• Permission：${displayPermission(after)}`,
-    `• Controls：${displayControls(after, controls)}`,
+    `• Config：${displayControls(after, controls)}`,
   ].join("\n");
 }
 
@@ -1804,7 +1804,7 @@ function controlChangeLines(
   }
   for (const configId of Object.keys(controls.config ?? {})) {
     lines.push(
-      `• Control ${displayConfigName(after, configId)}：${displayConfigValue(before, configId)} → ${displayConfigValue(after, configId)}`,
+      `• Config ${displayConfigName(after, configId)}：${displayConfigValue(before, configId)} → ${displayConfigValue(after, configId)}`,
     );
   }
   return lines.length > 0 ? lines : ["• 无实际变化"];

@@ -683,7 +683,7 @@ describe("compact slash session profile commands", () => {
       controls: { modelId: expect.any(String) },
     });
     const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
+    expect(notice).toMatchObject({ title: "✅ 会话配置已更新", template: "green" });
     expect(notice?.body).toContain("Model：opus → —");
   });
 
@@ -719,9 +719,9 @@ describe("compact slash session profile commands", () => {
       controls: { modelId: "model-old" },
     });
     const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "⚠️ Session 设置失败", template: "red" });
+    expect(notice).toMatchObject({ title: "⚠️ 会话配置失败", template: "red" });
     expect(notice?.body).toContain("失败项: Model missing-model");
-    expect(notice?.body).toContain("runtime 和 sessions.json 未更新");
+    expect(notice?.body).toContain("会话配置未更新");
   });
 
   it("uses the same configureSession validation path for humming sessions set-control", async () => {
@@ -753,7 +753,7 @@ describe("compact slash session profile commands", () => {
     expect(await sessionStore.getLatest("oc_x", "th_topic")).toMatchObject({
       controls: { modelId: "model-old" },
     });
-    expect(presenter.notices.at(-1)).toMatchObject({ title: "⚠️ Session 设置失败" });
+    expect(presenter.notices.at(-1)).toMatchObject({ title: "⚠️ 会话配置失败" });
   });
 
   it("handles /permission through the shared stored setControls notice", async () => {
@@ -784,7 +784,7 @@ describe("compact slash session profile commands", () => {
       controls: { bridgePermissionMode: "alwaysAllow" },
     });
     const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "✅ Session profile 已更新", template: "green" });
+    expect(notice).toMatchObject({ title: "✅ 会话配置已更新", template: "green" });
     expect(notice?.body).toContain("Permission：Ask approvals → Auto approve");
   });
 
@@ -815,13 +815,13 @@ describe("compact slash session profile commands", () => {
     );
 
     const notice = presenter.notices.at(-1);
-    expect(notice).toMatchObject({ title: "📋 当前 Session profile", template: "blue" });
+    expect(notice).toMatchObject({ title: "📋 当前会话配置", template: "blue" });
     expect(notice?.body).toContain("Agent：codex");
     expect(notice?.body).toContain(`Repo：${repoA}`);
     expect(notice?.body).toContain("Mode：agent");
     expect(notice?.body).toContain("Permission：Auto approve");
-    expect(notice?.body).toContain("Pending：Model: auto/default");
-    expect(notice?.body).toContain("状态：profile-only");
+    expect(notice?.body).toContain("待应用配置变更：Model: auto/default");
+    expect(notice?.body).toContain("状态：尚未开始");
   });
 
   it("warns before switching Agent via /agent when the topic already has a session", async () => {
@@ -1052,7 +1052,7 @@ describe("session bind conflicts", () => {
     expect(notice?.body).toContain("Model：gpt-5");
     expect(notice?.body).toContain("Mode：agent");
     expect(notice?.body).toContain("Permission：Auto approve");
-    expect(notice?.body).toContain("Controls：autoEdit: on");
+    expect(notice?.body).toContain("Config：autoEdit: on");
     expect(notice?.body).toContain("Metadata：已从当前 chat 最近的 codex session 继承");
     expect(notice?.body).not.toContain("**修改明细**");
     expect(notice?.body).not.toContain("**切换后**");
@@ -1131,9 +1131,9 @@ describe("session bind conflicts", () => {
     expect(body).toContain("• Mode：— → —");
     expect(body).toContain("• Model：— → —");
     expect(body).toContain("• Permission：— → —");
-    expect(body).toContain("• Controls：— → —");
+    expect(body).toContain("• Config：— → —");
     expect(body).toContain("**绑定后**\n• Title：Desktop task\n• Agent：claude\n• Repo：");
-    expect(body).toContain("• Mode：—\n• Model：—\n• Permission：—\n• Controls：—");
+    expect(body).toContain("• Mode：—\n• Model：—\n• Permission：—\n• Config：—");
     expect(body).not.toContain("Session title");
     expect(body).not.toContain("Title:");
   });

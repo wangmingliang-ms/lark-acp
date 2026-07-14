@@ -558,7 +558,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
 
     expect(fakeRuntime.supersede).not.toHaveBeenCalled();
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({ agentLabel: "claude" });
-    expect(events.notices.at(-1)).toMatchObject({ title: "⏳ Pending configuration 已排队" });
+    expect(events.notices.at(-1)).toMatchObject({ title: "⏳ 配置变更将在本轮后生效" });
 
     fakeRuntime.processing = false;
     await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
@@ -648,10 +648,11 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     );
 
     expect(events.notices).toHaveLength(1);
-    expect(events.notices[0]).toMatchObject({ title: "⏳ Pending configuration 已排队" });
+    expect(events.notices[0]).toMatchObject({ title: "⏳ 配置变更将在本轮后生效" });
     expect(events.notices[0]?.body).toContain("codex");
     expect(events.notices[0]?.body).toContain("Model: gpt-5.5");
-    expect(events.notices[0]?.body).toContain("Message：已保存");
+    expect(events.notices[0]?.body).toContain("后续消息：已保存");
+    expect(events.notices[0]?.body).not.toMatch(/pending|profile|settings\.json/iu);
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       agentLabel: "claude",
       pendingConfiguration: {
@@ -722,7 +723,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "supersede failed",
     );
     expect(events.noticeUpdates.at(-1)).toMatchObject({
-      title: "⚠️ 排队的 Session 操作未完成",
+      title: "⚠️ 待应用配置变更未完成",
       template: "red",
     });
   });
@@ -779,7 +780,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       "target Agent failed to start",
     );
     expect(events.noticeUpdates.at(-1)).toMatchObject({
-      title: "⚠️ 排队的 Session 操作未完成",
+      title: "⚠️ 待应用配置变更未完成",
       template: "red",
     });
 
@@ -854,7 +855,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
 
     expect(enqueue).not.toHaveBeenCalled();
     expect(events.noticeUpdates.at(-1)).toMatchObject({
-      title: "⚠️ 排队的 Session 操作未完成",
+      title: "⚠️ 待应用配置变更未完成",
       template: "red",
     });
     const after = await store.getLatest("oc_A", "omt_1");
@@ -922,7 +923,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     // whole application is a hard failure, not a logged-and-ignored warning
     // (spec §9.6) — the Pending Configuration must still be there for retry.
     expect(events.noticeUpdates.at(-1)).toMatchObject({
-      title: "⚠️ 排队的 Session 操作未完成",
+      title: "⚠️ 待应用配置变更未完成",
       template: "red",
     });
     const after = await store.getLatest("oc_A", "omt_1");
@@ -1390,7 +1391,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     fakeRuntime.processing = false;
     await testable.handleRuntimeTurnComplete("oc_A", "omt_1", "om_handoff");
 
-    expect(events.notices.some((notice) => notice.title === "⚠️ Session 设置失败")).toBe(false);
+    expect(events.notices.some((notice) => notice.title === "⚠️ 会话配置失败")).toBe(false);
     expect(await store.getLatest("oc_A", "omt_1")).toMatchObject({
       agentLabel: "codex",
       controls: { modelId: "gpt-5.5" },
@@ -1787,7 +1788,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     await vi.waitFor(() => {
       expect(
         [...events.notices, ...events.noticeUpdates].some(
-          (notice) => notice.title === "⚠️ 排队的 Session 操作未完成",
+          (notice) => notice.title === "⚠️ 待应用配置变更未完成",
         ),
       ).toBe(true);
     });
@@ -1798,7 +1799,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
       (notice) => notice.template === "red",
     );
     expect(failureCards).toHaveLength(1);
-    expect(failureCards[0]).toMatchObject({ title: "⚠️ 排队的 Session 操作未完成" });
+    expect(failureCards[0]).toMatchObject({ title: "⚠️ 待应用配置变更未完成" });
     // The Pending Configuration is retained for retry after the failed apply.
     expect((await store.getLatest("oc_A", "omt_1"))?.pendingConfiguration).toMatchObject({
       controls: { modelId: "gone-at-apply-time" },

@@ -9,11 +9,11 @@
 
 > ⚠️ **WIP**：仍在迭代中，1.0 之前 CLI 选项与配置字段可能继续调整。
 
-**Humming Agent** 是一个轻量、文件驱动的 relay agent。它自己不发送 LLM request，而是通过 ACP 把飞书/Lark 聊天请求委托给本机第三方 agent（Claude Code、Codex、Copilot、Gemini、OpenCode 等），并通过 `settings.json` / `sessions.json` 管理路由、repo binding、topic session 和 session controls。
+**Humming Agent** 是一个把飞书/Lark 作为 ACP 客户端的轻量本地桥接服务。它不直接发送 LLM 请求，而是通过 ACP 把聊天任务交给本机的第三方 Agent（Claude Code、Codex、Copilot、Gemini、OpenCode 等），并管理 repo 绑定、topic session 和会话配置。
 
-用户在飞书里发消息，agent 在你的机器上跑，过程和结果都以一张可交互的飞书卡片呈现，工具调用授权、中断、跨进程恢复会话都在卡片里完成。
+用户在飞书里发消息，Agent 在你的机器上运行；过程和结果通过可交互的飞书卡片呈现，工具调用授权、中断和跨进程会话恢复也都在卡片里完成。
 
-实际使用强烈建议配合[飞书cli](https://github.com/larksuite/cli)与其skill一起使用，本桥阶层会把会话信息注入上下文，通过飞书cli可以衔接各种飞书操作。
+如需让 Agent 继续执行飞书操作，建议配合[飞书 CLI](https://github.com/larksuite/cli)及其 Skill 使用。Humming 会把当前会话信息注入上下文，Agent 可据此调用飞书 CLI。
 
 <p align="center">
   <img src="docs/mock-example.png" alt="humming 在飞书里的演示卡片" width="640">
@@ -233,8 +233,8 @@ humming stop                    # 停止后台 bridge
   `bridge.launch.json`，供 `humming update`（以及不带参数的 `humming bridge restart`）按原样重启，
   不会丢掉 `--agent` 等参数。managed checkout 位于同目录下的 `humming-project/`。
 - **Lifecycle / binding 通知**：在 settings.json 写 `"runtime": { "lifecycleNotifyChatIds": ["oc_..."] }` 后，
-  bridge 启动完成会给这些会话发「已启动」，`stop` 时发「正在停止」，`restart` 时发「正在重启」和「已重启」；若捕获到未处理异常 / Promise rejection，会写入 `bridge.log` 并发「Humming 发生未捕获错误」通知。通知是 best-effort，发送失败只记日志，不阻塞进程管理。每次 repo 绑定成功也会发「已绑定 repo」通知并列出修改明细；通过 CLI 绑定 topic session 成功时会发「已绑定 session」通知，包含 session title 和 Agent / Mode / Model / Permission / Controls 修改明细；`session configure` 成功时会发「Session profile 已更新」通知，展示当前 Agent、Mode、Model、Permission 和 Config controls。
-- **Agent 切换通知**：`session configure --agent <preset>` 会在当前 Turn 到达完成边界后停止当前 topic runtime、清掉旧 session 绑定，并写入新 Agent 的 profile-only boundary。成功后发送「Agent 已切换」通知，说明旧 Agent 历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。切换时会从当前 chat 最近的目标 Agent session 继承 Mode / Model / Permission / Config controls（只继承 metadata，不继承 history/sessionId）。
+  bridge 启动完成会给这些会话发「已启动」，`stop` 时发「正在停止」，`restart` 时发「正在重启」和「已重启」；若捕获到未处理异常 / Promise rejection，会写入 `bridge.log` 并发「Humming 发生未捕获错误」通知。通知是 best-effort，发送失败只记日志，不阻塞进程管理。每次 repo 绑定成功也会发「已绑定 repo」通知并列出修改明细；通过 CLI 绑定 topic session 成功时会发「已绑定 session」通知，包含 session title 和 Agent / Mode / Model / Permission / Config 修改明细；`session configure` 成功时会发「会话配置已更新」通知。
+- **Agent 切换通知**：`session configure --agent <preset>` 会在当前回复完成后停止当前 topic runtime、清掉旧 session 绑定，并保存新 Agent 的会话配置。成功后发送「Agent 已切换」通知，说明旧 Agent 历史不会自动迁移；下一条消息会用新 Agent 创建全新 ACP session。切换时会从当前 chat 最近的目标 Agent session 继承 Mode / Model / Permission / Config（只继承配置，不继承 history/sessionId）。
 - **初始化模板**：执行 `humming init` 会创建/刷新 `~/.humming/AGENTS.md`、`~/.humming/CLAUDE.md`，并创建 `~/.humming/settings.back.json`、`~/.humming/sessions.back.json` 作为可复制参考模板。官方 install 脚本会在全局命令安装完成后自动执行一次 `humming init`；手动安装或换 home 时也可以单独运行。`settings.json` / `sessions.json` 仍只在真实配置或会话产生时创建；`.back.json` 不含真实凭据。
 - **Linux / WSL 上是真后台托管**：如果 `systemctl --user` 可用，`bridge start` 会用
   `systemd-run --user` 启动一个 transient service（unit 名会显示在 `bridge status` 里），bridge
@@ -274,7 +274,7 @@ HUMMING_REF=some-branch humming update   # 同步非默认分支
 顺序上保证 git + build 成功之后才动正在跑的 bridge，所以**一次失败的 update 不会搞挂现有 bridge**。
 `update` 只针对新版持久化 checkout 布局；老的临时目录安装方式没有 managed checkout，请先重跑安装脚本。
 
-### Session controls / live capabilities
+### 会话配置与实时能力
 
 运行中的 bridge 会在 home 目录下打开本地 control socket（默认 `~/.humming/control.sock`），供本机 CLI 查询当前 ACP session 的 live capabilities，并受控写入 `sessions.json`。
 
@@ -301,7 +301,7 @@ humming session list \
 humming session list --agent codex --cwd /absolute/path/to/repo --json
 ```
 
-`humming session bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title、Agent、Mode、Model、Permission、Controls 与修改明细的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
+`humming session bind` 把**当前 topic** 绑定到一个已有 session。它故意不接受 `--cwd`：只能绑定当前 chat repo 内的 session，不会修改 chat binding，也不支持 topic 跨 repo 绑定。绑定前 CLI 会用 `session/list` 验证 session 属于当前 repo；绑定后 bridge 会停止当前 topic runtime、更新 `sessions.json`，并回复一张包含 session title、Agent、Mode、Model、Permission、Config 与修改明细的「已绑定 session」通知卡片。下一条 topic 消息会 resume 这个 session。
 
 如果目标 session 已经绑定到另一个 chat/thread，本次 bind 会被拒绝，并发送「Session 已被绑定」冲突通知；不要通过手改 `sessions.json` 绕过，应先在原 thread `/new` 重置或确认原绑定不再需要。
 
@@ -315,16 +315,16 @@ humming session bind \
 
 #### 切换 Agent、更改 Model/Mode/Permission/Config，以及原子化的「切换 + 消息」请求
 
-`humming session configure` 是唯一的 Session Profile 变更命令。它接受 `--agent` / `-m, --model` / `--mode` / `-p, --permission` / `-c, --config`（可重复）中任意组合，并且要求至少提供一个；额外还可以附带一条 Message（`--message` / `--message-file` / `--message-stdin`，三选一），这条 Message 只会在新 Profile 完全生效之后才发送：
+`humming session configure` 是唯一的会话配置变更命令。它接受 `--agent` / `-m, --model` / `--mode` / `-p, --permission` / `-c, --config`（可重复）中任意组合，并且要求至少提供一个；额外还可以附带一条消息（`--message` / `--message-file` / `--message-stdin`，三选一），这条消息只会在新配置完全生效之后才发送：
 
 ```bash
-# 纯粹切换 Agent，不带 controls、不带 message
+# 纯粹切换 Agent，不带其他配置或消息
 humming session configure --agent copilot
 
 # 只改 Model / Mode / Permission
 humming session configure --model <model-id> --mode <mode-id> --permission alwaysAsk
 
-# 切换 Agent 的同时设置 controls 并附带任务，三者作为一次原子操作生效
+# 切换 Agent 的同时设置其他配置并附带任务，作为一次原子操作生效
 humming session configure \
   --agent copilot \
   --model <model-id> \
@@ -334,10 +334,10 @@ humming session configure \
 
 语义（docs/cli-command-model-SPEC.md §9 有完整定义）：
 
-- Model/Mode/Config 永远针对这次请求解析出的 **Desired Agent**（本次 `--agent`，否则是已有 Pending Configuration 的 Agent，否则是当前 Topic Session 的 Agent）校验，绝不会拿当前正在跑的旧 Agent 去校验新 Agent 的取值。
-- 同一个 topic 最多只有一个 Pending Configuration；晚到的 `configure` 请求会按字段合并进去（后写覆盖），而不是维护三份互相独立的 pending 状态。
-- 若合并后 Desired Agent 发生变化，累积的 Model/Mode/Config 会针对新 Agent 重新校验。
-- Message 只有在完整的目标 Profile 成功生效之后才会发送；探测目标 Agent 失败、或启动/恢复目标 Agent 失败，都不会发送 Message，也不会影响当前仍在使用的 Session。
+- Model/Mode/Config 永远针对这次请求的**目标 Agent**（本次 `--agent`，否则是待应用配置变更中的 Agent，再否则是当前会话的 Agent）校验，绝不会拿当前正在运行的旧 Agent 去校验新 Agent 的取值。
+- 同一个 topic 最多只有一份待应用配置变更；后续 `configure` 请求会按字段合并（后写覆盖），不会维护互相独立的排队状态。
+- 若合并后目标 Agent 发生变化，累积的 Model/Mode/Config 会针对新 Agent 重新校验。
+- 附带的消息只有在完整的会话配置成功生效之后才会发送；探测目标 Agent 失败、或启动/恢复目标 Agent 失败，都不会发送消息，也不会影响当前仍在使用的 session。
 - 切换 Agent 时会对目标 Agent 做一次短暂 probe 用于提前反馈（例如命令拼写错误），但这个 probe 结果不会被当作「当前 Agent 能力」去校验 Model/Mode/Config——完整校验始终由 Bridge 完成。
 - 不会自动迁移旧 Agent 的内部对话历史；下一条消息会用新 Agent 创建全新的 ACP session。
 
@@ -353,7 +353,7 @@ humming agent capabilities \
 
 `humming agent models` / `humming agent modes` / `humming agent permissions` 是同一次 probe 结果的投影，不会另起一次 probe。
 
-#### Live capabilities / controls
+#### 实时能力与配置
 
 查询当前会话可用的 ACP 原生能力：
 
@@ -372,7 +372,7 @@ humming session capabilities --json
 - `configOptions`: ACP `SessionConfigOption[]`。
 - `bridgePermissionModes` / `bridgePermissionMode`: humming 自己的 permission-card 策略，不是 ACP 原生字段。
 
-设置 controls 时用具名选项，而不是整段 JSON：
+设置会话配置时用具名选项，而不是整段 JSON：
 
 ```bash
 humming session configure \
@@ -390,11 +390,11 @@ humming session configure \
 - `--config <id=value>` → ACP `session/set_config_option`；取值为 `true`/`false` 会被识别成 boolean 类型，其它字符串按 select 类型的 `{ "value": "..." }` 处理。可重复传多个 `--config`。
 - `--permission` → humming 本地处理 ACP `requestPermission` 的策略：`alwaysAsk` / `alwaysAllow` / `alwaysDeny`。
 
-成功后 Humming 会发送「Session profile 已更新」通知；runtime 正在运行时通知会回复到当前 topic 的最近消息，runtime 未运行时通知会直接发到 chat，下一条消息按已存 profile 启动/恢复。
+成功后 Humming 会发送「会话配置已更新」通知；会话正在运行时，通知会回复到当前 topic 的最近消息；会话未运行时，通知会直接发到 chat，下一条消息按已保存的配置启动或恢复。
 
 注意：ACP 没有统一的全局 permission mode。Claude Code / Copilot 等 agent 可能把"plan / edit automatically / bypass permission"暴露成 mode，也可能暴露成 config option；以 `session capabilities` 的 live 返回为准，不要硬编码。
 
-#### 只发消息，不改变 Profile
+#### 只发消息，不改变会话配置
 
 ```bash
 humming session send --message "Fix the failing test"
@@ -402,9 +402,9 @@ humming session send --message-file /absolute/path/to/task.md
 humming session send --message-stdin < /absolute/path/to/task.md
 ```
 
-`session send` 只在完全不需要变更 Profile 时使用。如果 Session 正忙，Humming 会在内部排队投递；如果已经存在一个校验通过的 Pending Configuration，这条 Message 不会插队到它前面。若同一个用户请求既要改 Profile 又要发消息，请改用上面的 `session configure --message...`，那才是原子操作。
+`session send` 只在完全不需要变更会话配置时使用。如果 session 正忙，Humming 会在内部排队投递；如果已有一份校验通过的待应用配置变更，这条消息不会插队到它前面。若同一个用户请求既要改配置又要发消息，请使用上面的 `session configure --message...`，确保配置生效后再发送消息。
 
-为了避免每轮 prompt 携带大段知识，bridge 会在 `~/.humming/AGENTS.md` 和 `~/.humming/CLAUDE.md` 写入完整操作指引；会话内只注入一句短提示，让 agent 在需要修改 settings 或 session controls 时先读这些文件。
+为了避免每轮 prompt 携带大段知识，bridge 会在 `~/.humming/AGENTS.md` 和 `~/.humming/CLAUDE.md` 写入完整操作指引；会话内只注入一句短提示，让 Agent 在需要修改 Humming 配置时先读这些文件。
 
 ### 配置文件
 

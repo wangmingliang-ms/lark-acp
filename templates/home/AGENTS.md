@@ -1,6 +1,6 @@
 # humming operating guide
 
-Use this guide when the user asks to configure Humming, bind/rebind a repo, bind this topic to an existing agent session, switch Agent, or change Model/Mode/Permission/Config controls.
+Use this guide when the user asks to configure Humming, bind/rebind a repo, bind this topic to an existing agent session, switch Agent, or change the current session configuration.
 
 ## Files
 
@@ -17,8 +17,8 @@ Do not print secrets, full chat IDs, full thread IDs, full session IDs, tokens, 
 `settings.json` stores machine/global configuration:
 
 - `credentials`: Feishu/Lark bot app credentials. Do not print them.
-- `runtime.agent`: global default Agent for new chats/topics with no inherited profile.
-- `runtime.defaultControls`: global default Model / Mode / Permission / Config controls for new chats/topics with no inherited profile.
+- `runtime.agent`: global default Agent for new chats/topics with no inherited session configuration.
+- `runtime.defaultControls`: global default Model / Mode / Permission / Config for new chats/topics with no inherited session configuration.
 - `runtime.permissionMode`: global Humming approval-card policy.
 - `runtime.lifecycleNotifyChatIds`: chats that receive bridge lifecycle notifications.
 - `runtime.globalControlChatIds`: DM control chats whose Agent/Model/Mode/Permission/Config changes write global defaults back to `settings.json`.
@@ -87,9 +87,9 @@ When the user asks to bind/rebind a chat to a repo, preserve unrelated `settings
 
 After editing settings, let Humming send the normal repo-bound notice.
 
-## Session controls: Model / Mode / Permission / Config
+## Session configuration: Agent / Model / Mode / Permission / Config
 
-Before changing controls, query the live Session capabilities:
+Before changing session configuration, query the live Session capabilities:
 
 ```bash
 humming session capabilities --json
@@ -97,13 +97,13 @@ humming session capabilities --json
 
 Use only IDs/values returned by capabilities. If the requested value is unavailable, tell the user and do not configure it.
 
-For another Agent's controls before switching, probe it first — `session configure --agent` also probes the target for early UX feedback, but always check capabilities yourself first so you know which Model/Mode/Config ids are valid:
+Before switching, probe the target Agent first — `session configure --agent` also probes it for early UX feedback, but always check capabilities yourself so you know which Model/Mode/Config ids are valid:
 
 ```bash
 humming agent capabilities --agent <agent> --json
 ```
 
-If the probe fails, stop. Do not switch Agent or write controls.
+If the probe fails, stop. Do not switch Agent or change the configuration.
 
 `session configure` accepts any combination of Agent/Model/Mode/Permission/Config, plus an optional Message that is sent only after that configuration is fully applied:
 
@@ -116,23 +116,23 @@ humming session configure --config <select-config-id>=<value-id>
 humming session configure --config <boolean-config-id>=true
 ```
 
-Combine flags when changing multiple controls in one request:
+Combine flags when changing multiple configuration values in one request:
 
 ```bash
 humming session configure --model <model-id> --mode <mode-id> --permission alwaysAsk
 ```
 
-`configure` requires at least one profile field (`--agent`/`--model`/`--mode`/`--permission`/`--config`). A Message with no profile field is rejected — use `session send` instead when nothing about the profile is changing.
+`configure` requires at least one configuration field (`--agent`/`--model`/`--mode`/`--permission`/`--config`). A Message with no configuration field is rejected — use `session send` when the configuration is unchanged.
 
-## Agent switching and atomic profile-change-and-message requests
+## Agent switching and atomic configuration-change-and-message requests
 
-For a pure Agent switch with no Message and no other controls:
+For a pure Agent switch with no Message and no other configuration changes:
 
 ```bash
 humming session configure --agent <agent>
 ```
 
-For a single user request that changes the Agent and/or controls and also carries a task to run afterward, attach the Message to the same `configure` call — this is the only atomic profile-change-and-message operation:
+For a single user request that changes the session configuration and also carries a task to run afterward, attach the Message to the same `configure` call:
 
 ```bash
 humming session configure --agent <agent> \
@@ -150,13 +150,13 @@ humming session configure --agent <agent> --model gpt-5.5 --message "task text"
 
 Rules:
 
-- Model/Mode/Config values are always validated against the Agent named by `--agent` in the same request (or the already-pending/current Agent when `--agent` is omitted) — never against a different Agent.
+- Model/Mode/Config values are always validated against the Agent named by `--agent` in the same request (or the Agent in the pending configuration change/current session when `--agent` is omitted) — never against a different Agent.
 - Do not split one such request into separate Agent-switch and control-change calls unless a single `configure` call cannot express it.
 - Do not add `--cwd` to `session configure` unless the user is deliberately pointing the new Agent at a different repo.
 - Do not edit `runtime.agent` or `bindings` to switch the current topic's Agent.
 - Do not explain Humming internals to the user; run the command and continue the task.
 
-## Sending a message without changing the profile
+## Sending a message without changing session configuration
 
 ```bash
 humming session send --message "Fix the failing test"
@@ -164,7 +164,7 @@ humming session send --message-file /absolute/path/to/task.md
 humming session send --message-stdin < /absolute/path/to/task.md
 ```
 
-Use `session send` only when no Agent/Model/Mode/Permission/Config change is needed. If a profile change and a message both apply, use `session configure` with a message instead (see above) for the atomic guarantee.
+Use `session send` only when no Agent/Model/Mode/Permission/Config change is needed. If a configuration change and a message both apply, use `session configure` with a message so it is sent only after the change succeeds.
 
 ## Binding this topic to an existing agent session
 
@@ -193,7 +193,7 @@ Rules:
 - If the session is already bound elsewhere, ask the user to reset the original thread first.
 - If multiple sessions match, show short candidates and ask the user to choose.
 
-## Permission controls
+## Permission behavior
 
 - If the Agent exposes Plan/Edit/Bypass as modes, set `--mode`.
 - If the Agent exposes approval/bypass as config, set `--config`.

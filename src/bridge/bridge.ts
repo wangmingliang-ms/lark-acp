@@ -123,7 +123,7 @@ const BIND_USAGE_NOTICE: NoticeCardSpec = {
     "",
     "• /bind <路径>            绑定目录",
     "",
-    "Agent / Model / Mode / Permission / Controls 属于 session profile，不属于 chat binding。新 topic 会继承当前 repo 最近 session profile；没有历史 session 时使用全局默认 Agent。",
+    "Agent / Model / Mode / Permission / Config 属于会话配置，不属于 chat binding。新 topic 会继承当前 repo 最近的会话配置；没有历史 session 时使用全局默认配置。",
     "",
     "其它命令：",
     "• /where                 查看当前绑定",
@@ -1231,8 +1231,8 @@ export class LarkBridge {
         await this.presenter.replyNoticeCard(
           noticeMessageId,
           buildProfileCommandFailureNotice(
-            "⚠️ Session 设置失败",
-            "当前 chat 没有可用 repo。请先 /bind <路径>，或配置默认 / reception cwd。",
+            "⚠️ 会话配置失败",
+            "当前 chat 没有可用 repo。请先 /bind <路径>，或配置默认工作目录。",
           ),
         );
       }
@@ -1284,9 +1284,9 @@ export class LarkBridge {
     if (!noticeMessageId) return;
     await this.presenter
       .replyNoticeCard(noticeMessageId, {
-        title: "⚠️ Session 设置失败",
+        title: "⚠️ 会话配置失败",
         body: [
-          "Session control 设置失败，当前 runtime 和 sessions.json 未更新。",
+          "会话配置未更新。",
           "",
           reason,
           "",
@@ -3060,7 +3060,7 @@ export class LarkBridge {
         }
       },
       messageId,
-      "Session profile",
+      "会话配置",
     );
   }
 
@@ -3077,8 +3077,8 @@ export class LarkBridge {
       writeSettingsFileObject(this.settingsPath, { ...root, runtime });
       if (messageId) {
         await this.presenter.replyNoticeCard(messageId, {
-          title: "✅ 全局默认已更新",
-          body: `${label} 已保存到 settings.json。此变更只因为当前消息来自已配置的 DM 控制台；群聊消息不会写入全局默认。`,
+          title: "✅ 全局默认配置已更新",
+          body: `${label} 已设为全局默认配置。此变更仅适用于已配置的私聊控制台；群聊中的配置变更只作用于当前会话。`,
           template: "green",
         });
       }
@@ -3086,8 +3086,8 @@ export class LarkBridge {
       this.logger.warn({ err }, "global default settings update failed");
       if (messageId) {
         await this.presenter.replyNoticeCard(messageId, {
-          title: "⚠️ 全局默认未更新",
-          body: `当前 session 已处理，但写入 settings.json 失败：${formatBootstrapError(err)}`,
+          title: "⚠️ 全局默认配置未更新",
+          body: `当前会话配置已更新，但保存全局默认配置时失败：${formatBootstrapError(err)}`,
           template: "orange",
         });
       }
@@ -3454,7 +3454,7 @@ function buildBridgeOnlyValidationSnapshot(
 }
 
 function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 agent session，或切换当前 session 的 agent/model/mode/config/permission control，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含 Agent/Model/Mode/Permission/Config 控制和真实任务，优先一次性登记 pending target profile（Agent + controls + task），不要拆成 set-agent/set-control/queue-task 多张卡，也不要让用户重复。注意：只有 Humming 配置里的 DM 控制台直聊会把这些 profile 控制写入 settings.json 全局默认；群聊/topic 中的控制只改当前 session。其它请求忽略本提示。]`;
+  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 Agent session，或修改当前会话的 Agent/Model/Mode/Permission/Config，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 Humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含会话配置变更和真实任务，使用一次 session configure 同时提交配置与消息，不要拆成多次操作，也不要让用户重复。注意：只有 Humming 配置的私聊控制台会把这些变更保存为全局默认配置；群聊/topic 中的变更只作用于当前会话。其它请求忽略本提示。]`;
 }
 
 function buildRouteFailureNotice(err: unknown): NoticeCardSpec {
@@ -3518,7 +3518,7 @@ function buildSessionBoundNotice(
     `• Mode：${displayControlMode(before?.controls)} → ${displayControlMode(record.controls)}`,
     `• Model：${displayControlModel(before?.controls)} → ${displayControlModel(record.controls)}`,
     `• Permission：${displayControlPermission(before?.controls)} → ${displayControlPermission(record.controls)}`,
-    `• Controls：${displayControlConfig(before?.controls)} → ${displayControlConfig(record.controls)}`,
+    `• Config：${displayControlConfig(before?.controls)} → ${displayControlConfig(record.controls)}`,
     "",
     `**绑定后**`,
     `• Title：${title}`,
@@ -3527,7 +3527,7 @@ function buildSessionBoundNotice(
     `• Mode：${displayControlMode(record.controls)}`,
     `• Model：${displayControlModel(record.controls)}`,
     `• Permission：${displayControlPermission(record.controls)}`,
-    `• Controls：${displayControlConfig(record.controls)}`,
+    `• Config：${displayControlConfig(record.controls)}`,
   ];
   if (record.sessionUpdatedAt) lines.push(`• Session updated：${record.sessionUpdatedAt}`);
   return {
@@ -3579,20 +3579,20 @@ function buildStoredControlUpdatedNotice(
   changed: SessionControlPatch,
 ): NoticeCardSpec {
   const lines = [
-    "当前 topic 的 session profile 已更新；runtime 未在运行，下一条消息会按新 profile 启动/恢复。",
+    "当前会话配置已更新。下一条消息会使用新配置启动或恢复会话。",
     "",
     "**修改明细**",
     ...storedControlChangeLines(before?.controls, after.controls, changed),
     "",
-    "**当前 profile**",
+    "**当前会话配置**",
     `• Agent：${after.agentLabel ?? after.agentCommand}`,
     `• Mode：${displayControlMode(after.controls)}`,
     `• Model：${displayControlModel(after.controls)}`,
     `• Permission：${displayControlPermission(after.controls)}`,
-    `• Controls：${displayControlConfig(after.controls)}`,
+    `• Config：${displayControlConfig(after.controls)}`,
   ];
   return {
-    title: "✅ Session profile 已更新",
+    title: "✅ 会话配置已更新",
     body: lines.join("\n"),
     template: "green",
   };
@@ -3603,39 +3603,39 @@ function buildPendingConfigurationQueuedNotice(
   candidate: PendingSessionConfiguration,
 ): NoticeCardSpec {
   const messageLine = candidate.message
-    ? "• Message：已保存，将在目标 profile 生效后发送"
-    : "• Message：—";
+    ? "• 后续消息：已保存，将在配置变更生效后发送"
+    : "• 后续消息：—";
   const targetAgent = candidate.targetAgent;
 
   if (targetAgent) {
     const targetLabel = targetAgent.agentLabel ?? targetAgent.agentCommand;
     const beforeAgent = before ? (before.agentLabel ?? before.agentCommand) : "未绑定";
     const lines = [
-      `已排队切换到 **${targetLabel}**。当前 Agent 这一轮会先正常结束；结束后 Humming 会应用完整目标 profile，再处理已保存的 message（如果有）。`,
+      `已准备切换到 **${targetLabel}**。当前回复会先正常结束，随后 Humming 将应用完整的配置变更，再发送已保存的后续消息（如果有）。`,
       "",
-      "**目标 profile**",
+      "**待应用配置变更**",
       `• Agent：${beforeAgent} → ${targetLabel}`,
       `• Repo：${targetAgent.cwd}`,
-      `• Controls：${displayControlPatch(candidate.controls)}`,
+      `• Config：${displayControlPatch(candidate.controls)}`,
       messageLine,
       "",
-      "**生效顺序**",
-      "1. 应用目标 profile（启动 / 切换 Agent + controls）",
-      "2. 发送已保存的 message",
+      "**处理顺序**",
+      "1. 应用会话配置（启动或切换 Agent，并设置 Model / Mode / Permission / Config）",
+      "2. 发送已保存的后续消息",
     ];
-    return { title: "⏳ Pending configuration 已排队", body: lines.join("\n"), template: "blue" };
+    return { title: "⏳ 配置变更将在本轮后生效", body: lines.join("\n"), template: "blue" };
   }
 
   const lines = [
-    "当前 topic 正在处理上一条消息，新的 session profile 已保存为下一轮生效。",
+    "当前会话正在处理上一条消息，配置变更将在本轮结束后生效。",
     "",
-    "当前任务会继续使用旧 profile；下一次向 agent 发送 prompt 前，Humming 会先应用这些设置，成功后自动清掉 pending configuration。",
+    "当前回复继续使用原配置；发送下一条消息前，Humming 会先应用这些变更。",
     "",
-    "**已排队 Controls 变更**",
+    "**待应用配置变更**",
     `• ${displayControlPatch(candidate.controls)}`,
     messageLine,
   ];
-  return { title: "⏳ Session profile 已排队", body: lines.join("\n"), template: "blue" };
+  return { title: "⏳ 配置变更将在本轮后生效", body: lines.join("\n"), template: "blue" };
 }
 
 function storedControlChangeLines(
@@ -3658,7 +3658,7 @@ function storedControlChangeLines(
   if (changed.config !== undefined) {
     for (const configId of Object.keys(changed.config)) {
       lines.push(
-        `• Control ${configId}：${displayStoredConfigValue(before, configId)} → ${displayStoredConfigValue(after, configId)}`,
+        `• Config ${configId}：${displayStoredConfigValue(before, configId)} → ${displayStoredConfigValue(after, configId)}`,
       );
     }
   }
@@ -3715,7 +3715,7 @@ function buildSessionAgentSwitchedNotice(
     `• Mode：${displayControlMode(record.controls)}`,
     `• Model：${displayControlModel(record.controls)}`,
     `• Permission：${displayControlPermission(record.controls)}`,
-    `• Controls：${displayControlConfig(record.controls)}`,
+    `• Config：${displayControlConfig(record.controls)}`,
   ];
   if (inherited?.controls) {
     lines.push(
@@ -3734,7 +3734,7 @@ function buildPendingControlsAppliedNotice(
   after: SessionCapabilitiesSnapshot,
   changed: SessionControlPatch,
 ): NoticeCardSpec {
-  const lines = ["之前排队的 session profile 已在本轮结束后生效。", "", "**修改明细**"];
+  const lines = ["待应用的配置变更已在本轮结束后生效。", "", "**修改明细**"];
   if (changed.modeId !== undefined) {
     lines.push(`• Mode：${displaySnapshotMode(before)} → ${displaySnapshotMode(after)}`);
   }
@@ -3747,12 +3747,10 @@ function buildPendingControlsAppliedNotice(
     );
   }
   if (changed.config !== undefined && Object.keys(changed.config).length > 0) {
-    lines.push(
-      `• Controls：${displaySnapshotControls(before)} → ${displaySnapshotControls(after)}`,
-    );
+    lines.push(`• Config：${displaySnapshotControls(before)} → ${displaySnapshotControls(after)}`);
   }
   return {
-    title: "✅ 排队的 Session profile 已生效",
+    title: "✅ 会话配置已更新",
     body: lines.join("\n"),
     template: "green",
   };
@@ -3760,8 +3758,8 @@ function buildPendingControlsAppliedNotice(
 
 function buildPendingAgentSwitchFailedNotice(err: unknown): NoticeCardSpec {
   return {
-    title: "⚠️ 排队的 Session 操作未完成",
-    body: `当前 turn 已结束，但应用目标 profile 或发送 message 时失败。目标 profile 可能已经写入，请用 /profile 确认当前状态后重试任务。\n\n原因：${formatBootstrapError(err)}`,
+    title: "⚠️ 待应用配置变更未完成",
+    body: `当前回复已结束，但应用会话配置或发送后续消息时失败。请用 /profile 确认当前配置后重试。\n\n原因：${formatBootstrapError(err)}`,
     template: "red",
   };
 }
@@ -3950,7 +3948,7 @@ function buildCapabilitiesNotice(
       "**Permission modes**",
       ...permissionLines,
       "",
-      "设置方式：/model <model-id|auto>、/mode <mode-id>、/permission <mode>。Config controls 暂时通过 `humming sessions set-control` 设置。",
+      "设置方式：/model <model-id|auto>、/mode <mode-id>、/permission <mode>。其他 Config 使用 `humming session configure --config <id=value>` 设置。",
     ].join("\n"),
     template: "blue",
   };
@@ -4131,18 +4129,18 @@ function buildProfileCommandFailureNotice(title: string, body: string): NoticeCa
 
 function buildLiveProfileNotice(snapshot: SessionCapabilitiesSnapshot): NoticeCardSpec {
   return {
-    title: "📋 当前 Session profile",
+    title: "📋 当前会话配置",
     body: [
-      "当前 topic 有正在运行的 Agent runtime。",
+      "当前会话正在运行。",
       "",
-      "**当前 profile**",
+      "**当前会话配置**",
       `• Agent：${displaySnapshotAgent(snapshot)}`,
       `• Repo：${snapshot.agent.cwd}`,
       `• Mode：${displaySnapshotMode(snapshot)}`,
       `• Model：${displaySnapshotModel(snapshot)}`,
       `• Permission：${displaySnapshotPermission(snapshot)}`,
-      `• Controls：${displaySnapshotControls(snapshot)}`,
-      `• 状态：live`,
+      `• Config：${displaySnapshotControls(snapshot)}`,
+      `• 状态：运行中`,
     ].join("\n"),
     template: "blue",
   };
@@ -4151,24 +4149,24 @@ function buildLiveProfileNotice(snapshot: SessionCapabilitiesSnapshot): NoticeCa
 function buildStoredProfileNotice(record: SessionRecord): NoticeCardSpec {
   const pending = record.pendingConfiguration;
   const pendingLine = pending
-    ? `${displayControlPatch(pending.controls)}${pending.targetAgent ? ` · Agent → ${pending.targetAgent.agentLabel ?? pending.targetAgent.agentCommand}` : ""}${pending.message ? " · message 已保存" : ""}`
+    ? `${displayControlPatch(pending.controls)}${pending.targetAgent ? ` · Agent → ${pending.targetAgent.agentLabel ?? pending.targetAgent.agentCommand}` : ""}${pending.message ? " · 后续消息已保存" : ""}`
     : "—";
   return {
-    title: "📋 当前 Session profile",
+    title: "📋 当前会话配置",
     body: [
       record.profileOnly
-        ? "当前 topic 保存的是 profile-only 记录；下一条消息会创建新的 ACP session。"
-        : "当前 topic 有已保存的 ACP session；下一条消息会尝试恢复。",
+        ? "当前会话尚未开始；下一条消息会创建新的 Agent session。"
+        : "当前会话可以在下一条消息到来时恢复。",
       "",
-      "**当前 profile**",
+      "**当前会话配置**",
       `• Agent：${record.agentLabel ?? record.agentCommand}`,
       `• Repo：${record.cwd}`,
       `• Mode：${displayControlMode(record.controls)}`,
       `• Model：${displayControlModel(record.controls)}`,
       `• Permission：${displayControlPermission(record.controls)}`,
-      `• Controls：${displayControlConfig(record.controls)}`,
-      `• Pending：${pendingLine}`,
-      `• 状态：${record.profileOnly ? "profile-only" : "stored"}`,
+      `• Config：${displayControlConfig(record.controls)}`,
+      `• 待应用配置变更：${pendingLine}`,
+      `• 状态：${record.profileOnly ? "尚未开始" : "已保存"}`,
     ].join("\n"),
     template: "blue",
   };
@@ -4176,9 +4174,9 @@ function buildStoredProfileNotice(record: SessionRecord): NoticeCardSpec {
 
 function buildNoProfileNotice(binding: EffectiveBinding | null): NoticeCardSpec {
   return {
-    title: "📋 当前 Session profile",
+    title: "📋 当前会话配置",
     body: [
-      "当前 topic 还没有 session profile。",
+      "当前 topic 还没有会话配置。",
       "",
       "**默认启动信息**",
       `• Agent：${binding?.label ?? "—"}`,
@@ -4186,8 +4184,8 @@ function buildNoProfileNotice(binding: EffectiveBinding | null): NoticeCardSpec 
       "• Mode：—",
       "• Model：—",
       `• Permission：—`,
-      "• Controls：—",
-      "• 状态：no session",
+      "• Config：—",
+      "• 状态：尚未创建会话",
     ].join("\n"),
     template: "blue",
   };
@@ -4240,7 +4238,7 @@ function displayControlPatch(controls: SessionControlPatch | undefined): string 
     parts.push(`Permission: ${displayControlPermission(controls)}`);
   }
   const config = displayControlConfig(controls);
-  if (config !== "—") parts.push(`Controls: ${config}`);
+  if (config !== "—") parts.push(`Config: ${config}`);
   return parts.length > 0 ? parts.join(" · ") : "—";
 }
 
@@ -4271,7 +4269,7 @@ function buildRepoBoundNotice(
     "**绑定后**",
     `• Repo：${after.cwd}`,
     "",
-    "下条消息将在该目录启动 agent；Agent 会从最近 session profile 继承，或使用全局默认 Agent。",
+    "下条消息将在该目录启动 Agent；会话配置会从最近的 session 继承，否则使用全局默认配置。",
   ];
   return {
     title: "✅ 已绑定 repo",
@@ -4338,14 +4336,14 @@ function renderBindInstructions(
     "to the bound repository automatically — the user's next message will run",
     "there. Tell the user the binding is done and which repo you set. Do not put",
     "an agent in the chat binding: Agent / Model / Mode / Permission / Config",
-    "controls belong to the topic/session profile. New topics inherit the most",
-    "recent profile from the same chat + repo, or use the global default Agent if",
-    "there is no history.",
+    "belong to the session configuration. New topics inherit the most recent",
+    "session configuration from the same chat + repo, or use the global defaults",
+    "if there is no history.",
     "",
     "Do not delete other chats' bindings or other top-level keys (credentials,",
     "runtime, agents).",
     "",
-    "For model/mode/config/permission session controls, read ~/.humming/AGENTS.md",
+    "For Agent/Model/Mode/Permission/Config changes, read ~/.humming/AGENTS.md",
     "or ~/.humming/CLAUDE.md and use the humming control/sessions CLI. Do not",
     "guess model/mode/config ids; query live capabilities first.",
     ...(socketPath ? ["", `Control socket: ${socketPath}`] : []),
