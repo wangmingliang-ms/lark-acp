@@ -390,10 +390,10 @@ describe("reception area", () => {
     await bridge.start();
 
     expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf-8")).toContain(
-      "Humming command guide",
+      "Humming operating guide",
     );
     expect(fs.readFileSync(path.join(home, "CLAUDE.md"), "utf-8")).toContain(
-      "Humming command guide",
+      "Humming operating guide",
     );
     expect(
       JSON.parse(fs.readFileSync(path.join(home, "settings.back.json"), "utf-8")),

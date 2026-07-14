@@ -33,6 +33,12 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain(sessionsPath);
     expect(agents).toContain(path.join(dir, "control.sock"));
     expect(agents).toContain("## Commands by task");
+    expect(agents).toContain("## Decision rules");
+    expect(agents).toContain("### Choose the capability source");
+    expect(agents).toContain("### Combine profile changes and tasks");
+    expect(agents).toContain("### Bind sessions and repositories");
+    expect(agents).toContain("### Choose Permission, Mode, or Config");
+    expect(agents).toContain("### Handle scope and failures");
     expect(agents).toContain("Bind/rebind chat repository");
     expect(agents).toContain("Do not write Agent/Model/Mode/Permission/Config into `bindings`");
     expect(agents).toContain("/agent [agent]");
@@ -44,7 +50,7 @@ describe("installHomeTemplates", () => {
     expect(agents).toContain("humming session capabilities --json");
     expect(agents).toContain("Switch Agent");
     expect(agents).toContain("humming agent capabilities --agent <target-agent> --json");
-    expect(agents).toContain("Run that command once");
+    expect(agents).toContain("Query once per unchanged target Agent");
     expect(agents).not.toContain("sessions set-control");
     expect(agents).not.toContain("sessions queue-task");
     expect(agents).not.toContain("set-pending-target-profile");
@@ -97,6 +103,6 @@ describe("installHomeTemplates", () => {
       controlSocketPath: null,
       overwriteDocs: true,
     });
-    expect(fs.readFileSync(agentsPath, "utf-8")).toContain("Humming command guide");
+    expect(fs.readFileSync(agentsPath, "utf-8")).toContain("Humming operating guide");
   });
 });
