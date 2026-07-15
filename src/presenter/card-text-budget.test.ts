@@ -19,16 +19,27 @@ describe("card text byte budget", () => {
 
   it("budgets actual top-level conversation elements below Feishu's hard limit", () => {
     const entries = Array.from({ length: 18 }, () => ({ kind: "tool" }));
-    expect(conversationTimelineElementCount(entries)).toBe(35);
+    expect(conversationTimelineElementCount(entries)).toBe(18);
     expect(activeConversationCardElementCount(entries, { hasCancel: true, hasProfile: true })).toBe(
-      39,
+      22,
     );
     expect(
       activeConversationCardElementCount([...entries, { kind: "text" }], {
         hasCancel: true,
         hasProfile: true,
       }),
-    ).toBe(41);
+    ).toBe(24);
+  });
+
+  it("groups only consecutive visible tool entries", () => {
+    expect(
+      conversationTimelineElementCount([
+        { kind: "tool" },
+        { kind: "tool" },
+        { kind: "thought" },
+        { kind: "tool" },
+      ]),
+    ).toBe(6);
   });
 
   it("measures all card text with UTF-8 bytes", () => {

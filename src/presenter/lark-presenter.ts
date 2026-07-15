@@ -544,7 +544,7 @@ function semanticEntries(view: ConversationCardView): object[] {
     return elements;
   }
   view.entries.forEach((entry: ConversationTimelineEntry, index: number) => {
-    if (conversationEntryHasLeadingDivider(entry, index)) elements.push({ tag: "hr" });
+    if (conversationEntryHasLeadingDivider(view.entries, index)) elements.push({ tag: "hr" });
     elements.push(semanticEntryToCardElement(entry));
   });
   return elements;

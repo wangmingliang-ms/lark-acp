@@ -12,17 +12,19 @@ type ConversationElementLike = {
 };
 
 export function conversationEntryHasLeadingDivider(
-  entry: ConversationElementLike,
+  entries: readonly ConversationElementLike[],
   index: number,
 ): boolean {
-  return index > 0 && entry.kind !== "thought";
+  if (index === 0) return false;
+  return !(entries[index]?.kind === "tool" && entries[index - 1]?.kind === "tool");
 }
 
 export function conversationTimelineElementCount(
   entries: readonly ConversationElementLike[],
 ): number {
   return entries.reduce(
-    (count, entry, index) => count + 1 + (conversationEntryHasLeadingDivider(entry, index) ? 1 : 0),
+    (count, _entry, index) =>
+      count + 1 + (conversationEntryHasLeadingDivider(entries, index) ? 1 : 0),
     0,
   );
 }

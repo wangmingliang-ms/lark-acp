@@ -152,6 +152,51 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[0]?.config?.summary?.content).not.toContain("tool:");
   });
 
+  it("groups consecutive Tool Calls without hiding visible Thought boundaries", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "calling_tool",
+      entries: [
+        {
+          kind: "tool",
+          toolCallId: "tool-1",
+          title: "Read first file",
+          toolKind: "tool",
+          status: "completed",
+        },
+        {
+          kind: "tool",
+          toolCallId: "tool-2",
+          title: "Read second file",
+          toolKind: "tool",
+          status: "completed",
+        },
+        { kind: "thought", text: "Reviewing the results" },
+        {
+          kind: "tool",
+          toolCallId: "tool-3",
+          title: "Run tests",
+          toolKind: "tool",
+          status: "in_progress",
+        },
+      ],
+      profile: null,
+      route: { c: "chat", th: "thread" },
+    });
+
+    expect(cards[0]?.body?.elements?.map((element) => element.tag)).toEqual([
+      "markdown",
+      "markdown",
+      "hr",
+      "collapsible_panel",
+      "hr",
+      "markdown",
+    ]);
+  });
+
   it("labels a newly received semantic Response as received, not queued behind prior work", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
