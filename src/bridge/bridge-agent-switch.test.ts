@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as acp from "@agentclientprotocol/sdk";
-import { LarkBridge, type LarkCommand, type ResolvedAgentInvocation } from "./bridge.js";
+import { LarkBridge, type ResolvedAgentInvocation } from "./bridge.js";
+import { slashCommandController, type SlashCommandInvocation } from "../interpreter/commands.js";
 import type {
   AgentProcess,
   ProbeAgentSessionCapabilitiesResult,
@@ -37,6 +38,9 @@ const probeAgentSessionCapabilitiesMock = vi.hoisted(() =>
 const spawnAgentMock = vi.hoisted(() =>
   vi.fn<(options: SpawnAgentOptions) => Promise<AgentProcess>>(),
 );
+const spawnAndStrictlyResumeAgentMock = vi.hoisted(() =>
+  vi.fn<(options: SpawnAgentOptions, sessionId: string) => Promise<AgentProcess>>(),
+);
 
 vi.mock("../acp/agent-process.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../acp/agent-process.js")>();
@@ -52,6 +56,7 @@ vi.mock("../acp/agent-process.js", async (importOriginal) => {
       agent: await spawnAgentMock(options),
       resumed: true,
     }),
+    spawnAndStrictlyResumeAgent: spawnAndStrictlyResumeAgentMock,
     killAgent: () => {},
   };
 });
@@ -304,7 +309,7 @@ describe("LarkBridge shutdown", () => {
 
 async function dispatchCommand(
   bridge: LarkBridge,
-  command: LarkCommand,
+  input: string,
   messageId = "om_switch",
   opts: {
     readonly chatId?: string;
@@ -312,9 +317,11 @@ async function dispatchCommand(
     readonly isDirectMessage?: boolean;
   } = {},
 ): Promise<void> {
+  const command = slashCommandController.resolve(input);
+  if (command === null) throw new Error(`expected slash command: ${input}`);
   const testable = bridge as unknown as {
     handleCommand(
-      command: LarkCommand,
+      command: SlashCommandInvocation,
       chatId: string,
       threadId: string | null,
       messageId: string,
@@ -417,6 +424,90 @@ function fakeAgentProcess(
   };
 }
 
+describe("LarkBridge topic Agent restart", () => {
+  beforeEach(() => {
+    spawnAgentMock.mockReset();
+    spawnAndStrictlyResumeAgentMock.mockReset();
+  });
+
+  it("cancels the active Topic Runtime and strictly resumes the same Session", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    const oldRuntime = {
+      cancel: vi.fn(async () => {}),
+      supersede: vi.fn(async () => {}),
+    };
+    const testable = bridge as unknown as {
+      chats: Map<string, typeof oldRuntime>;
+    };
+    testable.chats.set("oc_A\u0000omt_1", oldRuntime);
+    spawnAndStrictlyResumeAgentMock.mockResolvedValue(fakeAgentProcess("sess_claude"));
+
+    await dispatchCommand(bridge, "/restart");
+
+    expect(oldRuntime.cancel).toHaveBeenCalledOnce();
+    expect(oldRuntime.supersede).toHaveBeenCalledOnce();
+    expect(spawnAndStrictlyResumeAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/tmp" }),
+      "sess_claude",
+    );
+    expect((await store.getLatest("oc_A", "omt_1"))?.sessionId).toBe("sess_claude");
+    expect(events.notices.at(-1)).toMatchObject({
+      title: "✅ Agent 已重启",
+      template: "green",
+    });
+  });
+
+  it("preserves the Session record and reports a strict resume failure", async () => {
+    const store = new MemorySessionStore([existingClaudeSession()]);
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(store, recordingPresenter(events));
+    spawnAndStrictlyResumeAgentMock.mockRejectedValue(new Error("resume rejected"));
+
+    await dispatchCommand(bridge, "/restart");
+
+    expect((await store.getLatest("oc_A", "omt_1"))?.sessionId).toBe("sess_claude");
+    expect(spawnAgentMock).not.toHaveBeenCalled();
+    expect(events.notices.at(-1)).toMatchObject({
+      title: "⚠️ Agent 重启失败",
+      body: expect.stringContaining("原 Session 已保留"),
+      template: "red",
+    });
+  });
+
+  it("does not create a Session when the Topic has none to restart", async () => {
+    const events: PresenterEvents = {
+      warnings: [],
+      warningResolutions: [],
+      notices: [],
+      commandResults: [],
+      noticeUpdates: [],
+    };
+    const bridge = makeBridge(new MemorySessionStore(), recordingPresenter(events));
+
+    await dispatchCommand(bridge, "/restart");
+
+    expect(spawnAndStrictlyResumeAgentMock).not.toHaveBeenCalled();
+    expect(events.notices.at(-1)).toMatchObject({
+      title: "ℹ️ 没有可重启的 Session",
+      template: "orange",
+    });
+  });
+});
+
 it("migrates a persisted Claude preset to the maintained adapter on resume", async () => {
   spawnAgentMock.mockReset();
   spawnAgentMock.mockResolvedValue(fakeAgentProcess("sess_claude"));
@@ -489,7 +580,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
-    await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" });
+    await dispatchCommand(bridge, "/agent codex");
 
     expect(events.warnings).toHaveLength(1);
     expect(events.warnings[0]).toMatchObject({
@@ -519,7 +610,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
-    await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" });
+    await dispatchCommand(bridge, "/agent codex");
     const switchId = events.warnings[0]?.switchId;
     expect(switchId).toBeDefined();
 
@@ -543,7 +634,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
-    await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" });
+    await dispatchCommand(bridge, "/agent codex");
     const switchId = events.warnings[0]?.switchId;
     expect(switchId).toBeDefined();
 
@@ -1494,7 +1585,7 @@ describe("LarkBridge destructive Agent switch confirmation", () => {
     };
     const bridge = makeBridge(store, recordingPresenter(events));
 
-    await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" });
+    await dispatchCommand(bridge, "/agent codex");
 
     expect(events.warnings).toEqual([]);
     expect(probeAgentSessionCapabilitiesMock).toHaveBeenCalledTimes(1);
@@ -1828,7 +1919,7 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         globalDefaultControlChatIds: ["oc_DM"],
       });
 
-      await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" }, "om_dm_agent", {
+      await dispatchCommand(bridge, "/agent codex", "om_dm_agent", {
         chatId: "oc_DM",
         threadId: null,
         isDirectMessage: true,
@@ -1865,7 +1956,7 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         globalDefaultControlChatIds: ["oc_DM"],
       });
 
-      await dispatchCommand(bridge, { kind: "set-agent", agent: "codex" }, "om_group_agent", {
+      await dispatchCommand(bridge, "/agent codex", "om_group_agent", {
         chatId: "oc_DM",
         threadId: null,
         isDirectMessage: false,
@@ -1914,12 +2005,11 @@ describe("LarkBridge global defaults from direct-message control chat", () => {
         globalDefaultControlChatIds: ["oc_DM"],
       });
 
-      await dispatchCommand(
-        bridge,
-        { kind: "set-permission", permissionMode: "alwaysAllow" },
-        "om_dm_permission",
-        { chatId: "oc_DM", threadId: null, isDirectMessage: true },
-      );
+      await dispatchCommand(bridge, "/permission alwaysAllow", "om_dm_permission", {
+        chatId: "oc_DM",
+        threadId: null,
+        isDirectMessage: true,
+      });
 
       const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as {
         runtime?: { permissionMode?: string; defaultControls?: SessionControls };

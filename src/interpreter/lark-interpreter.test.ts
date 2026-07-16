@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import { interpretLarkMessage, type LarkCommand, type PromptSegment } from "./lark-interpreter.js";
+import { interpretLarkMessage, type PromptSegment } from "./lark-interpreter.js";
+import type { LarkCommand } from "./commands.js";
 
 /**
  * Build a minimal text-message event. The interpreter only reads
@@ -47,7 +48,7 @@ function expectCommand(text: string): LarkCommand {
   if (result.kind !== "command") {
     throw new Error(`expected command for "${text}", got kind="${result.kind}"`);
   }
-  return result.command;
+  return result.command.command;
 }
 
 describe("interpretLarkMessage — bind commands", () => {
@@ -120,8 +121,12 @@ describe("interpretLarkMessage — existing commands still work", () => {
     },
   );
 
-  it.each(["/new", "/restart", "/NEW", "/Restart"])("parses %s as new", (token) => {
+  it.each(["/new", "/NEW"])("parses %s as new", (token) => {
     expect(expectCommand(token)).toEqual({ kind: "new" });
+  });
+
+  it.each(["/restart", "/Restart"])("parses %s as restart", (token) => {
+    expect(expectCommand(token)).toEqual({ kind: "restart" });
   });
 
   it("treats ordinary text as a prompt", () => {

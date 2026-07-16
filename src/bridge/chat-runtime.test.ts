@@ -27,6 +27,8 @@ const spawnAndResumeAgentMock =
   vi.fn<
     (opts: SpawnAgentOptions, id: string) => Promise<{ agent: AgentProcess; resumed: boolean }>
   >();
+const spawnAndStrictlyResumeAgentMock =
+  vi.fn<(opts: SpawnAgentOptions, id: string) => Promise<AgentProcess>>();
 
 vi.mock("../acp/agent-process.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../acp/agent-process.js")>();
@@ -34,6 +36,8 @@ vi.mock("../acp/agent-process.js", async (importOriginal) => {
     ...actual,
     spawnAgent: (opts: unknown) => spawnAgentMock(opts),
     spawnAndResumeAgent: (opts: SpawnAgentOptions, id: string) => spawnAndResumeAgentMock(opts, id),
+    spawnAndStrictlyResumeAgent: (opts: SpawnAgentOptions, id: string) =>
+      spawnAndStrictlyResumeAgentMock(opts, id),
     killAgent: (process: AgentProcess["process"]) => killAgentMock(process),
   };
 });
@@ -95,6 +99,7 @@ describe("ChatRuntime prompt preparation", () => {
   beforeEach(() => {
     spawnAgentMock.mockReset();
     spawnAndResumeAgentMock.mockReset();
+    spawnAndStrictlyResumeAgentMock.mockReset();
     killAgentMock.mockReset();
   });
 
@@ -149,6 +154,107 @@ describe("ChatRuntime prompt preparation", () => {
     expect(spawnAgentMock).toHaveBeenCalledOnce();
     fake.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(fake.prompts()).toContain("first"));
+  });
+
+  it("strictly resumes the persisted Session without sending a prompt", async () => {
+    const fake = makeFakeAgent();
+    spawnAndStrictlyResumeAgentMock.mockResolvedValue(fake.agent);
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: {
+        ...stubSessionStore(),
+        getLatest: async () => ({
+          chatId: "oc_test",
+          threadId: null,
+          sessionId: "sess_fake",
+          agentCommand: "node",
+          agentArgs: [],
+          cwd: "/tmp",
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      },
+    });
+
+    await runtime.startStrictResume("sess_fake", "om_restart");
+
+    expect(spawnAndStrictlyResumeAgentMock).toHaveBeenCalledOnce();
+    expect(spawnAndStrictlyResumeAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({ command: "node", cwd: "/tmp" }),
+      "sess_fake",
+    );
+    expect(spawnAgentMock).not.toHaveBeenCalled();
+    expect(spawnAndResumeAgentMock).not.toHaveBeenCalled();
+    expect(fake.prompts()).toEqual([]);
+  });
+
+  it("holds a new message until strict Session resume completes", async () => {
+    const fake = makeFakeAgent();
+    let releaseResume!: () => void;
+    const resumeBlocked = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    spawnAndStrictlyResumeAgentMock.mockImplementation(async () => {
+      await resumeBlocked;
+      return fake.agent;
+    });
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: {
+        ...stubSessionStore(),
+        getLatest: async () => ({
+          chatId: "oc_test",
+          threadId: null,
+          sessionId: "sess_fake",
+          agentCommand: "node",
+          agentArgs: [],
+          cwd: "/tmp",
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      },
+    });
+
+    const restart = runtime.startStrictResume("sess_fake", "om_restart");
+    await vi.waitFor(() => expect(spawnAndStrictlyResumeAgentMock).toHaveBeenCalledOnce());
+    const enqueue = runtime.enqueue({
+      prompt: [{ type: "text", text: "after restart" }],
+      messageId: "om_after",
+      chatId: "oc_test",
+    });
+    expect(fake.prompts()).toEqual([]);
+
+    releaseResume();
+    await Promise.all([restart, enqueue]);
+    await vi.waitFor(() => expect(fake.prompts()).toEqual(["after restart"]));
+    fake.resolvePrompt("end_turn");
+  });
+
+  it("rejects strict restart when the persisted Session identity changed", async () => {
+    const runtime = new ChatRuntime({
+      ...opts(),
+      presenter: recordingPresenter([]),
+      sessionStore: {
+        ...stubSessionStore(),
+        getLatest: async () => ({
+          chatId: "oc_test",
+          threadId: null,
+          sessionId: "sess_other",
+          agentCommand: "node",
+          agentArgs: [],
+          cwd: "/tmp",
+          createdAt: 1,
+          updatedAt: 2,
+        }),
+      },
+    });
+
+    await expect(runtime.startStrictResume("sess_expected", "om_restart")).rejects.toThrow(
+      "Persisted session sess_expected is not available",
+    );
+    expect(spawnAndStrictlyResumeAgentMock).not.toHaveBeenCalled();
   });
 
   for (const operation of ["cancel", "shutdown", "supersede"] as const) {

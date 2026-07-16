@@ -5,6 +5,7 @@ import { HummingClient, PERMISSION_MODES, type PermissionMode } from "../acp/hum
 import {
   spawnAgent,
   spawnAndResumeAgent,
+  spawnAndStrictlyResumeAgent,
   killAgent,
   AgentDisconnectedError,
   type AgentProcess,
@@ -61,6 +62,16 @@ export interface DrainResult {
   readonly cancel: "not-needed" | "sent" | "rejected" | "timed-out";
   readonly persisted: boolean;
   readonly agentClose: "not-needed" | "closed" | "timed-out";
+}
+
+export class SessionRestartTargetError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Persisted session ${sessionId} is not available for strict restart`);
+    this.name = "SessionRestartTargetError";
+    this.sessionId = sessionId;
+  }
 }
 
 export interface PendingMessage {
@@ -301,6 +312,48 @@ export class ChatRuntime {
       });
       this.scheduleAdmissionDrain();
     });
+  }
+
+  /**
+   * Start this fresh Runtime by restoring exactly `sessionId`, without sending
+   * a user prompt or falling back to a new Session.
+   *
+   * @throws {SessionRestartTargetError} when the persisted Topic Session no
+   * longer matches `sessionId`.
+   * @throws {AgentSessionResumeUnsupportedError} when the Agent cannot restore
+   * existing Sessions.
+   * @throws {AgentSessionResumeError} when restoring the Session fails.
+   */
+  async startStrictResume(sessionId: string, messageId: string): Promise<void> {
+    if (this.state !== null || this.bootstrapPromise !== null) {
+      throw new Error("runtime has already started");
+    }
+
+    this.aborted = false;
+    this.topicCancelRequested = false;
+    this.followupInterruptRequested = false;
+    this.booting = true;
+    const bootstrap = this.bootstrap(
+      {
+        prompt: [],
+        messageId,
+        chatId: this.opts.chatId,
+      },
+      sessionId,
+    );
+    this.bootstrapPromise = bootstrap;
+
+    try {
+      const state = await bootstrap;
+      if (this.aborted) {
+        killAgent(state.agent.process);
+        throw new Error("runtime restart was interrupted");
+      }
+      this.state = state;
+    } finally {
+      if (this.bootstrapPromise === bootstrap) this.bootstrapPromise = null;
+      this.booting = false;
+    }
   }
 
   private scheduleAdmissionDrain(): void {
@@ -837,12 +890,21 @@ export class ChatRuntime {
     }
   }
 
-  private async bootstrap(firstMessage: PendingMessage): Promise<ChatRuntimeState> {
+  private async bootstrap(
+    firstMessage: PendingMessage,
+    strictSessionId?: string,
+  ): Promise<ChatRuntimeState> {
     this.logger.info("creating chat runtime");
 
     const latest = this.opts.ignoreStoredSession
       ? null
       : await this.opts.sessionStore.getLatest(this.opts.chatId, this.opts.threadId);
+    if (
+      strictSessionId !== undefined &&
+      (latest === null || latest.profileOnly === true || latest.sessionId !== strictSessionId)
+    ) {
+      throw new SessionRestartTargetError(strictSessionId);
+    }
     let stateRef: ChatRuntimeState | null = null;
     let currentClient: HummingClient;
     const metaProvider = (): SessionCardMeta =>
@@ -916,7 +978,10 @@ export class ChatRuntime {
 
     let agent: AgentProcess;
     try {
-      if (latest && !latest.profileOnly) {
+      if (strictSessionId !== undefined) {
+        this.logger.info({ previousSessionId: strictSessionId }, "attempting strict resume");
+        agent = await spawnAndStrictlyResumeAgent(spawnOpts, strictSessionId);
+      } else if (latest && !latest.profileOnly) {
         this.logger.info({ previousSessionId: latest.sessionId }, "attempting resume");
         const result = await spawnAndResumeAgent(spawnOpts, latest.sessionId);
         agent = result.agent;

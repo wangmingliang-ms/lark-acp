@@ -25,7 +25,12 @@ import {
 } from "../presenter/notice-card-lifecycle.js";
 import { installHomeTemplates } from "../home-templates.js";
 import type { LarkPresenter } from "../presenter/presenter.js";
-import { renderCommandHelpBody } from "../interpreter/commands.js";
+import {
+  renderCommandHelpBody,
+  slashCommandController,
+  type SlashCommandContext,
+  type SlashCommandInvocation,
+} from "../interpreter/commands.js";
 import {
   BridgeControlServer,
   type AgentProbeFailureTarget,
@@ -34,7 +39,6 @@ import {
 import {
   interpretLarkMessage,
   type InterpretedMessage,
-  type LarkCommand,
   type PromptSegment,
 } from "../interpreter/lark-interpreter.js";
 import {
@@ -156,6 +160,10 @@ function runtimeKey(chatId: string, threadId: string | null): string {
  */
 class BindError extends Error {
   override readonly name = "BindError";
+}
+
+class TopicRestartUnavailableError extends Error {
+  override readonly name = "TopicRestartUnavailableError";
 }
 
 const MAX_USER_FACING_ERROR_CHARS = 1_000;
@@ -586,6 +594,8 @@ export class LarkBridge {
   private readonly acknowledgement: AcknowledgementPort;
 
   private readonly chats = new Map<string, ChatRuntime>();
+  /** One immediate reconnect/resume operation per Topic; prompt acquisition waits on it. */
+  private readonly topicRestarts = new Map<string, Promise<ChatRuntime>>();
   private readonly pendingAgentSwitches = new Map<string, PendingAgentSwitch>();
   /**
    * Serializes each chat/thread's `configureSession`/`sendMessage`
@@ -1769,7 +1779,7 @@ export class LarkBridge {
 
   /** Backward-compatible private entrypoint used by integration tests. */
   private async handleCommand(
-    command: LarkCommand,
+    command: SlashCommandInvocation,
     chatId: string,
     threadId: string | null,
     messageId: string,
@@ -1779,110 +1789,166 @@ export class LarkBridge {
   }
 
   private async dispatchSlashCommand(
-    command: LarkCommand,
+    command: SlashCommandInvocation,
     chatId: string,
     threadId: string | null,
     messageId: string,
     context: CommandContext,
   ): Promise<void> {
-    switch (command.kind) {
-      case "cancel": {
-        this.logger.info({ chatId, threadId }, "cancel command");
-        const runtime = this.chats.get(runtimeKey(chatId, threadId));
-        try {
-          await runtime?.cancel();
-        } catch (err) {
-          this.logger.warn({ err, chatId, threadId }, "cancel command failed");
-        }
-        await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.cancel);
-        return;
-      }
-      case "new": {
-        // Thread-scoped ("Reset Thread"): only this topic's runtime + sessions
-        // are dropped; the chat's other topics keep running.
-        this.logger.info({ chatId, threadId }, "new session command");
-        await this.teardownThread(chatId, threadId);
-        await this.clearThreadSessions(chatId, threadId);
-        await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.new);
-        return;
-      }
-      case "help":
-        await this.presenter.replyCommandResultCard(messageId, buildHelpNotice());
-        return;
-      case "capabilities":
-        await this.handleCapabilitiesCommand(command.agent, chatId, threadId, messageId);
-        return;
-      case "bind":
-        await this.handleBind(command.cwd, command.agent, chatId, messageId);
-        return;
-      case "bind-usage":
-        await this.presenter.replyCommandResultCard(messageId, BIND_USAGE_NOTICE);
-        return;
-      case "unbind":
-        await this.handleUnbind(chatId, messageId);
-        return;
-      case "where":
-        await this.handleWhere(chatId, messageId);
-        return;
-      case "set-agent":
-        await this.handleSetAgentCommand(command.agent, chatId, threadId, messageId, context);
-        return;
-      case "list-agents":
-        await this.presenter.replyCommandResultCard(
+    await slashCommandController.dispatch(
+      command,
+      this.createSlashCommandContext(chatId, threadId, messageId, context),
+    );
+  }
+
+  private createSlashCommandContext(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+    context: CommandContext,
+  ): SlashCommandContext {
+    return {
+      cancel: () => this.handleCancelCommand(chatId, threadId, messageId),
+      newSession: () => this.handleNewSessionCommand(chatId, threadId, messageId),
+      restart: () => this.handleRestartCommand(chatId, threadId, messageId),
+      help: () => this.presenter.replyCommandResultCard(messageId, buildHelpNotice()),
+      capabilities: (agent) => this.handleCapabilitiesCommand(agent, chatId, threadId, messageId),
+      bind: (cwd, agent) => this.handleBind(cwd, agent, chatId, messageId),
+      bindUsage: () => this.presenter.replyCommandResultCard(messageId, BIND_USAGE_NOTICE),
+      unbind: () => this.handleUnbind(chatId, messageId),
+      where: () => this.handleWhere(chatId, messageId),
+      setAgent: (agent) => this.handleSetAgentCommand(agent, chatId, threadId, messageId, context),
+      listAgents: () =>
+        this.presenter.replyCommandResultCard(
           messageId,
           buildAgentListNotice(this.availableAgents),
-        );
-        return;
-      case "set-model":
-        await this.handleSetControlsCommand(
-          modelCommandToPatch(command.model),
+        ),
+      setModel: (model) =>
+        this.handleSetControlsCommand(
+          modelCommandToPatch(model),
           chatId,
           threadId,
           messageId,
           context,
-        );
-        return;
-      case "list-models":
-        await this.handleListModelsCommand(chatId, threadId, messageId);
-        return;
-      case "set-mode":
-        await this.handleSetControlsCommand(
-          { modeId: command.mode },
+        ),
+      listModels: () => this.handleListModelsCommand(chatId, threadId, messageId),
+      setMode: (mode) =>
+        this.handleSetControlsCommand({ modeId: mode }, chatId, threadId, messageId, context),
+      listModes: () => this.handleListModesCommand(chatId, threadId, messageId),
+      setPermission: (permissionMode) =>
+        this.handleSetControlsCommand(
+          { bridgePermissionMode: permissionMode },
           chatId,
           threadId,
           messageId,
           context,
-        );
-        return;
-      case "list-modes":
-        await this.handleListModesCommand(chatId, threadId, messageId);
-        return;
-      case "set-permission":
-        await this.handleSetControlsCommand(
-          { bridgePermissionMode: command.permissionMode },
-          chatId,
-          threadId,
-          messageId,
-          context,
-        );
-        return;
-      case "list-permissions":
-        await this.presenter.replyCommandResultCard(
+        ),
+      listPermissions: () =>
+        this.presenter.replyCommandResultCard(
           messageId,
           buildPermissionListNotice(this.display.permissionMode),
-        );
-        return;
-      case "profile":
-        await this.handleProfileCommand(chatId, threadId, messageId);
-        return;
-      case "profile-command-usage":
-        await this.presenter.replyCommandResultCard(
-          messageId,
-          buildProfileCommandUsageNotice(command.command),
-        );
-        return;
-      default:
-        return assertNever(command);
+        ),
+      profile: () => this.handleProfileCommand(chatId, threadId, messageId),
+    };
+  }
+
+  private async handleCancelCommand(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    this.logger.info({ chatId, threadId }, "cancel command");
+    const runtime = this.chats.get(runtimeKey(chatId, threadId));
+    try {
+      await runtime?.cancel();
+    } catch (err) {
+      this.logger.warn({ err, chatId, threadId }, "cancel command failed");
+    }
+    await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.cancel);
+  }
+
+  private async handleNewSessionCommand(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    this.logger.info({ chatId, threadId }, "new session command");
+    await this.teardownThread(chatId, threadId);
+    await this.clearThreadSessions(chatId, threadId);
+    await this.presenter.replyNoticeCard(messageId, COMMAND_NOTICES.new);
+  }
+
+  private async handleRestartCommand(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<void> {
+    const key = runtimeKey(chatId, threadId);
+    const existing = this.topicRestarts.get(key);
+    const operation = existing ?? this.restartTopic(chatId, threadId, messageId);
+    if (existing === undefined) this.topicRestarts.set(key, operation);
+
+    try {
+      await operation;
+      await this.presenter.replyNoticeCard(messageId, {
+        title: "✅ Agent 已重启",
+        body: "当前 topic 已恢复到原 Session，可以继续之前的上下文。",
+        template: "green",
+      });
+    } catch (err) {
+      this.logger.warn({ err, chatId, threadId }, "topic Agent restart failed");
+      const unavailable = err instanceof TopicRestartUnavailableError;
+      await this.presenter.replyNoticeCard(messageId, {
+        title: unavailable ? "ℹ️ 没有可重启的 Session" : "⚠️ Agent 重启失败",
+        body: unavailable
+          ? err.message
+          : `原 Session 已保留，没有创建新 Session。\n\n原因：${formatBootstrapError(err)}`,
+        template: unavailable ? "orange" : "red",
+      });
+    } finally {
+      if (this.topicRestarts.get(key) === operation) this.topicRestarts.delete(key);
+    }
+  }
+
+  /**
+   * Replace only one Topic's Runtime and strictly restore its durable Session.
+   *
+   * @throws {TopicRestartUnavailableError} when the Topic has no real Session.
+   * @throws when Agent cancellation, startup, or strict Session resume fails.
+   */
+  private async restartTopic(
+    chatId: string,
+    threadId: string | null,
+    messageId: string,
+  ): Promise<ChatRuntime> {
+    const record = await this.sessionStore.getLatest(chatId, threadId);
+    if (record === null || record.profileOnly === true) {
+      throw new TopicRestartUnavailableError("当前 topic 还没有可恢复的 Agent Session。");
+    }
+
+    const key = runtimeKey(chatId, threadId);
+    const previous = this.chats.get(key);
+    if (previous !== undefined) {
+      await previous.cancel();
+      await previous.supersede();
+      if (this.chats.get(key) === previous) this.chats.delete(key);
+    }
+
+    const binding = sessionRecordToEffectiveBinding(record, true, true);
+    const runtime = await this.acquireRuntime(
+      chatId,
+      threadId,
+      binding,
+      "pending-observed-under-lock",
+      true,
+    );
+    try {
+      await runtime.startStrictResume(record.sessionId, messageId);
+      return runtime;
+    } catch (err) {
+      if (this.chats.get(key) === runtime) this.chats.delete(key);
+      await runtime.shutdown(null);
+      throw err;
     }
   }
 
@@ -2448,7 +2514,28 @@ export class LarkBridge {
     }
 
     const isGroup = event.message.chat_type === CHAT_TYPE_GROUP;
-    const runtime = await this.acquireRuntime(chatId, threadId, binding);
+    const key = runtimeKey(chatId, threadId);
+    const pendingRestart = this.topicRestarts.get(key);
+    let runtime: ChatRuntime;
+    if (pendingRestart === undefined) {
+      runtime = await this.acquireRuntime(chatId, threadId, binding);
+    } else {
+      try {
+        runtime = await pendingRestart;
+      } catch (err) {
+        admit();
+        this.logger.warn(
+          { err, chatId, threadId },
+          "message rejected because topic Agent restart failed",
+        );
+        await this.presenter.replyNoticeCard(messageId, {
+          title: "⚠️ 消息未发送",
+          body: "当前 topic 的 Agent 重启恢复失败，这条消息没有排队。原 Session 仍保留，请先重试 /restart。",
+          template: "red",
+        });
+        return;
+      }
+    }
     if (this.lifecycleState.kind !== "running") {
       await this.rejectQuiescingIngress(messageId);
       return;
@@ -2673,11 +2760,16 @@ export class LarkBridge {
     threadId: string | null,
     binding: EffectiveBinding,
     recovery: RuntimeAcquisitionRecovery = "recover-on-acquire",
+    restartOwner = false,
   ): Promise<ChatRuntime> {
     if (this.lifecycleState.kind !== "running") {
       throw new Error("bridge lifecycle is quiescing; runtime acquisition rejected");
     }
     const key = runtimeKey(chatId, threadId);
+    if (!restartOwner) {
+      const restart = this.topicRestarts.get(key);
+      if (restart !== undefined) return restart;
+    }
     const existing = this.chats.get(key);
     if (existing) return existing;
 

@@ -25,7 +25,10 @@ import {
   type AgentResolver,
   type ResolvedAgentInvocation,
 } from "../src/index.js";
-import type { LarkCommand } from "../src/interpreter/lark-interpreter.js";
+import {
+  slashCommandController,
+  type SlashCommandInvocation,
+} from "../src/interpreter/commands.js";
 
 /** Records every notice card the bridge tries to render. */
 class RecordingPresenter implements LarkPresenter {
@@ -62,7 +65,7 @@ class RecordingPresenter implements LarkPresenter {
 /** Minimal view of the private methods this test drives. */
 interface BridgeInternals {
   handleCommand(
-    command: LarkCommand,
+    command: SlashCommandInvocation,
     chatId: string,
     threadId: string | null,
     messageId: string,
@@ -72,6 +75,17 @@ interface BridgeInternals {
 
 function asInternals(bridge: LarkBridge): BridgeInternals {
   return bridge as unknown as BridgeInternals;
+}
+
+async function dispatchCommand(
+  bridge: LarkBridge,
+  input: string,
+  chatId: string,
+  messageId: string,
+): Promise<void> {
+  const invocation = slashCommandController.resolve(input);
+  if (invocation === null) throw new Error(`expected slash command: ${input}`);
+  await asInternals(bridge).handleCommand(invocation, chatId, null, messageId);
 }
 
 const resolver: AgentResolver = (selection: string): ResolvedAgentInvocation => {
@@ -142,8 +156,8 @@ describe("per-chat repo routing (integration)", () => {
     });
     const b = asInternals(bridge);
 
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: null }, "oc_A", null, "om_1");
-    await b.handleCommand({ kind: "bind", cwd: repoB, agent: null }, "oc_B", null, "om_2");
+    await dispatchCommand(bridge, `/bind ${repoA}`, "oc_A", "om_1");
+    await dispatchCommand(bridge, `/bind ${repoB}`, "oc_B", "om_2");
 
     expect(await bindingStore.get("oc_A")).toMatchObject({ cwd: repoA });
     expect(await bindingStore.get("oc_B")).toMatchObject({ cwd: repoB });
@@ -169,12 +183,7 @@ describe("per-chat repo routing (integration)", () => {
 
   it("persists bindings across a bridge/process restart", async () => {
     bridge = makeBridge();
-    await asInternals(bridge).handleCommand(
-      { kind: "bind", cwd: repoA, agent: null },
-      "oc_A",
-      null,
-      "om_1",
-    );
+    await dispatchCommand(bridge, `/bind ${repoA}`, "oc_A", "om_1");
     await bindingStore.close();
 
     const store2 = new SettingsBindingStore(settingsPath);
@@ -187,24 +196,14 @@ describe("per-chat repo routing (integration)", () => {
 
   it("rejects /bind to a non-existent directory (no binding written)", async () => {
     bridge = makeBridge();
-    await asInternals(bridge).handleCommand(
-      { kind: "bind", cwd: path.join(repoA, "does-not-exist"), agent: null },
-      "oc_A",
-      null,
-      "om_1",
-    );
+    await dispatchCommand(bridge, `/bind ${path.join(repoA, "does-not-exist")}`, "oc_A", "om_1");
     expect(await bindingStore.get("oc_A")).toBeNull();
     expect(presenter.notices.some((n) => n.title === "⚠️ 绑定失败")).toBe(true);
   });
 
   it("rejects /bind agent arguments because Agent belongs to session profile", async () => {
     bridge = makeBridge();
-    await asInternals(bridge).handleCommand(
-      { kind: "bind", cwd: repoA, agent: "codex" },
-      "oc_A",
-      null,
-      "om_1",
-    );
+    await dispatchCommand(bridge, `/bind ${repoA} codex`, "oc_A", "om_1");
     expect(await bindingStore.get("oc_A")).toBeNull();
     const notice = presenter.notices.at(-1);
     expect(notice).toMatchObject({ title: "⚠️ 绑定失败", template: "red" });
@@ -227,19 +226,17 @@ describe("per-chat repo routing (integration)", () => {
 
   it("/unbind removes the binding", async () => {
     bridge = makeBridge();
-    const b = asInternals(bridge);
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: null }, "oc_A", null, "om_1");
+    await dispatchCommand(bridge, `/bind ${repoA}`, "oc_A", "om_1");
     expect(await bindingStore.get("oc_A")).not.toBeNull();
 
-    await b.handleCommand({ kind: "unbind" }, "oc_A", null, "om_2");
+    await dispatchCommand(bridge, "/unbind", "oc_A", "om_2");
     expect(await bindingStore.get("oc_A")).toBeNull();
   });
 
   it("rebinding a chat overwrites only its repo", async () => {
     bridge = makeBridge();
-    const b = asInternals(bridge);
-    await b.handleCommand({ kind: "bind", cwd: repoA, agent: null }, "oc_A", null, "om_1");
-    await b.handleCommand({ kind: "bind", cwd: repoB, agent: null }, "oc_A", null, "om_2");
+    await dispatchCommand(bridge, `/bind ${repoA}`, "oc_A", "om_1");
+    await dispatchCommand(bridge, `/bind ${repoB}`, "oc_A", "om_2");
 
     expect(await bindingStore.get("oc_A")).toMatchObject({ cwd: repoB });
     expect((await bindingStore.list()).length).toBe(1);

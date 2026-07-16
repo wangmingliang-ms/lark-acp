@@ -191,6 +191,26 @@ export class AgentDisconnectedError extends Error {
   }
 }
 
+export class AgentSessionResumeUnsupportedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Agent does not support resuming session ${sessionId}`);
+    this.name = "AgentSessionResumeUnsupportedError";
+    this.sessionId = sessionId;
+  }
+}
+
+export class AgentSessionResumeError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string, cause: unknown) {
+    super(`Failed to resume Agent session ${sessionId}`, { cause });
+    this.name = "AgentSessionResumeError";
+    this.sessionId = sessionId;
+  }
+}
+
 /**
  * Detect an ACP "authentication required" rejection. codex-acp returns
  * JSON-RPC error code -32000 with message "Authentication required"; other
@@ -452,6 +472,79 @@ export async function spawnAndResumeAgent(
     },
     resumed: false,
   };
+}
+
+/**
+ * Spawn an Agent process and resume exactly `previousSessionId`.
+ *
+ * Unlike {@link spawnAndResumeAgent}, this operation never falls back to
+ * `newSession`, because callers use it when preserving session identity is an
+ * explicit invariant.
+ *
+ * @throws {AgentSessionResumeUnsupportedError} when the Agent supports neither
+ * resume nor load.
+ * @throws {AgentSessionResumeError} when the Agent rejects or fails the resume.
+ * @throws {Error} when spawning or initializing the Agent fails.
+ */
+export async function spawnAndStrictlyResumeAgent(
+  opts: SpawnAgentOptions,
+  previousSessionId: string,
+): Promise<AgentProcess> {
+  const { proc, connection, initResult, getRecentStderr } = await spawnAndInit(opts);
+  const agentCaps = initResult.agentCapabilities;
+  const capabilities = (agentCaps ?? {}) as Record<string, unknown>;
+  const supportsResume = Boolean(agentCaps?.sessionCapabilities?.resume);
+  const supportsLoad = Boolean(agentCaps?.loadSession);
+
+  if (!supportsResume && !supportsLoad) {
+    killAgent(proc);
+    throw new AgentSessionResumeUnsupportedError(previousSessionId);
+  }
+
+  try {
+    let sessionCapabilities: SessionRuntimeCapabilities;
+    if (supportsResume) {
+      const resumeResult = await withAgentRequest(
+        connection.unstable_resumeSession({
+          sessionId: previousSessionId,
+          cwd: opts.cwd,
+          mcpServers: [],
+        }),
+        connection,
+        DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+        `agent resumeSession (${formatAgentCommand(opts.command, opts.args)})`,
+      );
+      sessionCapabilities = capabilitiesFromSessionResponse(resumeResult);
+    } else {
+      const loadResult = await withAgentRequest(
+        connection.loadSession({
+          sessionId: previousSessionId,
+          cwd: opts.cwd,
+          mcpServers: [],
+        }),
+        connection,
+        DEFAULT_AGENT_SESSION_TIMEOUT_MS,
+        `agent loadSession (${formatAgentCommand(opts.command, opts.args)})`,
+      );
+      sessionCapabilities = capabilitiesFromSessionResponse(loadResult);
+    }
+
+    opts.logger.info(
+      { sessionId: previousSessionId, mode: supportsResume ? "resume" : "load" },
+      "session strictly resumed",
+    );
+    return {
+      process: proc,
+      connection,
+      sessionId: previousSessionId,
+      capabilities,
+      sessionCapabilities,
+      getRecentStderr,
+    };
+  } catch (err) {
+    killAgent(proc);
+    throw new AgentSessionResumeError(previousSessionId, err);
+  }
 }
 
 async function spawnAndInit(opts: SpawnAgentOptions): Promise<SpawnInternal> {

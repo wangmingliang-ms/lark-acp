@@ -12,23 +12,7 @@
  */
 
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import {
-  AGENT_COMMAND_TOKEN,
-  BIND_COMMAND_TOKEN,
-  CANCEL_COMMAND_TOKENS,
-  CAPABILITIES_COMMAND_TOKEN,
-  HELP_COMMAND_TOKENS,
-  MODE_COMMAND_TOKEN,
-  MODEL_COMMAND_TOKEN,
-  NEW_SESSION_COMMAND_TOKENS,
-  PERMISSION_COMMAND_TOKEN,
-  PROFILE_COMMAND_TOKEN,
-  PROFILE_PERMISSION_MODES,
-  UNBIND_COMMAND_TOKENS,
-  WHERE_COMMAND_TOKENS,
-  type ProfileCommandName,
-  type ProfilePermissionMode,
-} from "./commands.js";
+import { slashCommandController, type SlashCommandInvocation } from "./commands.js";
 
 type LarkRawMention = NonNullable<Lark.RawMessageEvent["message"]["mentions"]>[number];
 
@@ -179,26 +163,6 @@ export type PromptSegment =
  * Filesystem validation, `~` expansion and agent-preset resolution are the
  * bridge's job (they are effects).
  */
-export type LarkCommand =
-  | { readonly kind: "cancel" }
-  | { readonly kind: "new" }
-  | { readonly kind: "help" }
-  | { readonly kind: "capabilities"; readonly agent: string | null }
-  | { readonly kind: "bind"; readonly cwd: string; readonly agent: string | null }
-  | { readonly kind: "bind-usage" }
-  | { readonly kind: "unbind" }
-  | { readonly kind: "where" }
-  | { readonly kind: "set-agent"; readonly agent: string }
-  | { readonly kind: "list-agents" }
-  | { readonly kind: "set-model"; readonly model: string | "auto" }
-  | { readonly kind: "list-models" }
-  | { readonly kind: "set-mode"; readonly mode: string }
-  | { readonly kind: "list-modes" }
-  | { readonly kind: "set-permission"; readonly permissionMode: ProfilePermissionMode }
-  | { readonly kind: "list-permissions" }
-  | { readonly kind: "profile" }
-  | { readonly kind: "profile-command-usage"; readonly command: ProfileCommandName };
-
 /**
  * Outcome of interpreting a Lark inbound message.
  *
@@ -210,7 +174,7 @@ export type LarkCommand =
  */
 export type InterpretedMessage =
   | { readonly kind: "empty" }
-  | { readonly kind: "command"; readonly command: LarkCommand }
+  | { readonly kind: "command"; readonly command: SlashCommandInvocation }
   | { readonly kind: "prompt"; readonly segments: PromptSegment[] };
 
 export interface InterpretOptions {
@@ -243,7 +207,7 @@ export function interpretLarkMessage(
   if (message.message_type === "text") {
     const text = extractTextContent(message.content, message.mentions, opts.botOpenId);
     if (!text) return { kind: "empty" };
-    const command = detectCommand(text);
+    const command = slashCommandController.resolve(text);
     if (command) return { kind: "command", command };
     return { kind: "prompt", segments: [{ kind: "text", text }] };
   }
@@ -303,136 +267,6 @@ function normalizeSegments(segments: PromptSegment[]): PromptSegment[] {
     out.push(segment);
   }
   return out;
-}
-
-function detectCommand(text: string): LarkCommand | null {
-  if (tokenMatches(CANCEL_COMMAND_TOKENS, text)) return { kind: "cancel" };
-  if (tokenMatches(NEW_SESSION_COMMAND_TOKENS, text)) return { kind: "new" };
-  if (tokenMatches(HELP_COMMAND_TOKENS, text)) return { kind: "help" };
-  const capabilitiesCommand = detectCapabilitiesCommand(text);
-  if (capabilitiesCommand) return capabilitiesCommand;
-  if (tokenMatches(UNBIND_COMMAND_TOKENS, text)) return { kind: "unbind" };
-  if (tokenMatches(WHERE_COMMAND_TOKENS, text)) return { kind: "where" };
-  const profileCommand = detectProfileCommand(text);
-  if (profileCommand) return profileCommand;
-  return detectBindCommand(text);
-}
-
-function detectCapabilitiesCommand(text: string): LarkCommand | null {
-  const rest = stripLeadingToken(text, CAPABILITIES_COMMAND_TOKEN);
-  if (rest === null) return null;
-  if (rest.length === 0) return { kind: "capabilities", agent: null };
-  if (/\s/.test(rest)) return null;
-  return { kind: "capabilities", agent: rest };
-}
-
-function detectProfileCommand(text: string): LarkCommand | null {
-  const agent = detectSingleArgCommand(text, AGENT_COMMAND_TOKEN, "agent");
-  if (agent) {
-    if (agent.kind === "usage") return { kind: "list-agents" };
-    return { kind: "set-agent", agent: agent.value };
-  }
-
-  const model = detectSingleArgCommand(text, MODEL_COMMAND_TOKEN, "model");
-  if (model) {
-    if (model.kind === "usage") return { kind: "list-models" };
-    return {
-      kind: "set-model",
-      model: model.value.toLowerCase() === "auto" ? "auto" : model.value,
-    };
-  }
-
-  const mode = detectSingleArgCommand(text, MODE_COMMAND_TOKEN, "mode");
-  if (mode) {
-    if (mode.kind === "usage") return { kind: "list-modes" };
-    return { kind: "set-mode", mode: mode.value };
-  }
-
-  const permission = detectSingleArgCommand(text, PERMISSION_COMMAND_TOKEN, "permission");
-  if (permission) {
-    if (permission.kind === "usage") return { kind: "list-permissions" };
-    const permissionMode = normalizeProfilePermissionMode(permission.value);
-    if (permissionMode) return { kind: "set-permission", permissionMode };
-    return null;
-  }
-
-  const profileRest = stripLeadingToken(text, PROFILE_COMMAND_TOKEN);
-  if (profileRest === "") return { kind: "profile" };
-  return null;
-}
-
-type SingleArgCommandResult =
-  | { readonly kind: "arg"; readonly value: string }
-  | {
-      readonly kind: "usage";
-      readonly command: {
-        readonly kind: "profile-command-usage";
-        readonly command: ProfileCommandName;
-      };
-    };
-
-function detectSingleArgCommand(
-  text: string,
-  token: string,
-  command: ProfileCommandName,
-): SingleArgCommandResult | null {
-  const rest = stripLeadingToken(text, token);
-  if (rest === null) return null;
-  if (rest.length === 0)
-    return { kind: "usage", command: { kind: "profile-command-usage", command } };
-  if (/\s/.test(rest)) return null;
-  return { kind: "arg", value: rest };
-}
-
-function normalizeProfilePermissionMode(value: string): ProfilePermissionMode | null {
-  return (
-    PROFILE_PERMISSION_MODES.find((mode) => mode.toLowerCase() === value.toLowerCase()) ?? null
-  );
-}
-
-function tokenMatches(tokens: readonly string[], value: string): boolean {
-  return tokens.some((token) => token.toLowerCase() === value.toLowerCase());
-}
-
-/**
- * Parse a `/bind [path] [agent]` message. Unlike the other commands, `/bind`
- * takes positional arguments, so it matches on the leading token rather than
- * the whole message.
- *
- * - `/bind` (no path)            → `bind-usage` (bridge replies with help)
- * - `/bind <path>`               → `bind` with `agent: null` (bridge picks default)
- * - `/bind <path> <agent...>`    → `bind` with the rest joined as the agent
- *
- * The agent tail is kept as a single string so raw commands with their own
- * flags survive (e.g. `/bind ~/proj node ./my-acp.js --port 9000`). Path
- * expansion / validation happens in the bridge, not here.
- */
-function detectBindCommand(text: string): LarkCommand | null {
-  const rest = stripLeadingToken(text, BIND_COMMAND_TOKEN);
-  if (rest === null) return null;
-  if (rest.length === 0) return { kind: "bind-usage" };
-
-  const firstSpace = rest.search(/\s/);
-  if (firstSpace < 0) return { kind: "bind", cwd: rest, agent: null };
-
-  const cwd = rest.slice(0, firstSpace);
-  const agent = rest.slice(firstSpace + 1).trim();
-  return { kind: "bind", cwd, agent: agent.length > 0 ? agent : null };
-}
-
-/**
- * If `text` is exactly `token` or starts with `token` followed by
- * whitespace, return the trimmed remainder (possibly empty). Otherwise
- * `null`. Guards against `/bindfoo` matching `/bind`.
- */
-function stripLeadingToken(text: string, token: string): string | null {
-  const textLower = text.toLowerCase();
-  const tokenLower = token.toLowerCase();
-  if (textLower === tokenLower) return "";
-  if (!textLower.startsWith(tokenLower)) return null;
-  const next = text.charAt(token.length);
-  if (next.trim().length !== 0) return null; // e.g. "/bindx" — not our command
-  return text.slice(token.length).trim();
 }
 
 // ---- Private parsers ----
