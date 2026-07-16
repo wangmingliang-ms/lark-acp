@@ -16,7 +16,11 @@ export function conversationEntryHasLeadingDivider(
   index: number,
 ): boolean {
   if (index === 0) return false;
-  return !(entries[index]?.kind === "tool" && entries[index - 1]?.kind === "tool");
+  const current = entries[index];
+  const previous = entries[index - 1];
+  if (current === undefined || previous === undefined) return false;
+  if (current.kind === "thought" || previous.kind === "thought") return false;
+  return !(current.kind === "tool" && previous.kind === "tool");
 }
 
 export function conversationTimelineElementCount(

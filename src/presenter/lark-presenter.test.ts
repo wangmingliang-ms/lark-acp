@@ -152,7 +152,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[0]?.config?.summary?.content).not.toContain("tool:");
   });
 
-  it("groups consecutive Tool Calls without hiding visible Thought boundaries", async () => {
+  it("groups consecutive Tool Calls and bordered Thoughts without dividers", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -190,9 +190,7 @@ describe("LarkCardPresenter card summary", () => {
     expect(cards[0]?.body?.elements?.map((element) => element.tag)).toEqual([
       "markdown",
       "markdown",
-      "hr",
       "collapsible_panel",
-      "hr",
       "markdown",
     ]);
   });

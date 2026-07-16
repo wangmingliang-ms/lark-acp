@@ -31,7 +31,7 @@ describe("card text byte budget", () => {
     ).toBe(24);
   });
 
-  it("groups only consecutive visible tool entries", () => {
+  it("groups consecutive tools and bordered thoughts without removing text boundaries", () => {
     expect(
       conversationTimelineElementCount([
         { kind: "tool" },
@@ -39,7 +39,8 @@ describe("card text byte budget", () => {
         { kind: "thought" },
         { kind: "tool" },
       ]),
-    ).toBe(6);
+    ).toBe(4);
+    expect(conversationTimelineElementCount([{ kind: "text" }, { kind: "tool" }])).toBe(3);
   });
 
   it("measures all card text with UTF-8 bytes", () => {
