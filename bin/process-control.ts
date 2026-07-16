@@ -284,6 +284,8 @@ export interface LaunchDescriptor {
 export interface CodeRevision {
   readonly commit: string;
   readonly message: string;
+  /** ISO-8601 Git committer timestamp. */
+  readonly time: string;
 }
 
 /**
@@ -380,8 +382,16 @@ export function runNpm(args: readonly string[], cwd: string): void {
 export function readCodeRevision(cwd: string): CodeRevision | undefined {
   const commit = runGitText(cwd, ["rev-parse", "--short=12", "HEAD"]);
   const message = runGitText(cwd, ["log", "-1", "--pretty=%s"]);
-  if (commit === undefined || message === undefined) return undefined;
-  return { commit, message };
+  const time = runGitText(cwd, ["log", "-1", "--pretty=%cI"]);
+  if (
+    commit === undefined ||
+    message === undefined ||
+    time === undefined ||
+    Number.isNaN(Date.parse(time))
+  ) {
+    return undefined;
+  }
+  return { commit, message, time };
 }
 
 /**

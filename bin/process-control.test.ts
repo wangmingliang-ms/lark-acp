@@ -161,6 +161,7 @@ describe("readCodeRevision", () => {
     expect(readCodeRevision(process.cwd())).toMatchObject({
       commit: expect.stringMatching(/^[0-9a-f]{7,12}$/),
       message: expect.any(String),
+      time: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     });
   });
 

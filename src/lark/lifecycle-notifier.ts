@@ -1,11 +1,15 @@
 import process from "node:process";
 import type { PermissionMode } from "../acp/humming-client.js";
 import type { LarkLogger } from "../logger/logger.js";
+import { buildSessionProfileFooter } from "../presenter/profile-footer.js";
 import type { LarkHttpClient } from "./lark-http.js";
 
 const CARD_SCHEMA_V2 = "2.0";
 const CARD_CONFIG_V2 = { width_mode: "fill", update_multi: true } as const;
 const DEFAULT_SEND_TIMEOUT_MS = 3_000;
+const DISPLAY_TIME_ZONE_OFFSET_HOURS = 8;
+const MILLISECONDS_PER_HOUR = 60 * 60 * 1_000;
+const DISPLAY_TIME_ZONE_LABEL = "UTC+8";
 
 export const LIFECYCLE_NOTICE_KINDS = [
   "started",
@@ -28,6 +32,7 @@ type LifecycleNoticeSpec = {
 export type LifecycleCodeRevision = {
   readonly commit: string;
   readonly message: string;
+  readonly time: string;
 };
 
 export type LifecycleDefaultProfile = {
@@ -111,11 +116,15 @@ export function buildLifecycleNoticeCard(
     spec.body,
     "",
     ...formatCodeRevision(kind, opts.codeRevision),
-    ...formatDefaultProfile(kind, opts.defaultProfile),
     "**Runtime**",
-    `• PID：${pid}`,
-    `• 时间：${formatLifecycleTime(now)}`,
+    `• PID: ${pid}`,
+    `• Time: ${formatLifecycleTime(now)}`,
   ].join("\n");
+  const elements: object[] = [{ tag: "markdown" as const, content: body }];
+  const profileFooter = buildDefaultProfileFooter(kind, opts.defaultProfile);
+  if (profileFooter !== null) {
+    elements.push({ tag: "hr" as const }, profileFooter);
+  }
 
   return {
     schema: CARD_SCHEMA_V2,
@@ -125,7 +134,7 @@ export function buildLifecycleNoticeCard(
       template: spec.template,
     },
     body: {
-      elements: [{ tag: "markdown" as const, content: body }],
+      elements,
     },
   };
 }
@@ -189,7 +198,18 @@ export async function sendLifecycleNotice(
 }
 
 function formatLifecycleTime(date: Date): string {
-  return date.toLocaleString("zh-CN", { hour12: false });
+  const shifted = new Date(date.getTime() + DISPLAY_TIME_ZONE_OFFSET_HOURS * MILLISECONDS_PER_HOUR);
+  const year = shifted.getUTCFullYear();
+  const month = padTimePart(shifted.getUTCMonth() + 1);
+  const day = padTimePart(shifted.getUTCDate());
+  const hour = padTimePart(shifted.getUTCHours());
+  const minute = padTimePart(shifted.getUTCMinutes());
+  const second = padTimePart(shifted.getUTCSeconds());
+  return `${year}-${month}-${day} ${hour}:${minute}:${second} ${DISPLAY_TIME_ZONE_LABEL}`;
+}
+
+function padTimePart(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 function formatCodeRevision(
@@ -200,25 +220,24 @@ function formatCodeRevision(
   const message = revision.message.trim();
   return [
     "**Code Revision**",
-    `• Commit：\`${revision.commit}\``,
-    ...(message.length > 0 ? [`• Message：${message}`] : []),
+    `• Commit: \`${revision.commit}\``,
+    ...(message.length > 0 ? [`• Message: ${message}`] : []),
+    `• Time: ${formatLifecycleTime(new Date(revision.time))}`,
     "",
   ];
 }
 
-function formatDefaultProfile(
+function buildDefaultProfileFooter(
   kind: LifecycleNoticeKind,
   profile: LifecycleDefaultProfile | undefined,
-): readonly string[] {
-  if ((kind !== "started" && kind !== "restarted") || profile === undefined) return [];
-  return [
-    "**Default Configuration（全局）**",
-    `• Agent：${profile.agent}`,
-    `• Model：${profile.model ?? ""}`,
-    `• Mode：${profile.mode ?? ""}`,
-    `• Permission Mode：${profile.permissionMode}`,
-    "",
-  ];
+): object | null {
+  if ((kind !== "started" && kind !== "restarted") || profile === undefined) return null;
+  return buildSessionProfileFooter({
+    agent: profile.agent,
+    mode: profile.mode ?? "",
+    model: profile.model ?? "",
+    permission: profile.permissionMode,
+  });
 }
 
 function dedupeChatIds(chatIds: readonly string[]): readonly string[] {

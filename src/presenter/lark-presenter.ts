@@ -4,6 +4,7 @@ import type { LarkHttpClient } from "../lark/lark-http.js";
 
 import type { ConversationCardView, ConversationTimelineEntry } from "./conversation-card-view.js";
 import { markdownToPost, splitMarkdown } from "./lark-markdown.js";
+import { buildSessionProfileFooter } from "./profile-footer.js";
 import {
   CARD_MARKDOWN_ROTATION_BYTE_LIMIT,
   conversationEntryHasLeadingDivider,
@@ -558,15 +559,7 @@ function semanticProfile(view: ConversationCardView): object | null {
     case "active":
     case "terminal":
       if (view.profile === null) return null;
-      return {
-        tag: "markdown",
-        content: `<font color=\"grey\">${[
-          `Agent: ${view.profile.agent}`,
-          `Mode: ${view.profile.mode}`,
-          `Model: ${view.profile.model}`,
-          `Permission: ${view.profile.permission}`,
-        ].join(" · ")}</font>`,
-      };
+      return buildSessionProfileFooter(view.profile);
     case "orphaned":
     case "archived":
     case "supplement":
