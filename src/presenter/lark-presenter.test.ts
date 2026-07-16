@@ -79,7 +79,7 @@ describe("LarkCardPresenter card summary", () => {
     await expect(
       presenter.sendConversationCard("message", {
         kind: "active",
-        header: "waiting",
+        header: "processing",
         entries: [{ kind: "text", text: "已有内容" }],
         ...base,
       }),
@@ -111,7 +111,7 @@ describe("LarkCardPresenter card summary", () => {
     }
   });
 
-  it("renders thinking as the current activity instead of exposing Thought text", async () => {
+  it("surfaces streamed Thought text as the thinking activity summary", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);
 
@@ -123,8 +123,97 @@ describe("LarkCardPresenter card summary", () => {
       route: { c: "chat", th: "thread" },
     });
 
-    expect(cards[0]?.config?.summary?.content).toBe("💭 Agent 正在思考");
-    expect(cards[0]?.config?.summary?.content).not.toContain("内部推理细节");
+    expect(cards[0]?.config?.summary?.content).toBe("💭 内部推理细节");
+  });
+
+  it("distinguishes waiting-on-user (待确认) from Agent processing (处理中)", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const base = { entries: [], profile: null, route: { c: "chat", th: "thread" } } as const;
+
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "waiting_user",
+      ...base,
+    });
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "processing",
+      ...base,
+    });
+
+    expect(cards[0]?.header?.title?.content).toBe("🙋 待确认");
+    expect(cards[0]?.config?.summary?.content).toBe("🙋 待确认");
+    // The "waiting on user" summary must never claim the Agent is busy.
+    expect(cards[0]?.config?.summary?.content).not.toContain("处理");
+    expect(cards[1]?.header?.title?.content).toBe("⚙️ 处理中");
+  });
+
+  it("surfaces the running tool title in the 处理中 placeholder summary", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+
+    await presenter.sendConversationCard("message", {
+      kind: "active",
+      header: "processing",
+      entries: [
+        {
+          kind: "tool",
+          toolCallId: "t1",
+          title: "Read config.ts",
+          toolKind: "tool",
+          status: "in_progress",
+        },
+      ],
+      profile: null,
+      route: { c: "chat", th: "thread" },
+    });
+
+    expect(cards[0]?.config?.summary?.content).toBe("⚙️ Read config.ts");
+  });
+
+  it("renders terminal headers with their redesigned icons and colours", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const cases: {
+      header: "complete" | "failed" | "cancelled" | "merged" | "superseded" | "abandoned";
+      content: string;
+      template: string;
+    }[] = [
+      { header: "complete", content: "🟢 已结束", template: "blue" },
+      { header: "failed", content: "❌ 出错", template: "red" },
+      { header: "cancelled", content: "🚫 已取消", template: "grey" },
+      { header: "merged", content: "🔗 已合并", template: "grey" },
+      { header: "superseded", content: "⏭️ 已取代", template: "grey" },
+      { header: "abandoned", content: "↩️ 未执行", template: "grey" },
+    ];
+    for (const { header } of cases) {
+      await presenter.sendConversationCard("message", {
+        kind: "terminal",
+        header,
+        entries: [{ kind: "text", text: "done" }],
+        profile: null,
+        body: "content",
+        route: { c: "chat", th: "thread" },
+      });
+    }
+    expect(cards.map((card) => card.header?.title?.content)).toEqual(cases.map((c) => c.content));
+    expect(cards.map((card) => card.header?.template)).toEqual(cases.map((c) => c.template));
+  });
+
+  it("renders the empty-complete terminal with the 空回复 jar icon", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    await presenter.sendConversationCard("message", {
+      kind: "terminal",
+      header: "complete",
+      entries: [],
+      profile: null,
+      body: "empty_complete",
+      route: { c: "chat", th: "thread" },
+    });
+    expect(cards[0]?.header?.title?.content).toBe("🫙 空回复");
+    expect(cards[0]?.header?.template).toBe("orange");
   });
 
   it("renders the current Tool Summary without a synthetic tool prefix", async () => {
@@ -148,7 +237,7 @@ describe("LarkCardPresenter card summary", () => {
       route: { c: "chat", th: "thread" },
     });
 
-    expect(cards[0]?.config?.summary?.content).toBe("🔄 Viewing AccountActions.java");
+    expect(cards[0]?.config?.summary?.content).toBe("⚙️ Viewing AccountActions.java");
     expect(cards[0]?.config?.summary?.content).not.toContain("tool:");
   });
 
@@ -207,8 +296,8 @@ describe("LarkCardPresenter card summary", () => {
         route: { c: "chat", th: "thread" },
       }),
     ).resolves.toBe("card_1");
-    expect(cards[0]?.header?.title?.content).toBe("📩 消息已收到");
-    expect(cards[0]?.body?.elements?.[0]?.content).toContain("已收到消息");
+    expect(cards[0]?.header?.title?.content).toBe("📩 已收到");
+    expect(cards[0]?.body?.elements?.[0]?.content).toContain("已收到");
     expect(JSON.stringify(cards[0])).not.toContain("前一任务仍在进行");
   });
 
@@ -345,7 +434,7 @@ describe("LarkCardPresenter semantic conversation cards", () => {
 
     expect(calls[0]?.opts).toEqual({ replyInThread: true });
     expect(cards[0]?.header).toEqual({
-      title: { tag: "plain_text", content: "✍️ 回复中..." },
+      title: { tag: "plain_text", content: "✍️ 回复中" },
       template: "blue",
     });
     expect(cards[0]?.config?.summary?.content).toBe("✍️ answer");
@@ -447,23 +536,23 @@ describe("LarkCardPresenter semantic conversation cards", () => {
     }
 
     expect(cards.map((card) => card.header?.title?.content)).toEqual([
-      "📩 消息已收到",
-      "⚡ 正在中断当前任务",
-      "🔄 准备中...",
+      "📩 已收到",
+      "⚡ 中断中",
+      "🔌 准备中",
       "对话片段",
-      "✍️ 回复中...",
+      "✍️ 回复中",
       undefined,
-      "✅ 已结束",
+      "🟢 已结束",
       "补充更新",
     ]);
     expect(cards.map((card) => card.config?.summary?.content)).toEqual([
-      "📩 Humming 已收到消息",
-      "⚡ 正在中断当前任务",
-      "🔄 正在启动或连接 Agent",
+      "📩 已收到",
+      "⚡ 中断中",
+      "🔌 准备中",
       "对话片段",
       "✍️ answer",
       "history",
-      "✅ 已结束",
+      "🟢 已结束",
       "extra detail",
     ]);
     const serialized = cards.map((card) => JSON.stringify(card));

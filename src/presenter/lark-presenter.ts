@@ -26,44 +26,50 @@ const HEADER_TEMPLATE_PERMISSION = "blue";
 const HEADER_TEMPLATE_EXPIRED = "grey";
 
 const STATUS_HEADER: Record<AgentStatus, { content: string; template: string }> = {
-  received: { content: "📩 消息已收到", template: "wathet" },
-  queued: { content: "⏳ 消息已排队", template: "wathet" },
-  interrupting: { content: "⚡ 正在中断当前任务", template: "blue" },
-  preparing: { content: "🔄 准备中...", template: "blue" },
-  thinking: { content: "💭 思考中...", template: "wathet" },
-  waiting: { content: "⏳ 等待中...", template: "wathet" },
-  calling_tool: { content: "🔄 处理中...", template: "blue" },
-  responding: { content: "✍️ 回复中...", template: "blue" },
+  received: { content: "📩 已收到", template: "wathet" },
+  queued: { content: "⏳ 排队中", template: "wathet" },
+  interrupting: { content: "⚡ 中断中", template: "blue" },
+  preparing: { content: "🔌 准备中", template: "blue" },
+  thinking: { content: "💭 思考中", template: "wathet" },
+  processing: { content: "⚙️ 处理中", template: "blue" },
+  waiting_user: { content: "🙋 待确认", template: "wathet" },
+  calling_tool: { content: "⚙️ 处理中", template: "blue" },
+  responding: { content: "✍️ 回复中", template: "blue" },
   sealed: { content: "对话片段", template: "wathet" },
-  complete: { content: "✅ 已结束", template: "blue" },
-  cancelled: { content: "⛔ 已取消", template: "grey" },
-  failed: { content: "⚠️ 出错", template: "red" },
+  complete: { content: "🟢 已结束", template: "blue" },
+  cancelled: { content: "🚫 已取消", template: "grey" },
+  failed: { content: "❌ 出错", template: "red" },
 };
 
 const STATUS_ICON: Record<AgentStatus, string> = {
   received: "📩",
   queued: "⏳",
   interrupting: "⚡",
-  preparing: "🔄",
+  preparing: "🔌",
   thinking: "💭",
-  waiting: "⏳",
-  calling_tool: "🔄",
+  processing: "⚙️",
+  waiting_user: "🙋",
+  calling_tool: "⚙️",
   responding: "✍️",
   sealed: "",
-  complete: "✅",
-  cancelled: "⛔",
-  failed: "⚠️",
+  complete: "🟢",
+  cancelled: "🚫",
+  failed: "❌",
 };
 
+// Summary detail fallback used only when no concrete content (tool title /
+// streamed text) is available. Kept to the bare status word — no "Agent"/
+// "Humming"/"正在..." filler.
 const STATUS_SUMMARY_DETAIL: Record<AgentStatus, string> = {
-  received: "Humming 已收到消息",
-  queued: "等待处理",
-  interrupting: "正在中断当前任务",
-  preparing: "正在启动或连接 Agent",
-  thinking: "Agent 正在思考",
-  waiting: "Agent 仍在处理",
-  calling_tool: "Agent 正在处理",
-  responding: "Agent 正在回复",
+  received: "已收到",
+  queued: "排队中",
+  interrupting: "中断中",
+  preparing: "准备中",
+  thinking: "思考中",
+  processing: "处理中",
+  waiting_user: "待确认",
+  calling_tool: "处理中",
+  responding: "回复中",
   sealed: "对话片段",
   complete: "已结束",
   cancelled: "已取消",
@@ -72,7 +78,7 @@ const STATUS_SUMMARY_DETAIL: Record<AgentStatus, string> = {
 
 const CONVERSATION_SUMMARY_CHAR_LIMIT = 80;
 
-const EMPTY_OUTPUT_HEADER = { content: "⚠️ 空回复", template: "orange" } as const;
+const EMPTY_OUTPUT_HEADER = { content: "🫙 空回复", template: "orange" } as const;
 const EMPTY_OUTPUT_BODY =
   "Agent 本轮结束了，但没有产生任何可显示内容。可能是 resumed session 空转、上下文过长导致输出被截断，或 agent 只返回了不可渲染的元数据。请重试；如果持续出现，建议新开 session 后继续。";
 
@@ -338,13 +344,34 @@ function currentActivityDetail(
   status: AgentStatus,
   entries: readonly SummaryEntry[],
 ): string | undefined {
-  if (status === "responding") {
-    const text = entries
-      .slice()
-      .reverse()
-      .find((entry) => entry.kind === "text");
-    return text?.kind === "text" ? text.text : undefined;
+  if (status === "responding") return latestEntryText(entries, "text");
+  if (status === "thinking") return latestEntryText(entries, "thought");
+  // "处理中" placeholder: surface whatever content is freshest (a running tool's
+  // title, or the last text/thought) so the summary says what it's doing.
+  if (status === "processing" || status === "calling_tool") {
+    return latestActivityContent(entries);
   }
+  return undefined;
+}
+
+function latestEntryText(
+  entries: readonly SummaryEntry[],
+  kind: "text" | "thought",
+): string | undefined {
+  const found = entries
+    .slice()
+    .reverse()
+    .find((entry) => entry.kind === kind);
+  return found?.kind === kind ? found.text : undefined;
+}
+
+function latestActivityContent(entries: readonly SummaryEntry[]): string | undefined {
+  const found = entries
+    .slice()
+    .reverse()
+    .find((entry) => entry.kind === "text" || entry.kind === "thought" || entry.kind === "tool");
+  if (found?.kind === "text" || found?.kind === "thought") return found.text;
+  if (found?.kind === "tool") return found.title;
   return undefined;
 }
 
@@ -381,13 +408,13 @@ function buildSemanticPermissionCard(view: PermissionCardView): object {
       }),
     );
   }
-  return buildV2Card("⏳ 待确认", HEADER_TEMPLATE_PERMISSION, elements, "⏳ 待确认");
+  return buildV2Card("🙋 待确认", HEADER_TEMPLATE_PERMISSION, elements, "🙋 待确认");
 }
 
 function emptyStateMessage(status: AgentStatus): string {
   switch (status) {
     case "received":
-      return "_Humming 已收到消息，正在处理…_";
+      return "_已收到消息，正在处理…_";
     case "queued":
       return "_前一任务仍在进行，这条消息已排入队列，正在等待处理…_";
     case "interrupting":
@@ -395,9 +422,11 @@ function emptyStateMessage(status: AgentStatus): string {
     case "preparing":
       return "_正在启动或连接 Agent，请稍候…_";
     case "thinking":
-      return "_消息已转发给 Agent，正在等待回复…_";
-    case "waiting":
-      return "_Agent 仍在处理，暂时没有新的可展示内容…_";
+      return "_Agent 正在思考…_";
+    case "processing":
+      return "_Agent 正在处理，暂时没有新的可展示内容…_";
+    case "waiting_user":
+      return "_等待你确认权限请求…_";
     case "calling_tool":
       return "_Agent 正在处理…_";
     case "responding":
@@ -486,11 +515,11 @@ function semanticTerminalHeader(
     case "interrupted":
       return { content: "⚡ 已中断", template: "grey" };
     case "merged":
-      return { content: "🔗 已合并到下一条消息", template: "grey" };
+      return { content: "🔗 已合并", template: "grey" };
     case "superseded":
-      return { content: "⏭️ 已被后续任务取代", template: "grey" };
+      return { content: "⏭️ 已取代", template: "grey" };
     case "abandoned":
-      return { content: "⚠️ 未执行", template: "grey" };
+      return { content: "↩️ 未执行", template: "grey" };
     default:
       return assertNeverTerminalHeader(header);
   }
@@ -737,7 +766,9 @@ function isConversationCardView(value: unknown): value is ConversationCardView {
           "cancelAction",
           "route",
         ]) &&
-        ["thinking", "waiting", "calling_tool", "responding"].includes(value.header as string) &&
+        ["thinking", "processing", "waiting_user", "calling_tool", "responding"].includes(
+          value.header as string,
+        ) &&
         (value.activityTitle === undefined || typeof value.activityTitle === "string") &&
         hasEntries(value) &&
         isProfile(value.profile) &&

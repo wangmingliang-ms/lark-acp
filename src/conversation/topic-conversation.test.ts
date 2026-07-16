@@ -137,7 +137,7 @@ describe("TopicConversation canonical lifecycle", () => {
     topic.finishToolActivity(a, "tool-1");
     expect(response(topic, a).state).toMatchObject({
       kind: "in_progress",
-      activity: { kind: "thinking" },
+      activity: { kind: "processing" },
     });
   });
 

@@ -58,7 +58,15 @@ export type TerminalTimelineEntry = ArchivedTimelineEntry;
 
 export type QueueHeader = "queued" | "interrupting";
 export type StartingHeader = "preparing";
-export type ActiveHeader = "thinking" | "waiting" | "calling_tool" | "responding";
+export type ActiveHeader =
+  /** Agent busy, no displayable content yet — "⚙️ 处理中". */
+  | "processing"
+  /** Real thought content is streaming — "💭 思考中". */
+  | "thinking"
+  | "calling_tool"
+  | "responding"
+  /** Waiting on the user to resolve a permission request — "🙋 待确认". */
+  | "waiting_user";
 export type OrphanHeader = "orphaned";
 export type TerminalHeader =
   | "complete"

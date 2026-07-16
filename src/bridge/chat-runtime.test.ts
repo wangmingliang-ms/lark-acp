@@ -789,13 +789,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
     resolveSpawn(fake.agent);
     await enqueue;
 
-    await vi.waitFor(() => expect(states.at(-1)?.status).toBe("thinking"), {
+    await vi.waitFor(() => expect(states.at(-1)?.status).toBe("processing"), {
       timeout: 1_000,
       interval: 20,
     });
     expect(states.map((state) => state.status)).toContain("received");
     expect(states.map((state) => state.status)).toContain("preparing");
-    expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
+    expect(states.at(-1)).toMatchObject({ status: "processing", cancellable: false });
 
     fake.resolvePrompt("end_turn");
     await vi.waitFor(() => expect(states.at(-1)?.status).toBe("complete"), {
@@ -1058,13 +1058,16 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       timeout: 1_000,
       interval: 20,
     });
-    // The initial "thinking" card render runs on the reconciler's own async
+    // The initial "processing" card render runs on the reconciler's own async
     // worker, independent of the prompt() call above — wait for it to land
     // before triggering the interrupt so the two are never racing.
-    await vi.waitFor(() => expect(states.some((state) => state.status === "thinking")).toBe(true), {
-      timeout: 1_000,
-      interval: 20,
-    });
+    await vi.waitFor(
+      () => expect(states.some((state) => state.status === "processing")).toBe(true),
+      {
+        timeout: 1_000,
+        interval: 20,
+      },
+    );
 
     await runtime.enqueue({
       prompt: [{ type: "text", text: "urgent follow-up" }],
@@ -1080,13 +1083,13 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
         interval: 20,
       },
     );
-    // The response transitions through "thinking" before the interrupt, and
-    // may transition back to "thinking" again afterwards while the actual
+    // The response transitions through "processing" before the interrupt, and
+    // may transition back to "processing" again afterwards while the actual
     // agent-side cancel is still in flight — assert relative order, not an
     // exact tail slice.
     const interruptingIndex = states.findIndex((state) => state.status === "interrupting");
     expect(interruptingIndex).toBeGreaterThan(-1);
-    expect(states.slice(0, interruptingIndex).map((state) => state.status)).toContain("thinking");
+    expect(states.slice(0, interruptingIndex).map((state) => state.status)).toContain("processing");
 
     fake.resolvePrompt("cancelled");
 
@@ -1098,7 +1101,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       { timeout: 1_000, interval: 20 },
     );
     expect(states.some((state) => state.status === "interrupted")).toBe(true);
-    expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
+    expect(states.at(-1)).toMatchObject({ status: "processing", cancellable: false });
   });
 
   it("interrupts the owner when a requested follow-up interrupt returns end_turn", async () => {
@@ -1169,7 +1172,7 @@ describe("ChatRuntime finalizes when the agent connection closes mid-prompt", ()
       { timeout: 1_000, interval: 20 },
     );
     expect(notices.some((notice) => notice.title === "⚠️ Agent 异常退出")).toBe(false);
-    expect(states.at(-1)).toMatchObject({ status: "thinking", cancellable: false });
+    expect(states.at(-1)).toMatchObject({ status: "processing", cancellable: false });
   });
 
   it("marks the queued message card terminal when the queued message is cancelled", async () => {

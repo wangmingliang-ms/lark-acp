@@ -62,7 +62,7 @@ describe("ConversationCardViewMapper", () => {
 
     expect(view(conversation, card1)).toMatchObject({
       kind: "active",
-      header: "thinking",
+      header: "processing",
       profile,
       cancelAction: { p: responseToken, s: card1, a: action1 },
     });
@@ -92,7 +92,7 @@ describe("ConversationCardViewMapper", () => {
 
     expect(view(conversation, card2)).toMatchObject({
       kind: "active",
-      header: "thinking",
+      header: "processing",
       entries: [],
     });
     expect(view(conversation, card2)).not.toHaveProperty("activityTitle");

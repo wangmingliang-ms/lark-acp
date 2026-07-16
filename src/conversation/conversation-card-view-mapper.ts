@@ -41,7 +41,7 @@ function header(
       return "preparing";
     case "active":
     case "awaiting_permission":
-      return state.phase === "awaiting_permission" ? "waiting" : state.activity.kind;
+      return state.phase === "awaiting_permission" ? "waiting_user" : state.activity.kind;
   }
 }
 

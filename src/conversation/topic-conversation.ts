@@ -21,8 +21,13 @@ export type ResponsePhase =
 export type TerminalOutcome = "complete" | "failed" | "interrupted" | "cancelled" | "merged";
 
 export type ResponseActivity =
+  /** Agent is busy but has produced no displayable content yet (just after a
+   *  prompt is sent, or between a finished tool call and the next output).
+   *  Distinct from {@link "thinking"}, which requires real thought content. */
+  | { readonly kind: "processing" }
+  /** Agent is streaming reasoning/thought content — only set when a non-empty
+   *  thought chunk actually arrives, so the "思考中" status never lies. */
   | { readonly kind: "thinking" }
-  | { readonly kind: "waiting" }
   | {
       readonly kind: "calling_tool";
       readonly toolCallId: string;
@@ -293,7 +298,7 @@ class ResponseLifecycle {
     phase: "received" | "interrupting",
   ) {
     this.profileValue = profile;
-    this.stateValue = { kind: "in_progress", phase, activity: { kind: "thinking" } };
+    this.stateValue = { kind: "in_progress", phase, activity: { kind: "processing" } };
     this.responseCards = [new ResponseCard(initialCardId, "initial")];
   }
 
@@ -336,7 +341,7 @@ class ResponseLifecycle {
 
   transition(phase: ResponsePhase): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response is absorbing");
-    this.stateValue = { kind: "in_progress", phase, activity: { kind: "thinking" } };
+    this.stateValue = { kind: "in_progress", phase, activity: { kind: "processing" } };
   }
 
   setProfile(profile: SessionCardMeta | null): void {
@@ -728,7 +733,7 @@ export class TopicConversation {
       state.activity.toolCallId !== toolCallId
     )
       return;
-    response.setActivity({ kind: "thinking" });
+    response.setActivity({ kind: "processing" });
     this.assertInvariants();
   }
 
