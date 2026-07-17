@@ -2572,18 +2572,17 @@ export class LarkBridge {
       return;
     }
 
-    const context = isGroup
-      ? `[上下文: 群聊 "${chatName}" (${chatId}) 中用户 ${userName} (${userId}) 的消息]`
-      : `[上下文: 用户 ${userName} (${userId}) 的私聊消息]`;
-
     // Keep the user's message as the first prompt block. Several ACP agents
     // derive their session title from the first user text; if humming prepends
-    // routing metadata, the title becomes "[上下文: 群聊 ...]" instead of the
+    // routing metadata, the title becomes "[scope=group ...]" instead of the
     // user's actual request. Durable operating instructions live in
     // ~/.humming/AGENTS.md and ~/.humming/CLAUDE.md, so append the lightweight
-    // metadata after the user content.
-    prompt.push({ type: "text", text: context });
-    prompt.push({ type: "text", text: renderInlineControlHint(chatId, threadId) });
+    // metadata (machine-readable) and the control hint after the user content.
+    prompt.push({
+      type: "text",
+      text: renderMessageMetadata({ isGroup, chatName, chatId, threadId, userName, userId }),
+    });
+    prompt.push({ type: "text", text: renderInlineControlHint() });
 
     const pending: PendingMessage = {
       prompt,
@@ -3386,8 +3385,45 @@ function pendingTargetAgentToSessionRecord(
   };
 }
 
-function renderInlineControlHint(chatId: string, threadId: string | null): string {
-  return `[humming: 若用户要求绑定/改绑仓库、把当前 topic 绑定到已有 Agent session，或修改当前会话的 Agent/Model/Mode/Permission/Config，请先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 Humming 指引；本会话 chatId=${chatId}, threadId=${threadId ?? "<main>"}。如果同一句话同时包含会话配置变更和真实任务，使用一次 session configure 同时提交配置与消息，不要拆成多次操作，也不要让用户重复。注意：只有 Humming 配置的私聊控制台会把这些变更保存为全局默认配置；群聊/topic 中的变更只作用于当前会话。其它请求忽略本提示。]`;
+interface MessageMetadataInput {
+  readonly isGroup: boolean;
+  readonly chatName: string;
+  readonly chatId: string;
+  readonly threadId: string | null;
+  readonly userName: string;
+  readonly userId: string;
+}
+
+/**
+ * Machine-readable routing metadata prepended to each forwarded message as a
+ * single self-closing XML element. Carries every identifier the Agent might
+ * need (chat/thread/user) so the control hint can stay id-free and purely
+ * advisory. Attribute values are XML-escaped.
+ */
+function renderMessageMetadata(input: MessageMetadataInput): string {
+  const attrs: readonly (readonly [string, string])[] = [
+    ["scope", input.isGroup ? "group" : "direct"],
+    ...(input.isGroup ? ([["chatName", input.chatName]] as const) : []),
+    ["chatId", input.chatId],
+    ["threadId", input.threadId ?? "main"],
+    ["userName", input.userName],
+    ["userId", input.userId],
+  ];
+  const body = attrs.map(([name, value]) => `${name}="${escapeXmlAttribute(value)}"`).join(" ");
+  return `<feishu-context ${body} />`;
+}
+
+/** XML-escape a value for use inside a double-quoted attribute. */
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function renderInlineControlHint(): string {
+  return `<humming-hint>涉及 Humming 自身操作时（绑定/改绑仓库、把 topic 绑定到已有 Agent session、修改当前会话 Agent/Model/Mode/Permission/Config，以及 update/restart/status/logs 等 Bridge 管理），先阅读 ~/.humming/AGENTS.md（或 CLAUDE.md）中的 Humming 指引再执行；本会话标识见上方 feishu-context。群聊/topic 中的会话配置变更只作用于当前会话，不写全局默认。其它请求忽略本提示。</humming-hint>`;
 }
 
 function buildRouteFailureNotice(err: unknown): NoticeCardSpec {

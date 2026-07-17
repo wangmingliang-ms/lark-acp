@@ -32,6 +32,27 @@ Omit `--chat-id` and `--thread-id` for the current topic.
 - Show Bridge status: `humming status`
 - Show Bridge logs: `humming logs`
 - Restart Bridge: `humming restart`
+- Update Bridge (hard-sync managed checkout, rebuild, restart): `humming update`
+
+## Full command tree
+
+```text
+humming bridge run|start|stop|restart|status|logs   # run and manage the bridge process
+humming run|start|stop|restart|status|logs          # top-level shortcuts for the above
+humming agent list                                  # list Agent presets
+humming agent capabilities|models|modes|permissions --agent <agent>   # short-lived Agent probe
+humming session list                                # list the Agent's own sessions for a repo
+humming session capabilities|models|modes|permissions   # inspect the current Topic Session
+humming session configure                           # change Agent/Model/Mode/Permission/Config (+ optional message)
+humming session bind                                # bind the current topic to an existing Agent session
+humming session send                                # send a Message without profile changes
+humming setup                                       # register a Feishu/Lark bot and save credentials
+humming init                                        # seed ~/.humming guide/example files
+humming update                                      # hard-sync managed checkout, rebuild, restart
+```
+
+Global-scope flags exist on most commands (`--json`, `--home`, `--chat-id`, `--thread-id`); omit
+`--chat-id`/`--thread-id` for the current topic.
 
 ## Decision rules
 
@@ -56,6 +77,7 @@ the query fails or the requested value is absent, stop and tell the user what va
   `--message-file`, or `--message-stdin`.
 - Task without profile changes: use `session send`.
 - Do not run `session configure` and then `session send` for one profile-change-and-task request.
+- Submit the profile change and task in a single call; never split it or ask the user to repeat.
 
 ### Bind sessions and repositories
 
