@@ -192,6 +192,50 @@ export class LarkHttpClient {
     return res.data?.message_id ?? null;
   }
 
+  /**
+   * Upload raw image bytes to Feishu and return the resulting `image_key`.
+   *
+   * `image_type: "message"` scopes the key for use inside an IM message. The
+   * SDK's code-gen client strips the response envelope, so `image_key` sits at
+   * the top level of the resolved value.
+   *
+   * @throws {LarkMalformedResponseError} when Lark returns no `image_key`.
+   * @throws when the underlying SDK transport rejects (incl. API errors).
+   */
+  async uploadImage(bytes: Buffer): Promise<string> {
+    const operation = "image.create";
+    const res = await this.client.im.v1.image.create({
+      data: { image_type: "message", image: bytes },
+    });
+    const imageKey = res?.image_key;
+    if (typeof imageKey !== "string" || imageKey.length === 0) {
+      throw new LarkMalformedResponseError(operation, res);
+    }
+    return imageKey;
+  }
+
+  /**
+   * Reply to `messageId` with an `image` message carrying a previously
+   * uploaded `image_key`.
+   *
+   * @throws when the underlying SDK call rejects.
+   */
+  async replyImage(
+    messageId: string,
+    imageKey: string,
+    opts: { replyInThread?: boolean } = {},
+  ): Promise<string | null> {
+    const res = await this.client.im.message.reply({
+      path: { message_id: messageId },
+      data: {
+        content: JSON.stringify({ image_key: imageKey }),
+        msg_type: "image",
+        ...(opts.replyInThread !== undefined ? { reply_in_thread: opts.replyInThread } : {}),
+      },
+    });
+    return res.data?.message_id ?? null;
+  }
+
   /** Send a fresh interactive card to a chat (no reply context). */
   async sendCardToChat(chatId: string, card: object): Promise<string | null> {
     const res = await this.client.im.message.create({
@@ -340,7 +384,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 // Magic-byte sniff for the MIME types Lark accepts (per `im.image.create`
 // docs: JPEG, PNG, WEBP, GIF, TIFF, BMP, ICO). Falls back to PNG — a safe
 // default that every ACP-aware agent renderer must accept.
-function sniffImageMime(buf: Buffer): string {
+export function sniffImageMime(buf: Buffer): string {
   if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
     return "image/png";
   }

@@ -493,6 +493,7 @@ function recordingPresenter(
 ): LarkPresenter {
   return {
     replyText: async () => {},
+    replyImage: async () => true,
     expirePermissionCard: async () => {},
     replyNoticeCard: async (_id, notice) => {
       notices.push({ title: notice.title, body: notice.body, template: notice.template });

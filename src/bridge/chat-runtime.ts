@@ -33,6 +33,12 @@ import type { RequestMessage, ResponseId } from "../conversation/topic-conversat
 import type { PromptToken } from "../presenter/conversation-card-view.js";
 import crypto from "node:crypto";
 import type { LifecycleIntent } from "../../bin/lifecycle-coordinator.js";
+import {
+  extractMarkdownImages,
+  outboundImagePlaceholder,
+  type OutboundImageSource,
+} from "./outbound-image.js";
+import { resolveImageBytes } from "./outbound-image-loader.js";
 
 const SHUTDOWN_FINALIZE_TIMEOUT_MS = 3_000;
 
@@ -53,6 +59,29 @@ function renderableAgentUpdateKind(
       return options.showTools ? "tool" : null;
     default:
       return null;
+  }
+}
+
+/**
+ * Side-channel collector for outbound image content from an agent message chunk.
+ * ACP `image` blocks are pushed to `images`; text is forwarded to `onText` so
+ * the caller can accumulate it for later markdown-image extraction. Only
+ * `agent_message_chunk` carries user-facing content — thoughts/tools are
+ * ignored.
+ */
+function collectOutboundImageContent(
+  update: acp.SessionUpdate,
+  images: OutboundImageSource[],
+  onText: (text: string) => void,
+): void {
+  if (update.sessionUpdate !== "agent_message_chunk") return;
+  const content = update.content;
+  if (content.type === "text") {
+    onText(content.text);
+    return;
+  }
+  if (content.type === "image" && content.data.length > 0) {
+    images.push({ kind: "acp-image", base64: content.data, mimeType: content.mimeType });
   }
 }
 
@@ -1447,9 +1476,18 @@ export class ChatRuntime {
       },
       "prompt dispatch started",
     );
+    // Outbound images the agent emitted this turn. ACP `image` blocks are
+    // collected as they arrive; markdown-embedded file/URL images are extracted
+    // from the finalized message text after the turn seals (extracting mid-
+    // stream would risk splitting a `![](...)` span across chunk boundaries).
+    const outboundImages: OutboundImageSource[] = [];
+    let agentMessageText = "";
     const routeHandle = router.activate(response.responseToken as PromptToken, {
       sessionUpdate: async (params) => {
         observeAgentEvent(params.update.sessionUpdate);
+        collectOutboundImageContent(params.update, outboundImages, (text) => {
+          agentMessageText += text;
+        });
         await response.applyAgentUpdate(params.update);
         const renderableKind = renderableAgentUpdateKind(params.update, {
           showThoughts: this.opts.showThoughts,
@@ -1518,8 +1556,51 @@ export class ChatRuntime {
         (handoff) => this.commitPendingCarrier(handoff),
       );
     }
+    // Pull markdown-embedded images out of the finalized agent text and deliver
+    // every collected image as a standalone Lark image message, in order.
+    const { sources: markdownImages } = extractMarkdownImages(agentMessageText);
+    await this.deliverOutboundImages(pending.messageId, [...outboundImages, ...markdownImages]);
     await this.persistSession(state.agent.sessionId);
     await this.opts.onTurnComplete?.(pending.messageId);
+  }
+
+  /**
+   * Deliver each collected outbound image as a standalone Lark image message.
+   * Resolves bytes → uploads → replies, sequentially and independently: one
+   * image failing (bad bytes, oversize, upload rejected) degrades to a text
+   * placeholder and never blocks the others or the turn. Never throws.
+   */
+  private async deliverOutboundImages(
+    anchorMessageId: string,
+    sources: readonly OutboundImageSource[],
+  ): Promise<void> {
+    for (const source of sources) {
+      try {
+        const { bytes } = await resolveImageBytes(source);
+        const delivered = await this.opts.presenter.replyImage(anchorMessageId, bytes);
+        if (!delivered) {
+          await this.replyOutboundImageFallback(anchorMessageId, source);
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, kind: source.kind },
+          "outbound image delivery failed — falling back to text placeholder",
+        );
+        await this.replyOutboundImageFallback(anchorMessageId, source);
+      }
+    }
+  }
+
+  /** Send the text placeholder for an image that couldn't be delivered. */
+  private async replyOutboundImageFallback(
+    anchorMessageId: string,
+    source: OutboundImageSource,
+  ): Promise<void> {
+    try {
+      await this.opts.presenter.replyText(anchorMessageId, outboundImagePlaceholder(source));
+    } catch (err) {
+      this.logger.warn({ err, kind: source.kind }, "outbound image placeholder reply failed");
+    }
   }
 
   private bootstrapSessionMeta(): SessionCardMeta {

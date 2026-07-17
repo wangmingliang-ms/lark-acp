@@ -927,6 +927,17 @@ export class LarkCardPresenter implements LarkPresenter {
     }
   }
 
+  async replyImage(messageId: string, bytes: Buffer): Promise<boolean> {
+    try {
+      const imageKey = await this.http.uploadImage(bytes);
+      await this.http.replyImage(messageId, imageKey);
+      return true;
+    } catch (err) {
+      this.logger.warn({ err: conciseError(err), messageId }, "replyImage failed");
+      return false;
+    }
+  }
+
   async expirePermissionCard(messageId: string, reason: string): Promise<void> {
     try {
       await this.http.patchCard(messageId, buildExpiredCard(reason));

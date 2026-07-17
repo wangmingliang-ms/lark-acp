@@ -197,6 +197,7 @@ interface PresenterEvents {
 function recordingPresenter(events: PresenterEvents): LarkPresenter {
   return {
     replyText: async () => {},
+    replyImage: async () => true,
     expirePermissionCard: async () => {},
     replyNoticeCard: async (_messageId, notice) => {
       events.notices.push(notice);

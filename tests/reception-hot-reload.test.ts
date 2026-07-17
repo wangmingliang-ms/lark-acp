@@ -43,6 +43,9 @@ class RecordingPresenter implements LarkPresenter {
   readonly agentSwitchWarnings: AgentSwitchWarningCardSpec[] = [];
   readonly agentSwitchResolutions: AgentSwitchWarningResolution[] = [];
   async replyText(): Promise<void> {}
+  async replyImage(): Promise<boolean> {
+    return true;
+  }
   async sendConversationCard(): Promise<string | null> {
     return null;
   }
