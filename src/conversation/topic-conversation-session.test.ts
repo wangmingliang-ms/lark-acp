@@ -419,7 +419,7 @@ describe("TopicConversationSession", () => {
     });
   });
 
-  it("rotates before a new complete text element without splitting streamed prose", async () => {
+  it("keeps consecutive tools and a following text element on one card", async () => {
     const { session } = fixture();
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
     await session.prepare(a.responseId, profile);
@@ -448,11 +448,17 @@ describe("TopicConversationSession", () => {
       content: { type: "text", text: "库代码已完成首轮实现。" },
     });
 
+    // Consecutive tool calls no longer contribute leading dividers (grouped),
+    // so 18 tools + a text element stays well under the element budget and
+    // renders on a single card rather than rotating to a second.
     const cards = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response
       .cards;
-    expect(cards).toHaveLength(2);
-    expect(cards?.[0]?.entries).toHaveLength(18);
-    expect(cards?.[1]?.entries).toEqual([{ kind: "text", text: "共享库代码已完成首轮实现。" }]);
+    expect(cards).toHaveLength(1);
+    expect(cards?.[0]?.entries).toHaveLength(19);
+    expect(cards?.[0]?.entries.at(-1)).toEqual({
+      kind: "text",
+      text: "共享库代码已完成首轮实现。",
+    });
   });
 
   it("does not rotate at 8 KiB until the 20 KB hard limit requires a split", async () => {
