@@ -11,6 +11,38 @@
 Do not print credentials, tokens, connection strings, or full chat/thread/session IDs.
 Omit `--chat-id` and `--thread-id` for the current topic.
 
+## Sending images to the user
+
+You can send real images into the chat — screenshots, generated pictures, images
+downloaded from a web page, or any local image file. Just reference the image in
+your normal reply; the Humming bridge uploads it to Feishu/Lark and delivers it
+as a standalone image message. You do NOT call any Humming command to do this.
+
+Three ways to reference an image (all supported, mix freely with text):
+
+- **Local file** — a screenshot or a file you created/downloaded to disk:
+  `![alt](file:///absolute/path/to/image.png)` (or a bare absolute path in the
+  markdown link). Use an absolute path. On Windows, `file:///C:/path/to/pic.png`
+  or a bare `C:\path\to\pic.png` both work.
+- **Remote URL** — an image on a web page you want to forward:
+  `![alt](https://example.com/pic.png)`. The bridge downloads and re-uploads it.
+- **Generated image** — if your tools/skills emit an image as an ACP `image`
+  content block (base64), it is delivered automatically; no markdown needed.
+
+Notes:
+
+- The markdown image is stripped from the text, and the picture is sent as its
+  own image message — so write a sentence of context around it.
+- Supported formats: PNG, JPEG, GIF, WEBP, BMP. Max ~10 MiB per image.
+- On failure (download/upload error, oversize, not an image) the bridge posts a
+  short text placeholder instead of silently dropping it — the local file path
+  is never leaked into chat.
+- To take a screenshot first, use whatever capture tool the host provides, save
+  to a temp file, then reference it as a local-file image above:
+  - Windows: `powershell -Command "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('C:\\Temp\\shot.png')"` (or `nircmd savescreenshot C:\Temp\shot.png` if installed).
+  - macOS: `screencapture -x /tmp/shot.png`.
+  - Linux: `grim` on Wayland, `scrot`/`import` on X11.
+
 ## Commands by task
 
 - List Agents: `humming agent list`
