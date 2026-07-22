@@ -33,7 +33,14 @@ humming logs -f                 # 实时日志
 humming restart                 # 改代码后重启（沿用上次启动参数）
 humming stop                    # 停止
 humming run --agent claude      # 前台运行（占终端，Ctrl-C 停）
+humming autostart               # 为当前 OS 安装开机自启（幂等）
 ```
+
+- **开机自启**：`humming autostart` 按当前 OS 幂等安装——Linux 写持久化 systemd
+  user service（`~/.config/systemd/user/<unit>-boot.service` + `enable` + `enable-linger`）；
+  Windows 注册 Task Scheduler 开机（BootTrigger）任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
+  `humming init` / `humming update` 末尾也会自动调用它；不支持的平台（如 macOS）静默跳过。
+  注意 boot unit 名带 `-boot` 后缀，与 `gateway start` 的 transient 运行时 unit 区分开。
 
 - **开发工作流**：仓库根 `npm link` 一次，让全局 `humming` 软链到本地 `dist/`；此后
   改代码只需 `npm run build && humming restart` 即可生效；换 `--agent` 等选项需要

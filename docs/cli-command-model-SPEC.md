@@ -77,7 +77,8 @@ humming
 │   └── send
 ├── setup
 ├── init
-└── update
+├── update
+└── autostart
 ```
 
 Command names express actions or resources. All business values use named options. Positional
@@ -375,7 +376,8 @@ bin/
         ├── session.ts
         ├── setup.ts
         ├── init.ts
-        └── update.ts
+        ├── update.ts
+        └── autostart.ts
 ```
 
 `bin/humming.ts` should contain only bootstrap, program construction, and top-level error handling.
