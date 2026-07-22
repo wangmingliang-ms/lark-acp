@@ -40,8 +40,8 @@ export function buildProgram(opts: BuildProgramOptions): Command {
   registerAgentCommand(program);
   registerSessionCommand(program);
   registerSetupCommand(program);
-  registerInitCommand(program);
-  registerUpdateCommand(program);
+  registerInitCommand(program, { selfPath: opts.selfPath });
+  registerUpdateCommand(program, { selfPath: opts.selfPath });
   registerAutostartCommand(program, { selfPath: opts.selfPath });
 
   return program;

@@ -75,6 +75,7 @@ describe("program construction", () => {
         "setup",
         "init",
         "update",
+        "autostart",
         "run",
         "start",
         "stop",

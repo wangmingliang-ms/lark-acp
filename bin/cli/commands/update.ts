@@ -16,6 +16,8 @@ import {
   ProcessControlError,
 } from "../../process-control.js";
 import { resolveHomeDir } from "../config/load.js";
+import { ensureAutostartForHome } from "../../autostart/runtime.js";
+import { formatAutostartReport } from "./autostart.js";
 import type { GlobalOptions } from "../context.js";
 import { handoffLifecycle } from "../lifecycle.js";
 
@@ -23,12 +25,12 @@ const ENV_UPDATE_REF = "HUMMING_REF";
 const DEFAULT_UPDATE_REF = "main";
 const DEFAULT_UPDATE_REPO = "wangmingliang-ms/humming";
 
-export function registerUpdateCommand(program: Command): void {
+export function registerUpdateCommand(program: Command, opts: { readonly selfPath: string }): void {
   program
     .command("update")
     .description("hard-sync the managed checkout, rebuild, and restart a running gateway")
     .action(async function (this: Command) {
-      await runUpdate(this.optsWithGlobals<GlobalOptions>());
+      await runUpdate(this.optsWithGlobals<GlobalOptions>(), opts.selfPath);
     });
 }
 
@@ -42,7 +44,7 @@ export function resolveUpdateRef(): string {
  * @throws {ProcessControlError} when the checkout is missing, a git/npm step
  *         fails, or a running gateway has no readable launch descriptor.
  */
-export async function runUpdate(globals: GlobalOptions): Promise<void> {
+export async function runUpdate(globals: GlobalOptions, selfPath: string): Promise<void> {
   const homeDir = resolveHomeDir(globals.home);
   const checkoutDir = managedCheckoutDir(homeDir);
   if (!isDirectory(checkoutDir)) {
@@ -65,6 +67,9 @@ export async function runUpdate(globals: GlobalOptions): Promise<void> {
   runNpm(["run", "build"], checkoutDir);
   process.stdout.write("humming update: refreshing global command ...\n");
   runNpm(["link"], checkoutDir);
+
+  const report = ensureAutostartForHome(homeDir, selfPath);
+  process.stdout.write(`humming update: ${formatAutostartReport(report)}\n`);
 
   await restartGatewayAfterUpdate(homeDir);
 }
