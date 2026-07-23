@@ -1,7 +1,8 @@
 /**
  * Wires the pure autostart logic to real side effects: filesystem, spawnSync,
- * settings.json, and process-control's systemd probes. This is the only file
- * in the module that touches the OS directly, so it stays thin.
+ * and process-control's systemd probes. This is the only file in the module
+ * that touches the OS directly, so it stays thin. It deliberately does NOT read
+ * settings.json — the agent is resolved by `gateway run`/`start` at boot time.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -9,24 +10,9 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { isUserSystemdAvailable, gatewayUnitName } from "../process-control.js";
-import { readConfigFile } from "../cli/config/load.js";
-import {
-  installSystemdAutostart,
-  type RunResult,
-  type SystemdDeps,
-} from "./systemd-installer.js";
+import { installSystemdAutostart, type RunResult, type SystemdDeps } from "./systemd-installer.js";
 import { installWindowsAutostart, renderTaskXml, type WindowsDeps } from "./windows-installer.js";
 import { ensureAutostart, type AutostartReport, type AutostartRuntime } from "./autostart.js";
-
-/** Minimal shape read from settings for the agent default. */
-export interface AgentSettingsView {
-  readonly runtime: { readonly agent?: string };
-}
-
-/** The `--agent` default: settings `runtime.agent`, else null. */
-export function resolveAgentFlag(settings: AgentSettingsView): string | null {
-  return settings.runtime.agent ?? null;
-}
 
 function realRun(cmd: string, args: readonly string[]): RunResult {
   const result = spawnSync(cmd, [...args], { encoding: "utf-8" });
@@ -62,21 +48,11 @@ function bootUnitName(homeDir: string): string {
   return gatewayUnitName(homeDir).replace(/\.service$/, "-boot.service");
 }
 
-/** Read `runtime.agent` from settings.json, tolerating a missing/unreadable file. */
-function readAgentFlag(homeDir: string): string | null {
-  try {
-    return resolveAgentFlag(readConfigFile(path.join(homeDir, "settings.json")));
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Build an {@link AutostartRuntime} bound to the real OS for the given home.
  * @throws {Error} propagated from installers when systemctl/schtasks fails.
  */
 export function buildAutostartRuntime(homeDir: string, selfPath: string): AutostartRuntime {
-  const agent = readAgentFlag(homeDir);
   return {
     env: { platform: process.platform, systemdAvailable: isUserSystemdAvailable() },
     installSystemd: () => {
@@ -87,7 +63,7 @@ export function buildAutostartRuntime(homeDir: string, selfPath: string): Autost
         unitPath,
         unitName,
         user: os.userInfo().username,
-        spec: { nodePath: process.execPath, selfPath, agent },
+        spec: { nodePath: process.execPath, selfPath },
         deps: systemdDeps,
       });
     },
@@ -107,7 +83,7 @@ export function buildAutostartRuntime(homeDir: string, selfPath: string): Autost
       };
       return installWindowsAutostart({
         ps1Path,
-        ps1Spec: { hummingCommand: "humming", agent },
+        ps1Spec: { hummingCommand: "humming" },
         taskName: WINDOWS_TASK_NAME,
         taskXml,
         deps: winDeps,

@@ -4,13 +4,18 @@ import type { AutostartReport } from "./autostart.js";
 export interface SystemdUnitSpec {
   readonly nodePath: string;
   readonly selfPath: string;
-  readonly agent: string | null;
 }
 
-/** Render the `.service` file text (pure). Trailing newline included. */
+/**
+ * Render the `.service` file text (pure). Trailing newline included.
+ *
+ * Intentionally omits `--agent`: `gateway run` resolves the agent itself from
+ * settings.json `runtime.agent` (falling back to the built-in default). Baking
+ * the agent into the unit would freeze a stale value when the user later edits
+ * settings.
+ */
 export function renderSystemdUnit(spec: SystemdUnitSpec): string {
-  const agentSuffix = spec.agent !== null ? ` --agent ${spec.agent}` : "";
-  const execStart = `${spec.nodePath} ${spec.selfPath} gateway run${agentSuffix}`;
+  const execStart = `${spec.nodePath} ${spec.selfPath} gateway run`;
   return (
     [
       "[Unit]",

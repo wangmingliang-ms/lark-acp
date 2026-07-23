@@ -41,6 +41,8 @@ humming autostart               # 为当前 OS 安装开机自启（幂等）
   Windows 注册 Task Scheduler 开机（BootTrigger）任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
   `humming init` / `humming update` 末尾也会自动调用它；不支持的平台（如 macOS）静默跳过。
   注意 boot unit 名带 `-boot` 后缀，与 `gateway start` 的 transient 运行时 unit 区分开。
+  boot 脚本只写 `gateway run`/`start`，**不**固化 `--agent`——Agent 由运行时读 `settings.json`
+  的 `runtime.agent` 解析，避免开机自启把旧 Agent 写死。
 
 - **开发工作流**：仓库根 `npm link` 一次，让全局 `humming` 软链到本地 `dist/`；此后
   改代码只需 `npm run build && humming restart` 即可生效；换 `--agent` 等选项需要

@@ -7,15 +7,11 @@ import {
 } from "./windows-installer.js";
 
 describe("renderAutostartPs1", () => {
-  it("starts the gateway with no agent flag by default", () => {
-    const text = renderAutostartPs1({ hummingCommand: "humming", agent: null });
+  it("starts the gateway and never adds an agent flag", () => {
+    const text = renderAutostartPs1({ hummingCommand: "humming" });
     expect(text).toContain("humming gateway start");
+    // agent is resolved by `gateway start` at runtime, never baked in.
     expect(text).not.toContain("--agent");
-  });
-
-  it("includes the agent flag when provided", () => {
-    const text = renderAutostartPs1({ hummingCommand: "humming", agent: "claude" });
-    expect(text).toContain("humming gateway start --agent claude");
   });
 });
 
@@ -60,7 +56,7 @@ function fakeWinDeps(
 
 const winArgs = {
   ps1Path: "C:\\Users\\u\\.humming\\autostart\\humming-autostart.ps1",
-  ps1Spec: { hummingCommand: "humming", agent: null },
+  ps1Spec: { hummingCommand: "humming" },
   taskName: "Humming Gateway Autostart",
   taskXml: "<Task/>",
 };
