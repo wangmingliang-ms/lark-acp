@@ -537,6 +537,42 @@ describe("TopicConversationSession", () => {
     expect(entries?.[4]).toEqual({ kind: "text", text: " three" });
   });
 
+  it("folds overflow images into [图片] markers to respect the element budget", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "gallery" },
+    });
+
+    // One text entry expands into a leading text + many images (no interleaved
+    // text between them), far exceeding the element budget.
+    const imgCount = conversationCardBudget.maxElements + 10;
+    let n = 0;
+    const dropped = session.expandTextEntries(a.responseId, (t) => [
+      { kind: "text" as const, text: t },
+      ...Array.from({ length: imgCount }, () => ({
+        kind: "image" as const,
+        imageId: `img-${String(++n)}`,
+        status: "uploading" as const,
+      })),
+    ]);
+
+    const entries =
+      session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response.cards[0]
+        ?.entries ?? [];
+    // The card stays within the element budget…
+    expect(conversationCardBudget.fits(entries, { showCancelButton: true, profile })).toBe(true);
+    // …some images were folded into markers rather than kept as img elements.
+    expect(dropped.length).toBeGreaterThan(0);
+    const imageEntries = entries.filter((e) => e.kind === "image");
+    expect(imageEntries.length).toBe(imgCount - dropped.length);
+    // Folded markers appear in the text.
+    expect(entries.some((e) => e.kind === "text" && e.text.includes("[图片]"))).toBe(true);
+  });
+
   it("does not rotate at 8 KiB until the 20 KB hard limit requires a split", async () => {
     const { session } = fixture();
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });

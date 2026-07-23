@@ -1484,11 +1484,13 @@ export class ChatRuntime {
     const pendingImages: PendingInlineImage[] = [];
     const insertInlineImage = (source: OutboundImageSource, alt?: string): void => {
       const imageId = crypto.randomUUID();
-      this.conversation.appendImageEntry(response.responseId, {
+      const appended = this.conversation.appendImageEntry(response.responseId, {
         imageId,
         ...(alt === undefined ? {} : { alt }),
       });
-      pendingImages.push({ imageId, source });
+      // A late block after the response sealed is dropped (not appended); only
+      // track images that actually got a placeholder to upload for.
+      if (appended) pendingImages.push({ imageId, source });
     };
     const routeHandle = router.activate(response.responseToken as PromptToken, {
       sessionUpdate: async (params) => {
@@ -1539,6 +1541,18 @@ export class ChatRuntime {
 
     if (this.suppressPromptErrorNotice || this.aborted || this.state !== state) {
       this.logger.info("prompt completed after runtime was superseded; skipping session persist");
+      // ACP-block image placeholders were inserted during streaming and may have
+      // already been flushed to the card. Don't leave them stuck at "上传中" —
+      // downgrade any pending ones to a text fallback and flush once.
+      if (pendingImages.length > 0) {
+        for (const item of pendingImages) {
+          this.conversation.updateImageEntry(response.responseId, item.imageId, {
+            status: "failed",
+            fallback: outboundImagePlaceholder(item.source),
+          });
+        }
+        await this.conversation.flushPresentation().catch(() => undefined);
+      }
       return;
     }
 
@@ -1549,7 +1563,7 @@ export class ChatRuntime {
     // position in the prose rather than trailing after all text. ACP-block
     // images are already positioned inline during streaming. Uploads settle
     // after the seal and patch each placeholder via the owner-free path.
-    this.conversation.expandTextEntries(response.responseId, (text) =>
+    const droppedImageIds = this.conversation.expandTextEntries(response.responseId, (text) =>
       splitMarkdownIntoSegments(text).map((segment) => {
         if (segment.kind === "text") return { kind: "text", text: segment.text };
         const imageId = crypto.randomUUID();
@@ -1563,6 +1577,15 @@ export class ChatRuntime {
         };
       }),
     );
+    // Images folded into a `[图片]` marker to respect the card element budget
+    // are no longer placeholders — don't waste an upload on them.
+    if (droppedImageIds.length > 0) {
+      const dropped = new Set(droppedImageIds);
+      for (let i = pendingImages.length - 1; i >= 0; i -= 1) {
+        const item = pendingImages[i];
+        if (item !== undefined && dropped.has(item.imageId)) pendingImages.splice(i, 1);
+      }
+    }
     if (this.topicCancelRequested) {
       await this.conversation.confirmTopicCancel();
     } else {

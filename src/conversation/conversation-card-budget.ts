@@ -56,6 +56,17 @@ export const conversationCardBudget = Object.freeze({
     );
   },
 
+  /** Whether `entries` as a whole fit the byte and element budgets for a card. */
+  fits(entries: readonly TimelineEntry[], chrome: CardChrome): boolean {
+    return (
+      contentBytes(entries) <= this.maxContentBytes &&
+      activeConversationCardElementCount(entries, {
+        hasCancel: chrome.showCancelButton,
+        hasProfile: chrome.profile !== null,
+      }) <= this.maxElements
+    );
+  },
+
   splitText(text: string, occupiedBytes: number): readonly [prefix: string, remainder: string] {
     const availableBytes = this.maxContentBytes - occupiedBytes;
     if (availableBytes <= 0) return ["", text];

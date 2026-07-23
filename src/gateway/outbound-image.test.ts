@@ -114,6 +114,19 @@ describe("splitMarkdownIntoSegments", () => {
       { kind: "text", text: " after" },
     ]);
   });
+
+  it("does not mislocate a real image when an inline code span holds the same raw", () => {
+    // The code span `![](https://x.test/c.png)` is not an image; the later real
+    // image with identical raw must be located at ITS position, and the code
+    // span must stay intact in the text.
+    const text = "use `![](https://x.test/c.png)` then ![](https://x.test/c.png) end";
+    const segments = splitMarkdownIntoSegments(text);
+    expect(segments).toEqual([
+      { kind: "text", text: "use `![](https://x.test/c.png)` then " },
+      { kind: "image", source: { kind: "remote-url", url: "https://x.test/c.png" } },
+      { kind: "text", text: " end" },
+    ]);
+  });
 });
 
 describe("outboundImagePlaceholder", () => {

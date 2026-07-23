@@ -341,7 +341,9 @@ function semanticImageToCardElement(
       alt: { tag: "plain_text", content: entry.alt ?? "" },
     };
   }
-  if (entry.status === "failed") {
+  // A "ready" entry with no img_key is a bug in the upload path; render the
+  // failure fallback rather than a permanent "uploading" placeholder.
+  if (entry.status === "failed" || (entry.status === "ready" && entry.imgKey === undefined)) {
     return { tag: "markdown", content: entry.fallback ?? "[图片发送失败]" };
   }
   return { tag: "markdown", content: "🖼️ 图片上传中…" };

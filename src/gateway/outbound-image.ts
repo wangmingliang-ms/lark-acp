@@ -45,48 +45,77 @@ export type MarkdownSegment =
 
 /**
  * Split agent markdown into an ordered list of text/image segments, preserving
- * the position of each image relative to its surrounding prose. Uses the
- * `marked` AST to locate real image tokens (so `![]` inside a code block is not
- * mistaken for an image), then slices the source text at each image's raw span.
+ * the position of each image relative to its surrounding prose. Walks the
+ * `marked` token tree in document order, tracking each real image token's true
+ * offset in the source. Because leaf tokens (including code spans/blocks) are
+ * consumed atomically as the scan advances, a literal `![](x)` inside inline
+ * code is skipped rather than mistaken for — or colliding with — a real image.
  *
  * Pure and total. Text with no images yields a single text segment (or none for
- * empty input). Adjacent/empty text runs are dropped so the result contains no
- * empty text segments.
+ * empty input). Empty text runs are dropped so the result has no empty segments.
  */
 export function splitMarkdownIntoSegments(text: string): readonly MarkdownSegment[] {
   if (text.length === 0) return [];
 
-  const images: { readonly source: OutboundImageSource; readonly raw: string }[] = [];
-  collectImageTokensWithRaw(marked.lexer(text), images);
+  const images = locateImages(text);
   if (images.length === 0) return [{ kind: "text", text }];
 
   const segments: MarkdownSegment[] = [];
   let cursor = 0;
   for (const image of images) {
-    const at = text.indexOf(image.raw, cursor);
-    if (at < 0) continue; // raw not found (shouldn't happen) — skip, keep order
-    if (at > cursor) segments.push({ kind: "text", text: text.slice(cursor, at) });
+    if (image.start > cursor)
+      segments.push({ kind: "text", text: text.slice(cursor, image.start) });
     segments.push({ kind: "image", source: image.source });
-    cursor = at + image.raw.length;
+    cursor = image.start + image.length;
   }
   if (cursor < text.length) segments.push({ kind: "text", text: text.slice(cursor) });
   return segments.filter((segment) => segment.kind !== "text" || segment.text.length > 0);
 }
 
-/** Walk the token tree in document order, recording each image's source + raw span. */
-function collectImageTokensWithRaw(
+/** A real image token located at its true offset in the source text. */
+interface LocatedImage {
+  readonly source: OutboundImageSource;
+  readonly start: number;
+  readonly length: number;
+}
+
+/**
+ * Locate each real image token's offset by walking leaf tokens in document
+ * order and advancing a scan cursor past each leaf's `raw`. Consuming code
+ * spans/blocks atomically prevents a `![](x)` literal inside them from being
+ * matched as (or colliding with) a real image later in the text.
+ */
+function locateImages(text: string): readonly LocatedImage[] {
+  const out: LocatedImage[] = [];
+  const cursor = { value: 0 };
+  walkLeafTokens(marked.lexer(text), text, cursor, out);
+  return out;
+}
+
+function walkLeafTokens(
   tokens: readonly Token[],
-  out: { source: OutboundImageSource; raw: string }[],
+  text: string,
+  cursor: { value: number },
+  out: LocatedImage[],
 ): void {
   for (const token of tokens) {
+    const children = (token as { tokens?: readonly Token[] }).tokens;
+    // Code spans/blocks are leaves even though `marked` may not attach tokens;
+    // treating any childless token as a leaf consumes its raw atomically.
+    if (token.type !== "image" && children !== undefined && children.length > 0) {
+      walkLeafTokens(children, text, cursor, out);
+      continue;
+    }
+    const raw = (token as { raw?: string }).raw;
+    if (raw === undefined || raw.length === 0) continue;
+    const at = text.indexOf(raw, cursor.value);
+    if (at < 0) continue; // shouldn't happen; skip without advancing past real content
     if (token.type === "image") {
       const image = token as Tokens.Image;
       const source = classifyImageHref(image.href, image.text);
-      if (source !== null) out.push({ source, raw: image.raw });
-      continue;
+      if (source !== null) out.push({ source, start: at, length: raw.length });
     }
-    const nested = (token as { tokens?: readonly Token[] }).tokens;
-    if (nested !== undefined) collectImageTokensWithRaw(nested, out);
+    cursor.value = at + raw.length;
   }
 }
 

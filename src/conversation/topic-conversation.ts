@@ -298,12 +298,13 @@ class ResponseCard<Id extends string = ResponseCardId> {
   }
 
   /**
-   * Replace this card's timeline by mapping each entry to zero or more entries,
-   * preserving order. Used to expand a text entry into interleaved text/image
-   * entries once inline image positions are known. Mutates in place.
+   * Replace this card's whole timeline with the result of `transform`, which
+   * receives the current entries. Lets callers apply budget-aware, whole-card
+   * rewrites (e.g. expand text around images while capping element count).
+   * Mutates in place.
    */
-  rewriteTimeline(rewrite: (entry: TimelineEntry) => readonly TimelineEntry[]): void {
-    const next = this.timeline.flatMap((entry) => [...rewrite(entry)]);
+  mapTimeline(transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[]): void {
+    const next = transform(this.timeline);
     this.timeline.splice(0, this.timeline.length, ...next);
   }
 
@@ -432,6 +433,18 @@ class ResponseLifecycle {
     this.tail.append(entry);
   }
 
+  /**
+   * Append an inline image placeholder without the owner/terminal strictness of
+   * {@link append}. A late ACP image block can arrive after ownership clears or
+   * the response seals; rather than throw (crashing the update dispatch), drop
+   * it silently when the response is terminal. Returns whether it was appended.
+   */
+  appendImageTolerant(entry: ImageTimelineEntry): boolean {
+    if (this.stateValue.kind === "terminal") return false;
+    this.tail.append(entry);
+    return true;
+  }
+
   replaceTailText(kind: TextTimelineEntry["kind"], text: string): void {
     if (this.stateValue.kind === "terminal") throw new Error("terminal response rejects updates");
     this.tail.replaceLastText(kind, text);
@@ -483,14 +496,11 @@ class ResponseLifecycle {
     return false;
   }
 
-  /**
-   * Expand this response's timeline entries in place (all response cards),
-   * mapping each entry to zero or more entries. Owner-free: runs at finalize to
-   * split text entries into interleaved text/image entries once image positions
-   * are known.
-   */
-  rewriteTimeline(rewrite: (entry: TimelineEntry) => readonly TimelineEntry[]): void {
-    for (const card of this.responseCards) card.rewriteTimeline(rewrite);
+  /** Apply a budget-aware whole-card timeline transform to every response card.
+   *  Owner-free: runs at finalize to expand text entries into interleaved
+   *  text/image entries once image positions are known. */
+  mapTimeline(transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[]): void {
+    for (const card of this.responseCards) card.mapTimeline(transform);
   }
 
   snapshot(): ResponseSnapshot {
@@ -826,6 +836,15 @@ export class TopicConversation {
     this.response(responseId).append(entry);
   }
 
+  /**
+   * Append an inline image placeholder, owner-free and terminal-tolerant. A late
+   * ACP image block may arrive after ownership clears or the response seals;
+   * appending it must never throw. Returns whether it was appended.
+   */
+  appendImage(responseId: ResponseId, entry: ImageTimelineEntry): boolean {
+    return this.response(responseId).appendImageTolerant(entry);
+  }
+
   replaceTailText(responseId: ResponseId, kind: TextTimelineEntry["kind"], text: string): void {
     if (this.executionOwner !== responseId) throw new Error("only execution owner accepts updates");
     this.response(responseId).replaceTailText(kind, text);
@@ -860,12 +879,12 @@ export class TopicConversation {
     return this.response(responseId).updateImage(imageId, update);
   }
 
-  /** Expand a response's timeline entries in place (owner-free, finalize use). */
-  rewriteResponseTimeline(
+  /** Apply a budget-aware whole-card timeline transform to a response's cards. */
+  mapResponseTimeline(
     responseId: ResponseId,
-    rewrite: (entry: TimelineEntry) => readonly TimelineEntry[],
+    transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[],
   ): void {
-    this.response(responseId).rewriteTimeline(rewrite);
+    this.response(responseId).mapTimeline(transform);
   }
 
   requestPermission(input: {
