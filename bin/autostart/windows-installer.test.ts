@@ -3,6 +3,7 @@ import {
   renderAutostartPs1,
   renderTaskXml,
   installWindowsAutostart,
+  disableWindowsAutostart,
   type WindowsDeps,
 } from "./windows-installer.js";
 
@@ -76,6 +77,43 @@ describe("installWindowsAutostart", () => {
     const report = installWindowsAutostart({ ...winArgs, deps });
     expect(report.kind).toBe("already-current");
     expect(writes).toHaveLength(0);
+    expect(ran).toHaveLength(0);
+  });
+});
+
+function disableWinDeps(taskExists: boolean): { deps: WindowsDeps; ran: string[][] } {
+  const ran: string[][] = [];
+  const deps: WindowsDeps = {
+    readFile: () => null,
+    writeFile: () => {},
+    mkdirp: () => {},
+    taskExists: () => taskExists,
+    run: (cmd, args) => {
+      ran.push([cmd, ...args]);
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, ran };
+}
+
+describe("disableWindowsAutostart", () => {
+  it("disables an existing task", () => {
+    const { deps, ran } = disableWinDeps(true);
+    const report = disableWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
+    expect(report.kind).toBe("disabled");
+    expect(ran).toContainEqual([
+      "schtasks.exe",
+      "/change",
+      "/tn",
+      "Humming Gateway Autostart",
+      "/disable",
+    ]);
+  });
+
+  it("is already-disabled when the task is absent", () => {
+    const { deps, ran } = disableWinDeps(false);
+    const report = disableWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
+    expect(report.kind).toBe("already-disabled");
     expect(ran).toHaveLength(0);
   });
 });

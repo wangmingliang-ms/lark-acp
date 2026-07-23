@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   renderSystemdUnit,
   installSystemdAutostart,
+  disableSystemdAutostart,
   type SystemdDeps,
 } from "./systemd-installer.js";
 
@@ -21,7 +22,10 @@ describe("renderSystemdUnit", () => {
   });
 });
 
-function fakeDeps(existing: string | null): {
+function fakeDeps(
+  existing: string | null,
+  isEnabled = "",
+): {
   deps: SystemdDeps;
   writes: Array<{ path: string; content: string }>;
   ran: string[][];
@@ -34,6 +38,7 @@ function fakeDeps(existing: string | null): {
     mkdirp: () => {},
     run: (cmd, args) => {
       ran.push([cmd, ...args]);
+      if (args.includes("is-enabled")) return { status: 0, stdout: isEnabled, stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     },
   };
@@ -62,9 +67,9 @@ describe("installSystemdAutostart", () => {
     expect(ran).toContainEqual(["loginctl", "enable-linger", "u"]);
   });
 
-  it("is idempotent when content already matches", () => {
+  it("is idempotent when content already matches and unit is enabled", () => {
     const current = renderSystemdUnit(installSpec);
-    const { deps, writes } = fakeDeps(current);
+    const { deps, writes } = fakeDeps(current, "enabled");
     const report = installSystemdAutostart({
       unitPath: "/home/u/.config/systemd/user/humming.service",
       unitName: "humming.service",
@@ -74,5 +79,74 @@ describe("installSystemdAutostart", () => {
     });
     expect(report.kind).toBe("already-current");
     expect(writes).toHaveLength(0);
+  });
+
+  it("re-enables when content matches but the unit is disabled", () => {
+    const current = renderSystemdUnit(installSpec);
+    // fakeDeps reports is-enabled as "" (not "enabled"), i.e. disabled.
+    const { deps, writes, ran } = fakeDeps(current);
+    const report = installSystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      user: "u",
+      spec: installSpec,
+      deps,
+    });
+    expect(report.kind).toBe("installed");
+    expect(writes).toHaveLength(0); // file unchanged
+    expect(ran).toContainEqual(["systemctl", "--user", "enable", "humming.service"]);
+  });
+});
+
+function disableDeps(
+  fileExists: boolean,
+  isEnabled: string,
+): { deps: SystemdDeps; ran: string[][] } {
+  const ran: string[][] = [];
+  const deps: SystemdDeps = {
+    readFile: () => (fileExists ? "unit-content" : null),
+    writeFile: () => {},
+    mkdirp: () => {},
+    run: (cmd, args) => {
+      ran.push([cmd, ...args]);
+      if (args.includes("is-enabled")) return { status: 0, stdout: isEnabled, stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, ran };
+}
+
+describe("disableSystemdAutostart", () => {
+  it("disables an enabled unit and keeps the file", () => {
+    const { deps, ran } = disableDeps(true, "enabled");
+    const report = disableSystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(report.kind).toBe("disabled");
+    expect(ran).toContainEqual(["systemctl", "--user", "disable", "humming.service"]);
+  });
+
+  it("is already-disabled when the unit file is absent", () => {
+    const { deps, ran } = disableDeps(false, "enabled");
+    const report = disableSystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(report.kind).toBe("already-disabled");
+    expect(ran).toHaveLength(0);
+  });
+
+  it("is already-disabled when the unit is not enabled", () => {
+    const { deps, ran } = disableDeps(true, "disabled");
+    const report = disableSystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(report.kind).toBe("already-disabled");
+    expect(ran.some((r) => r.includes("disable"))).toBe(false);
   });
 });

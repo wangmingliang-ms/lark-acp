@@ -79,6 +79,8 @@ humming
 ├── init
 ├── update
 └── autostart
+    ├── install
+    └── disable
 ```
 
 Command names express actions or resources. All business values use named options. Positional

@@ -10,11 +10,17 @@ export type AutostartTarget = "systemd" | "windows-task" | { readonly unsupporte
 /** Mechanism label carried in reports. */
 export type AutostartMechanism = "systemd" | "windows-task";
 
-/** Result of an `ensureAutostart` call. */
+/** Result of an `ensureAutostart` or `disableAutostart` call. */
 export type AutostartReport =
   | { readonly kind: "installed"; readonly mechanism: AutostartMechanism; readonly path: string }
   | {
       readonly kind: "already-current";
+      readonly mechanism: AutostartMechanism;
+      readonly path: string;
+    }
+  | { readonly kind: "disabled"; readonly mechanism: AutostartMechanism; readonly path: string }
+  | {
+      readonly kind: "already-disabled";
       readonly mechanism: AutostartMechanism;
       readonly path: string;
     }
@@ -48,6 +54,8 @@ export interface AutostartRuntime {
   readonly env: AutostartEnv;
   readonly installSystemd: () => AutostartReport;
   readonly installWindows: () => AutostartReport;
+  readonly disableSystemd: () => AutostartReport;
+  readonly disableWindows: () => AutostartReport;
 }
 
 /** Detect the platform and run the matching installer, else skip. */
@@ -55,5 +63,13 @@ export function ensureAutostart(runtime: AutostartRuntime): AutostartReport {
   const target = detectAutostartTarget(runtime.env);
   if (target === "systemd") return runtime.installSystemd();
   if (target === "windows-task") return runtime.installWindows();
+  return { kind: "skipped", reason: target.unsupported };
+}
+
+/** Detect the platform and disable the matching autostart, else skip. */
+export function disableAutostart(runtime: AutostartRuntime): AutostartReport {
+  const target = detectAutostartTarget(runtime.env);
+  if (target === "systemd") return runtime.disableSystemd();
+  if (target === "windows-task") return runtime.disableWindows();
   return { kind: "skipped", reason: target.unsupported };
 }

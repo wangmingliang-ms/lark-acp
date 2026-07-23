@@ -1,4 +1,4 @@
-export { ensureAutostart, detectAutostartTarget } from "./autostart.js";
+export { ensureAutostart, disableAutostart, detectAutostartTarget } from "./autostart.js";
 export type {
   AutostartReport,
   AutostartMechanism,

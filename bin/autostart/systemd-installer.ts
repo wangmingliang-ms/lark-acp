@@ -60,17 +60,24 @@ export interface SystemdInstallArgs {
 
 /**
  * Write the unit (only when changed), reload/enable it, and enable linger.
+ * Treats a content-identical but *disabled* unit as needing re-enable, so
+ * `install` recovers a unit left disabled by `disable` without rewriting it.
  * @throws {Error} when a systemctl/loginctl command exits non-zero.
  */
 export function installSystemdAutostart(args: SystemdInstallArgs): AutostartReport {
   const desired = renderSystemdUnit(args.spec);
   const current = args.deps.readFile(args.unitPath);
-  if (current === desired) {
-    return { kind: "already-current", mechanism: "systemd", path: args.unitPath };
+  const contentMatches = current === desired;
+  if (contentMatches) {
+    const state = args.deps.run("systemctl", ["--user", "is-enabled", args.unitName]).stdout.trim();
+    if (state === "enabled") {
+      return { kind: "already-current", mechanism: "systemd", path: args.unitPath };
+    }
+  } else {
+    const dir = args.unitPath.slice(0, args.unitPath.lastIndexOf("/"));
+    args.deps.mkdirp(dir);
+    args.deps.writeFile(args.unitPath, desired);
   }
-  const dir = args.unitPath.slice(0, args.unitPath.lastIndexOf("/"));
-  args.deps.mkdirp(dir);
-  args.deps.writeFile(args.unitPath, desired);
   runOrThrow(args.deps, "systemctl", ["--user", "daemon-reload"]);
   runOrThrow(args.deps, "systemctl", ["--user", "enable", args.unitName]);
   runOrThrow(args.deps, "loginctl", ["enable-linger", args.user]);
@@ -82,4 +89,30 @@ function runOrThrow(deps: SystemdDeps, cmd: string, cmdArgs: readonly string[]):
   if (result.status !== 0) {
     throw new Error(`${cmd} ${cmdArgs.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
+}
+
+/** Everything needed to disable (but keep) the persistent unit. */
+export interface SystemdDisableArgs {
+  readonly unitPath: string;
+  readonly unitName: string;
+  readonly deps: SystemdDeps;
+}
+
+/**
+ * Disable the boot unit without deleting its file (semantics A: reversible).
+ * Idempotent: reports `already-disabled` when the unit file is absent or the
+ * unit is not currently enabled.
+ * @throws {Error} when `systemctl --user disable` exits non-zero.
+ */
+export function disableSystemdAutostart(args: SystemdDisableArgs): AutostartReport {
+  const present = args.deps.readFile(args.unitPath) !== null;
+  if (!present) {
+    return { kind: "already-disabled", mechanism: "systemd", path: args.unitPath };
+  }
+  const state = args.deps.run("systemctl", ["--user", "is-enabled", args.unitName]).stdout.trim();
+  if (state !== "enabled") {
+    return { kind: "already-disabled", mechanism: "systemd", path: args.unitPath };
+  }
+  runOrThrow(args.deps, "systemctl", ["--user", "disable", args.unitName]);
+  return { kind: "disabled", mechanism: "systemd", path: args.unitPath };
 }

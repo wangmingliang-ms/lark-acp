@@ -33,13 +33,16 @@ humming logs -f                 # 实时日志
 humming restart                 # 改代码后重启（沿用上次启动参数）
 humming stop                    # 停止
 humming run --agent claude      # 前台运行（占终端，Ctrl-C 停）
-humming autostart               # 为当前 OS 安装开机自启（幂等）
+humming autostart install       # 为当前 OS 安装开机自启（幂等）
+humming autostart disable       # 停用开机自启（保留 unit/task，可再 install 恢复）
 ```
 
-- **开机自启**：`humming autostart` 按当前 OS 幂等安装——Linux 写持久化 systemd
+- **开机自启**：`humming autostart install` 按当前 OS 幂等安装——Linux 写持久化 systemd
   user service（`~/.config/systemd/user/<unit>-boot.service` + `enable` + `enable-linger`）；
   Windows 注册 Task Scheduler 开机（BootTrigger）任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
-  `humming init` / `humming update` 末尾也会自动调用它；不支持的平台（如 macOS）静默跳过。
+  `humming init` / `humming update` 末尾也会自动调用 install；不支持的平台（如 macOS）静默跳过。
+  `humming autostart disable` 只停用、保留 unit/task 文件（Linux `systemctl --user disable`；Windows
+  `schtasks /change /disable`），之后再 `install` 可秒恢复（install 会把被 disable 的 unit 重新 enable）。
   注意 boot unit 名带 `-boot` 后缀，与 `gateway start` 的 transient 运行时 unit 区分开。
   boot 脚本只写 `gateway run`/`start`，**不**固化 `--agent`——Agent 由运行时读 `settings.json`
   的 `runtime.agent` 解析，避免开机自启把旧 Agent 写死。

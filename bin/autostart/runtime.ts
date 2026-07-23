@@ -10,9 +10,24 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { isUserSystemdAvailable, gatewayUnitName } from "../process-control.js";
-import { installSystemdAutostart, type RunResult, type SystemdDeps } from "./systemd-installer.js";
-import { installWindowsAutostart, renderTaskXml, type WindowsDeps } from "./windows-installer.js";
-import { ensureAutostart, type AutostartReport, type AutostartRuntime } from "./autostart.js";
+import {
+  installSystemdAutostart,
+  disableSystemdAutostart,
+  type RunResult,
+  type SystemdDeps,
+} from "./systemd-installer.js";
+import {
+  installWindowsAutostart,
+  disableWindowsAutostart,
+  renderTaskXml,
+  type WindowsDeps,
+} from "./windows-installer.js";
+import {
+  ensureAutostart,
+  disableAutostart,
+  type AutostartReport,
+  type AutostartRuntime,
+} from "./autostart.js";
 
 function realRun(cmd: string, args: readonly string[]): RunResult {
   const result = spawnSync(cmd, [...args], { encoding: "utf-8" });
@@ -48,16 +63,31 @@ function bootUnitName(homeDir: string): string {
   return gatewayUnitName(homeDir).replace(/\.service$/, "-boot.service");
 }
 
+/** Boot unit name + on-disk path for the systemd autostart unit. */
+function systemdPaths(homeDir: string): { unitName: string; unitPath: string } {
+  const unitName = bootUnitName(homeDir);
+  const unitPath = path.join(os.homedir(), ".config", "systemd", "user", unitName);
+  return { unitName, unitPath };
+}
+
+/** WindowsDeps bound to real schtasks/fs. */
+function windowsDeps(): WindowsDeps {
+  return {
+    ...fsDeps,
+    taskExists: (name) => realRun("schtasks.exe", ["/query", "/tn", name]).status === 0,
+  };
+}
+
 /**
  * Build an {@link AutostartRuntime} bound to the real OS for the given home.
  * @throws {Error} propagated from installers when systemctl/schtasks fails.
  */
 export function buildAutostartRuntime(homeDir: string, selfPath: string): AutostartRuntime {
+  const ps1Path = path.join(homeDir, "autostart", "humming-autostart.ps1");
   return {
     env: { platform: process.platform, systemdAvailable: isUserSystemdAvailable() },
     installSystemd: () => {
-      const unitName = bootUnitName(homeDir);
-      const unitPath = path.join(os.homedir(), ".config", "systemd", "user", unitName);
+      const { unitName, unitPath } = systemdPaths(homeDir);
       const systemdDeps: SystemdDeps = fsDeps;
       return installSystemdAutostart({
         unitPath,
@@ -68,31 +98,36 @@ export function buildAutostartRuntime(homeDir: string, selfPath: string): Autost
       });
     },
     installWindows: () => {
-      const ps1Path = path.join(homeDir, "autostart", "humming-autostart.ps1");
-      const pwshPath = "pwsh.exe";
       const userId = `${os.hostname()}\\${os.userInfo().username}`;
       const taskXml = renderTaskXml({
         description: "Humming gateway autostart",
-        pwshPath,
+        pwshPath: "pwsh.exe",
         ps1Path,
         userId,
       });
-      const winDeps: WindowsDeps = {
-        ...fsDeps,
-        taskExists: (name) => realRun("schtasks.exe", ["/query", "/tn", name]).status === 0,
-      };
       return installWindowsAutostart({
         ps1Path,
         ps1Spec: { hummingCommand: "humming" },
         taskName: WINDOWS_TASK_NAME,
         taskXml,
-        deps: winDeps,
+        deps: windowsDeps(),
       });
     },
+    disableSystemd: () => {
+      const { unitName, unitPath } = systemdPaths(homeDir);
+      return disableSystemdAutostart({ unitPath, unitName, deps: fsDeps });
+    },
+    disableWindows: () =>
+      disableWindowsAutostart({ taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
   };
 }
 
-/** Convenience: build the real runtime and run the dispatcher. */
+/** Convenience: build the real runtime and run the install dispatcher. */
 export function ensureAutostartForHome(homeDir: string, selfPath: string): AutostartReport {
   return ensureAutostart(buildAutostartRuntime(homeDir, selfPath));
+}
+
+/** Convenience: build the real runtime and run the disable dispatcher. */
+export function disableAutostartForHome(homeDir: string): AutostartReport {
+  return disableAutostart(buildAutostartRuntime(homeDir, ""));
 }

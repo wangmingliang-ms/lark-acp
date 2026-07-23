@@ -19,6 +19,25 @@ describe("formatAutostartReport", () => {
     expect(msg).toContain("skipped");
     expect(msg).toContain("darwin");
   });
+
+  it("describes a disable", () => {
+    const msg = formatAutostartReport({
+      kind: "disabled",
+      mechanism: "systemd",
+      path: "/home/u/.config/systemd/user/x-boot.service",
+    });
+    expect(msg).toContain("disabled");
+    expect(msg).toContain("systemd");
+  });
+
+  it("describes an already-disabled", () => {
+    const msg = formatAutostartReport({
+      kind: "already-disabled",
+      mechanism: "windows-task",
+      path: "Humming Gateway Autostart",
+    });
+    expect(msg).toContain("already disabled");
+  });
 });
 
 describe("init/update autostart wiring contract", () => {

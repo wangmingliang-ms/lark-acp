@@ -90,6 +90,9 @@ describe("program construction", () => {
       ["run", "start", "stop", "restart", "status", "logs"].sort(),
     );
 
+    const autostart = program.commands.find((cmd) => cmd.name() === "autostart");
+    expect(autostart?.commands.map((c) => c.name()).sort()).toEqual(["install", "disable"].sort());
+
     const agent = program.commands.find((cmd) => cmd.name() === "agent");
     expect(agent?.commands.map((c) => c.name()).sort()).toEqual(
       ["list", "capabilities", "models", "modes", "permissions"].sort(),

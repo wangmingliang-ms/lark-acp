@@ -107,3 +107,22 @@ function runOrThrow(deps: WindowsDeps, cmd: string, cmdArgs: readonly string[]):
     throw new Error(`${cmd} ${cmdArgs.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
 }
+
+/** Everything needed to disable (but keep) the Windows autostart task. */
+export interface WindowsDisableArgs {
+  readonly taskName: string;
+  readonly deps: WindowsDeps;
+}
+
+/**
+ * Disable the boot task without deleting it (semantics A: reversible).
+ * Idempotent: reports `already-disabled` when the task is absent.
+ * @throws {Error} when `schtasks /change /disable` exits non-zero.
+ */
+export function disableWindowsAutostart(args: WindowsDisableArgs): AutostartReport {
+  if (!args.deps.taskExists(args.taskName)) {
+    return { kind: "already-disabled", mechanism: "windows-task", path: args.taskName };
+  }
+  runOrThrow(args.deps, "schtasks.exe", ["/change", "/tn", args.taskName, "/disable"]);
+  return { kind: "disabled", mechanism: "windows-task", path: args.taskName };
+}
