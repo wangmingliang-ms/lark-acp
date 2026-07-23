@@ -24,6 +24,18 @@ export type AutostartReport =
       readonly mechanism: AutostartMechanism;
       readonly path: string;
     }
+  | { readonly kind: "enabled"; readonly mechanism: AutostartMechanism; readonly path: string }
+  | {
+      readonly kind: "not-installed";
+      readonly mechanism: AutostartMechanism;
+      readonly path: string;
+    }
+  | { readonly kind: "uninstalled"; readonly mechanism: AutostartMechanism; readonly path: string }
+  | {
+      readonly kind: "already-uninstalled";
+      readonly mechanism: AutostartMechanism;
+      readonly path: string;
+    }
   | { readonly kind: "skipped"; readonly reason: string };
 
 /** Result of a `queryAutostart` call: what's installed and whether it's active. */
@@ -71,6 +83,10 @@ export interface AutostartRuntime {
   readonly installWindows: () => AutostartReport;
   readonly disableSystemd: () => AutostartReport;
   readonly disableWindows: () => AutostartReport;
+  readonly enableSystemd: () => AutostartReport;
+  readonly enableWindows: () => AutostartReport;
+  readonly uninstallSystemd: () => AutostartReport;
+  readonly uninstallWindows: () => AutostartReport;
   readonly querySystemd: () => AutostartStatus;
   readonly queryWindows: () => AutostartStatus;
 }
@@ -88,6 +104,22 @@ export function disableAutostart(runtime: AutostartRuntime): AutostartReport {
   const target = detectAutostartTarget(runtime.env);
   if (target === "systemd") return runtime.disableSystemd();
   if (target === "windows-task") return runtime.disableWindows();
+  return { kind: "skipped", reason: target.unsupported };
+}
+
+/** Detect the platform and enable an already-installed autostart, else skip. */
+export function enableAutostart(runtime: AutostartRuntime): AutostartReport {
+  const target = detectAutostartTarget(runtime.env);
+  if (target === "systemd") return runtime.enableSystemd();
+  if (target === "windows-task") return runtime.enableWindows();
+  return { kind: "skipped", reason: target.unsupported };
+}
+
+/** Detect the platform and remove the matching autostart files, else skip. */
+export function uninstallAutostart(runtime: AutostartRuntime): AutostartReport {
+  const target = detectAutostartTarget(runtime.env);
+  if (target === "systemd") return runtime.uninstallSystemd();
+  if (target === "windows-task") return runtime.uninstallWindows();
   return { kind: "skipped", reason: target.unsupported };
 }
 

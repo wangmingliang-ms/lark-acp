@@ -37,7 +37,7 @@ accumulated Agent-specific controls remain caller-supplied desired values.
 
 | Term                      | Meaning                                                                                                                                    |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Gateway**                | The long-running process connecting Lark to ACP Agents.                                                                                    |
+| **Gateway**               | The long-running process connecting Lark to ACP Agents.                                                                                    |
 | **Agent**                 | An ACP-compatible agent preset or invocation that can create Sessions.                                                                     |
 | **Topic Session**         | The Agent Session selected for one Lark chat/thread scope.                                                                                 |
 | **Session Profile**       | The desired Agent plus Model, Mode, Permission, and Config controls.                                                                       |
@@ -80,7 +80,10 @@ humming
 ├── update
 └── autostart
     ├── install
-    └── disable
+    ├── enable
+    ├── disable
+    ├── uninstall
+    └── status
 ```
 
 Command names express actions or resources. All business values use named options. Positional

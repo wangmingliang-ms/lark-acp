@@ -46,6 +46,7 @@ export interface SystemdDeps {
   readonly readFile: (path: string) => string | null;
   readonly writeFile: (path: string, content: string) => void;
   readonly mkdirp: (dir: string) => void;
+  readonly rm: (path: string) => void;
   readonly run: (cmd: string, args: readonly string[]) => RunResult;
 }
 
@@ -115,6 +116,61 @@ export function disableSystemdAutostart(args: SystemdDisableArgs): AutostartRepo
   }
   runOrThrow(args.deps, "systemctl", ["--user", "disable", args.unitName]);
   return { kind: "disabled", mechanism: "systemd", path: args.unitPath };
+}
+
+/** Everything needed to enable an already-installed unit (no file writes). */
+export interface SystemdEnableArgs {
+  readonly unitPath: string;
+  readonly unitName: string;
+  readonly user: string;
+  readonly deps: SystemdDeps;
+}
+
+/**
+ * Enable an already-installed boot unit without touching its file. Requires the
+ * unit file to exist (install first). Idempotent: reports `already-current`
+ * when the unit is already enabled.
+ * @throws {Error} when a systemctl/loginctl command exits non-zero.
+ */
+export function enableSystemdAutostart(args: SystemdEnableArgs): AutostartReport {
+  const present = args.deps.readFile(args.unitPath) !== null;
+  if (!present) {
+    return { kind: "not-installed", mechanism: "systemd", path: args.unitPath };
+  }
+  const state = args.deps.run("systemctl", ["--user", "is-enabled", args.unitName]).stdout.trim();
+  if (state === "enabled") {
+    return { kind: "already-current", mechanism: "systemd", path: args.unitPath };
+  }
+  runOrThrow(args.deps, "systemctl", ["--user", "daemon-reload"]);
+  runOrThrow(args.deps, "systemctl", ["--user", "enable", args.unitName]);
+  runOrThrow(args.deps, "loginctl", ["enable-linger", args.user]);
+  return { kind: "enabled", mechanism: "systemd", path: args.unitPath };
+}
+
+/** Everything needed to uninstall (disable + delete) the persistent unit. */
+export interface SystemdUninstallArgs {
+  readonly unitPath: string;
+  readonly unitName: string;
+  readonly deps: SystemdDeps;
+}
+
+/**
+ * Disable (if enabled) and delete the boot unit file, then reload systemd.
+ * Idempotent: reports `already-uninstalled` when the unit file is absent.
+ * @throws {Error} when a systemctl command exits non-zero.
+ */
+export function uninstallSystemdAutostart(args: SystemdUninstallArgs): AutostartReport {
+  const present = args.deps.readFile(args.unitPath) !== null;
+  if (!present) {
+    return { kind: "already-uninstalled", mechanism: "systemd", path: args.unitPath };
+  }
+  const state = args.deps.run("systemctl", ["--user", "is-enabled", args.unitName]).stdout.trim();
+  if (state === "enabled") {
+    runOrThrow(args.deps, "systemctl", ["--user", "disable", args.unitName]);
+  }
+  args.deps.rm(args.unitPath);
+  runOrThrow(args.deps, "systemctl", ["--user", "daemon-reload"]);
+  return { kind: "uninstalled", mechanism: "systemd", path: args.unitPath };
 }
 
 /** Everything needed to query the persistent unit's status. */

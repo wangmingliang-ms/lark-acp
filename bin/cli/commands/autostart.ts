@@ -1,8 +1,9 @@
 /**
- * `humming autostart install|disable|status` — manage OS-native boot autostart
- * for the gateway. `install` is also invoked by init/update; `disable` stops
- * the autostart without deleting its unit/task (reversible); `status` reports
- * the current state read-only.
+ * `humming autostart install|enable|disable|uninstall|status` — manage
+ * OS-native boot autostart for the gateway. `install` writes the unit/task and
+ * enables it (also invoked by init/update); `enable`/`disable` flip the enabled
+ * state without touching files; `uninstall` removes the unit/task and files;
+ * `status` reports the current state read-only.
  */
 import process from "node:process";
 import { Command } from "commander";
@@ -10,6 +11,8 @@ import { resolveHomeDir } from "../config/load.js";
 import {
   ensureAutostartForHome,
   disableAutostartForHome,
+  enableAutostartForHome,
+  uninstallAutostartForHome,
   queryAutostartForHome,
 } from "../../autostart/runtime.js";
 import type { AutostartReport, AutostartStatus } from "../../autostart/index.js";
@@ -26,6 +29,14 @@ export function formatAutostartReport(report: AutostartReport): string {
       return `autostart disabled (${report.mechanism}) at ${report.path}`;
     case "already-disabled":
       return `autostart already disabled (${report.mechanism}) at ${report.path}`;
+    case "enabled":
+      return `autostart enabled (${report.mechanism}) at ${report.path}`;
+    case "not-installed":
+      return `autostart not installed (${report.mechanism}) at ${report.path}`;
+    case "uninstalled":
+      return `autostart uninstalled (${report.mechanism}) at ${report.path}`;
+    case "already-uninstalled":
+      return `autostart already uninstalled (${report.mechanism}) at ${report.path}`;
     case "skipped":
       return `autostart skipped: ${report.reason}`;
   }
@@ -65,12 +76,32 @@ export function registerAutostartCommand(program: Command, opts: RegisterAutosta
     });
 
   autostart
+    .command("enable")
+    .description("enable an already-installed boot autostart (no file changes)")
+    .action(function (this: Command) {
+      const globals = this.optsWithGlobals<GlobalOptions>();
+      const homeDir = resolveHomeDir(globals.home);
+      const report = enableAutostartForHome(homeDir);
+      process.stdout.write(`${formatAutostartReport(report)}\n`);
+    });
+
+  autostart
     .command("disable")
     .description("disable boot autostart (keeps the unit/task for later re-enable)")
     .action(function (this: Command) {
       const globals = this.optsWithGlobals<GlobalOptions>();
       const homeDir = resolveHomeDir(globals.home);
       const report = disableAutostartForHome(homeDir);
+      process.stdout.write(`${formatAutostartReport(report)}\n`);
+    });
+
+  autostart
+    .command("uninstall")
+    .description("remove boot autostart entirely (deletes the unit/task and files)")
+    .action(function (this: Command) {
+      const globals = this.optsWithGlobals<GlobalOptions>();
+      const homeDir = resolveHomeDir(globals.home);
+      const report = uninstallAutostartForHome(homeDir);
       process.stdout.write(`${formatAutostartReport(report)}\n`);
     });
 

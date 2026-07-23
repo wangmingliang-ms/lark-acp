@@ -13,6 +13,8 @@ import { isUserSystemdAvailable, gatewayUnitName } from "../process-control.js";
 import {
   installSystemdAutostart,
   disableSystemdAutostart,
+  enableSystemdAutostart,
+  uninstallSystemdAutostart,
   querySystemdAutostart,
   type RunResult,
   type SystemdDeps,
@@ -20,6 +22,8 @@ import {
 import {
   installWindowsAutostart,
   disableWindowsAutostart,
+  enableWindowsAutostart,
+  uninstallWindowsAutostart,
   queryWindowsAutostart,
   renderTaskXml,
   type WindowsDeps,
@@ -27,6 +31,8 @@ import {
 import {
   ensureAutostart,
   disableAutostart,
+  enableAutostart,
+  uninstallAutostart,
   queryAutostart,
   type AutostartReport,
   type AutostartStatus,
@@ -51,6 +57,9 @@ const fsDeps = {
   writeFile: (filePath: string, content: string) => fs.writeFileSync(filePath, content, "utf-8"),
   mkdirp: (dir: string) => {
     fs.mkdirSync(dir, { recursive: true });
+  },
+  rm: (filePath: string) => {
+    fs.rmSync(filePath, { force: true });
   },
   run: realRun,
 };
@@ -123,6 +132,23 @@ export function buildAutostartRuntime(homeDir: string, selfPath: string): Autost
     },
     disableWindows: () =>
       disableWindowsAutostart({ taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
+    enableSystemd: () => {
+      const { unitName, unitPath } = systemdPaths(homeDir);
+      return enableSystemdAutostart({
+        unitPath,
+        unitName,
+        user: os.userInfo().username,
+        deps: fsDeps,
+      });
+    },
+    enableWindows: () =>
+      enableWindowsAutostart({ ps1Path, taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
+    uninstallSystemd: () => {
+      const { unitName, unitPath } = systemdPaths(homeDir);
+      return uninstallSystemdAutostart({ unitPath, unitName, deps: fsDeps });
+    },
+    uninstallWindows: () =>
+      uninstallWindowsAutostart({ ps1Path, taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
     querySystemd: () => {
       const { unitName, unitPath } = systemdPaths(homeDir);
       return querySystemdAutostart({ unitPath, unitName, deps: fsDeps });
@@ -139,6 +165,16 @@ export function ensureAutostartForHome(homeDir: string, selfPath: string): Autos
 /** Convenience: build the real runtime and run the disable dispatcher. */
 export function disableAutostartForHome(homeDir: string): AutostartReport {
   return disableAutostart(buildAutostartRuntime(homeDir, ""));
+}
+
+/** Convenience: build the real runtime and run the enable dispatcher. */
+export function enableAutostartForHome(homeDir: string): AutostartReport {
+  return enableAutostart(buildAutostartRuntime(homeDir, ""));
+}
+
+/** Convenience: build the real runtime and run the uninstall dispatcher. */
+export function uninstallAutostartForHome(homeDir: string): AutostartReport {
+  return uninstallAutostart(buildAutostartRuntime(homeDir, ""));
 }
 
 /** Convenience: build the real runtime and query the current autostart status. */

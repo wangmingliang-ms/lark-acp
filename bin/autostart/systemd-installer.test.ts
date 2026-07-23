@@ -3,6 +3,8 @@ import {
   renderSystemdUnit,
   installSystemdAutostart,
   disableSystemdAutostart,
+  enableSystemdAutostart,
+  uninstallSystemdAutostart,
   querySystemdAutostart,
   type SystemdDeps,
 } from "./systemd-installer.js";
@@ -29,21 +31,24 @@ function fakeDeps(
 ): {
   deps: SystemdDeps;
   writes: Array<{ path: string; content: string }>;
+  removed: string[];
   ran: string[][];
 } {
   const writes: Array<{ path: string; content: string }> = [];
+  const removed: string[] = [];
   const ran: string[][] = [];
   const deps: SystemdDeps = {
     readFile: () => existing,
     writeFile: (p, content) => writes.push({ path: p, content }),
     mkdirp: () => {},
+    rm: (p) => removed.push(p),
     run: (cmd, args) => {
       ran.push([cmd, ...args]);
       if (args.includes("is-enabled")) return { status: 0, stdout: isEnabled, stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     },
   };
-  return { deps, writes, ran };
+  return { deps, writes, removed, ran };
 }
 
 const installSpec = {
@@ -102,19 +107,21 @@ describe("installSystemdAutostart", () => {
 function disableDeps(
   fileExists: boolean,
   isEnabled: string,
-): { deps: SystemdDeps; ran: string[][] } {
+): { deps: SystemdDeps; ran: string[][]; removed: string[] } {
   const ran: string[][] = [];
+  const removed: string[] = [];
   const deps: SystemdDeps = {
     readFile: () => (fileExists ? "unit-content" : null),
     writeFile: () => {},
     mkdirp: () => {},
+    rm: (p) => removed.push(p),
     run: (cmd, args) => {
       ran.push([cmd, ...args]);
       if (args.includes("is-enabled")) return { status: 0, stdout: isEnabled, stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     },
   };
-  return { deps, ran };
+  return { deps, ran, removed };
 }
 
 describe("disableSystemdAutostart", () => {
@@ -149,6 +156,68 @@ describe("disableSystemdAutostart", () => {
     });
     expect(report.kind).toBe("already-disabled");
     expect(ran.some((r) => r.includes("disable"))).toBe(false);
+  });
+});
+
+describe("enableSystemdAutostart", () => {
+  const unit = {
+    unitPath: "/home/u/.config/systemd/user/humming.service",
+    unitName: "humming.service",
+    user: "u",
+  };
+
+  it("enables an installed-but-disabled unit without writing files", () => {
+    const { deps, writes, ran } = fakeDeps("unit-content", "disabled");
+    const report = enableSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("enabled");
+    expect(writes).toHaveLength(0);
+    expect(ran).toContainEqual(["systemctl", "--user", "enable", "humming.service"]);
+    expect(ran).toContainEqual(["loginctl", "enable-linger", "u"]);
+  });
+
+  it("is not-installed when the unit file is absent", () => {
+    const { deps, ran } = fakeDeps(null, "disabled");
+    const report = enableSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("not-installed");
+    expect(ran.some((r) => r.includes("enable"))).toBe(false);
+  });
+
+  it("is already-current when already enabled", () => {
+    const { deps, ran } = fakeDeps("unit-content", "enabled");
+    const report = enableSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("already-current");
+    expect(ran.some((r) => r.includes("enable"))).toBe(false);
+  });
+});
+
+describe("uninstallSystemdAutostart", () => {
+  const unit = {
+    unitPath: "/home/u/.config/systemd/user/humming.service",
+    unitName: "humming.service",
+  };
+
+  it("disables an enabled unit, deletes the file, and reloads", () => {
+    const { deps, ran, removed } = disableDeps(true, "enabled");
+    const report = uninstallSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("uninstalled");
+    expect(ran).toContainEqual(["systemctl", "--user", "disable", "humming.service"]);
+    expect(removed).toContain(unit.unitPath);
+    expect(ran).toContainEqual(["systemctl", "--user", "daemon-reload"]);
+  });
+
+  it("deletes the file without disabling when already disabled", () => {
+    const { deps, ran, removed } = disableDeps(true, "disabled");
+    const report = uninstallSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("uninstalled");
+    expect(ran.some((r) => r.includes("disable"))).toBe(false);
+    expect(removed).toContain(unit.unitPath);
+  });
+
+  it("is already-uninstalled when the unit file is absent", () => {
+    const { deps, removed } = disableDeps(false, "enabled");
+    const report = uninstallSystemdAutostart({ ...unit, deps });
+    expect(report.kind).toBe("already-uninstalled");
+    expect(removed).toHaveLength(0);
   });
 });
 

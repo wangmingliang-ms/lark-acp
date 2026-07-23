@@ -33,16 +33,22 @@ humming logs -f                 # 实时日志
 humming restart                 # 改代码后重启（沿用上次启动参数）
 humming stop                    # 停止
 humming run --agent claude      # 前台运行（占终端，Ctrl-C 停）
-humming autostart install       # 为当前 OS 安装开机自启（幂等）
-humming autostart disable       # 停用开机自启（保留 unit/task，可再 install 恢复）
+humming autostart install       # 为当前 OS 安装开机自启（写文件 + 启用，幂等）
+humming autostart enable        # 启用已安装的开机自启（不动文件）
+humming autostart disable       # 停用开机自启（保留 unit/task，可再 enable/install 恢复）
+humming autostart uninstall     # 彻底移除开机自启（删 unit/task 及脚本文件）
+humming autostart status        # 只读查询：已安装/已启用状态
 ```
 
 - **开机自启**：`humming autostart install` 按当前 OS 幂等安装——Linux 写持久化 systemd
   user service（`~/.config/systemd/user/<unit>-boot.service` + `enable` + `enable-linger`）；
   Windows 注册 Task Scheduler 开机（BootTrigger）任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
   `humming init` / `humming update` 末尾也会自动调用 install；不支持的平台（如 macOS）静默跳过。
-  `humming autostart disable` 只停用、保留 unit/task 文件（Linux `systemctl --user disable`；Windows
-  `schtasks /change /disable`），之后再 `install` 可秒恢复（install 会把被 disable 的 unit 重新 enable）。
+  四个动词按"是否碰文件"分成两组：**install/uninstall 管文件的增删**（install 写 unit/task 并启用；
+  uninstall 删 unit/task 及脚本），**enable/disable 只翻启用状态、不碰文件**（Linux
+  `systemctl --user enable|disable`；Windows `schtasks /change /enable|/disable`）。`enable` 要求已
+  install（文件不存在则报 not-installed）。`status` 只读，不改任何状态。
+  之后再 `install`/`enable` 可秒恢复（install 会把被 disable 的 unit 重新 enable）。
   注意 boot unit 名带 `-boot` 后缀，与 `gateway start` 的 transient 运行时 unit 区分开。
   boot 脚本只写 `gateway run`/`start`，**不**固化 `--agent`——Agent 由运行时读 `settings.json`
   的 `runtime.agent` 解析，避免开机自启把旧 Agent 写死。

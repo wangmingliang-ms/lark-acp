@@ -1,6 +1,8 @@
 export {
   ensureAutostart,
   disableAutostart,
+  enableAutostart,
+  uninstallAutostart,
   queryAutostart,
   detectAutostartTarget,
 } from "./autostart.js";

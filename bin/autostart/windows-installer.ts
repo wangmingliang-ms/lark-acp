@@ -62,6 +62,7 @@ export interface WindowsDeps {
   readonly readFile: (path: string) => string | null;
   readonly writeFile: (path: string, content: string) => void;
   readonly mkdirp: (dir: string) => void;
+  readonly rm: (path: string) => void;
   readonly taskExists: (taskName: string) => boolean;
   readonly run: (cmd: string, args: readonly string[]) => RunResult;
 }
@@ -127,10 +128,75 @@ export function disableWindowsAutostart(args: WindowsDisableArgs): AutostartRepo
   return { kind: "disabled", mechanism: "windows-task", path: args.taskName };
 }
 
+/** Everything needed to enable an already-installed Windows task (no writes). */
+export interface WindowsEnableArgs {
+  readonly ps1Path: string;
+  readonly taskName: string;
+  readonly deps: WindowsDeps;
+}
+
+/**
+ * Enable an already-registered boot task without writing files. Requires the
+ * task to exist (install first). Idempotent: reports `already-current` when the
+ * task is already enabled.
+ * @throws {Error} when `schtasks /change /enable` exits non-zero.
+ */
+export function enableWindowsAutostart(args: WindowsEnableArgs): AutostartReport {
+  if (!args.deps.taskExists(args.taskName)) {
+    return { kind: "not-installed", mechanism: "windows-task", path: args.taskName };
+  }
+  if (isWindowsTaskEnabled(args.deps, args.taskName)) {
+    return { kind: "already-current", mechanism: "windows-task", path: args.taskName };
+  }
+  runOrThrow(args.deps, "schtasks.exe", ["/change", "/tn", args.taskName, "/enable"]);
+  return { kind: "enabled", mechanism: "windows-task", path: args.taskName };
+}
+
+/** Everything needed to uninstall (delete task + files) the Windows autostart. */
+export interface WindowsUninstallArgs {
+  readonly ps1Path: string;
+  readonly taskName: string;
+  readonly deps: WindowsDeps;
+}
+
+/**
+ * Delete the boot task and remove its ps1/xml files. Idempotent: reports
+ * `already-uninstalled` when neither the task nor the ps1 file is present.
+ * @throws {Error} when `schtasks /delete` exits non-zero.
+ */
+export function uninstallWindowsAutostart(args: WindowsUninstallArgs): AutostartReport {
+  const taskPresent = args.deps.taskExists(args.taskName);
+  const ps1Present = args.deps.readFile(args.ps1Path) !== null;
+  if (!taskPresent && !ps1Present) {
+    return { kind: "already-uninstalled", mechanism: "windows-task", path: args.taskName };
+  }
+  if (taskPresent) {
+    runOrThrow(args.deps, "schtasks.exe", ["/delete", "/tn", args.taskName, "/f"]);
+  }
+  if (ps1Present) {
+    args.deps.rm(args.ps1Path);
+    args.deps.rm(`${args.ps1Path}.task.xml`);
+  }
+  return { kind: "uninstalled", mechanism: "windows-task", path: args.taskName };
+}
+
 /** Everything needed to query the Windows autostart task's status. */
 export interface WindowsQueryArgs {
   readonly taskName: string;
   readonly deps: WindowsDeps;
+}
+
+/**
+ * Whether a registered task's "Scheduled Task State:" line reads enabled.
+ * Read-only; treats an unreadable/absent state line as disabled.
+ */
+function isWindowsTaskEnabled(deps: WindowsDeps, taskName: string): boolean {
+  const out = deps.run("schtasks.exe", ["/query", "/tn", taskName, "/fo", "LIST", "/v"]);
+  const stateLine = out.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("Scheduled Task State:"));
+  return stateLine?.toLowerCase().includes("enabled") ?? false;
 }
 
 /**
@@ -142,13 +208,7 @@ export function queryWindowsAutostart(args: WindowsQueryArgs): AutostartStatus {
   if (!args.deps.taskExists(args.taskName)) {
     return { kind: "not-installed", mechanism: "windows-task", path: args.taskName };
   }
-  const out = args.deps.run("schtasks.exe", ["/query", "/tn", args.taskName, "/fo", "LIST", "/v"]);
-  const stateLine = out.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.startsWith("Scheduled Task State:"));
-  const enabled = stateLine?.toLowerCase().includes("enabled") ?? false;
-  if (enabled) {
+  if (isWindowsTaskEnabled(args.deps, args.taskName)) {
     return { kind: "enabled", mechanism: "windows-task", path: args.taskName };
   }
   return { kind: "installed-disabled", mechanism: "windows-task", path: args.taskName };

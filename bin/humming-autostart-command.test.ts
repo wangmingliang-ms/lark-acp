@@ -38,6 +38,43 @@ describe("formatAutostartReport", () => {
     });
     expect(msg).toContain("already disabled");
   });
+
+  it("describes an enable", () => {
+    const msg = formatAutostartReport({
+      kind: "enabled",
+      mechanism: "systemd",
+      path: "/home/u/.config/systemd/user/x-boot.service",
+    });
+    expect(msg).toContain("enabled");
+    expect(msg).toContain("systemd");
+  });
+
+  it("describes a not-installed enable attempt", () => {
+    const msg = formatAutostartReport({
+      kind: "not-installed",
+      mechanism: "systemd",
+      path: "/home/u/.config/systemd/user/x-boot.service",
+    });
+    expect(msg).toContain("not installed");
+  });
+
+  it("describes an uninstall", () => {
+    const msg = formatAutostartReport({
+      kind: "uninstalled",
+      mechanism: "windows-task",
+      path: "Humming Gateway Autostart",
+    });
+    expect(msg).toContain("uninstalled");
+  });
+
+  it("describes an already-uninstalled", () => {
+    const msg = formatAutostartReport({
+      kind: "already-uninstalled",
+      mechanism: "systemd",
+      path: "/home/u/.config/systemd/user/x-boot.service",
+    });
+    expect(msg).toContain("already uninstalled");
+  });
 });
 
 describe("init/update autostart wiring contract", () => {

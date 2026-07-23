@@ -4,6 +4,8 @@ import {
   renderTaskXml,
   installWindowsAutostart,
   disableWindowsAutostart,
+  enableWindowsAutostart,
+  uninstallWindowsAutostart,
   queryWindowsAutostart,
   type WindowsDeps,
 } from "./windows-installer.js";
@@ -47,6 +49,7 @@ function fakeWinDeps(
     readFile: () => existingPs1,
     writeFile: (p, content) => writes.push({ path: p, content }),
     mkdirp: () => {},
+    rm: () => {},
     taskExists: () => taskExists,
     run: (cmd, args) => {
       ran.push([cmd, ...args]);
@@ -88,6 +91,7 @@ function disableWinDeps(taskExists: boolean): { deps: WindowsDeps; ran: string[]
     readFile: () => null,
     writeFile: () => {},
     mkdirp: () => {},
+    rm: () => {},
     taskExists: () => taskExists,
     run: (cmd, args) => {
       ran.push([cmd, ...args]);
@@ -119,11 +123,97 @@ describe("disableWindowsAutostart", () => {
   });
 });
 
+function enableWinDeps(
+  taskExists: boolean,
+  queryStdout: string,
+): { deps: WindowsDeps; ran: string[][] } {
+  const ran: string[][] = [];
+  const deps: WindowsDeps = {
+    readFile: () => null,
+    writeFile: () => {},
+    mkdirp: () => {},
+    rm: () => {},
+    taskExists: () => taskExists,
+    run: (cmd, args) => {
+      ran.push([cmd, ...args]);
+      if (args.includes("/query")) return { status: 0, stdout: queryStdout, stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, ran };
+}
+
+const TASK = "Humming Gateway Autostart";
+const PS1 = "C:\\Users\\u\\.humming\\autostart\\humming-autostart.ps1";
+
+describe("enableWindowsAutostart", () => {
+  it("enables an installed-but-disabled task", () => {
+    const { deps, ran } = enableWinDeps(true, "  Scheduled Task State:      Disabled\r\n");
+    const report = enableWindowsAutostart({ ps1Path: PS1, taskName: TASK, deps });
+    expect(report.kind).toBe("enabled");
+    expect(ran).toContainEqual(["schtasks.exe", "/change", "/tn", TASK, "/enable"]);
+  });
+
+  it("is not-installed when the task is absent", () => {
+    const { deps, ran } = enableWinDeps(false, "");
+    const report = enableWindowsAutostart({ ps1Path: PS1, taskName: TASK, deps });
+    expect(report.kind).toBe("not-installed");
+    expect(ran.some((r) => r.includes("/enable"))).toBe(false);
+  });
+
+  it("is already-current when the task is already enabled", () => {
+    const { deps, ran } = enableWinDeps(true, "  Scheduled Task State:      Enabled\r\n");
+    const report = enableWindowsAutostart({ ps1Path: PS1, taskName: TASK, deps });
+    expect(report.kind).toBe("already-current");
+    expect(ran.some((r) => r.includes("/enable"))).toBe(false);
+  });
+});
+
+function uninstallWinDeps(
+  taskExists: boolean,
+  ps1Exists: boolean,
+): { deps: WindowsDeps; ran: string[][]; removed: string[] } {
+  const ran: string[][] = [];
+  const removed: string[] = [];
+  const deps: WindowsDeps = {
+    readFile: () => (ps1Exists ? "ps1-content" : null),
+    writeFile: () => {},
+    mkdirp: () => {},
+    rm: (p) => removed.push(p),
+    taskExists: () => taskExists,
+    run: (cmd, args) => {
+      ran.push([cmd, ...args]);
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, ran, removed };
+}
+
+describe("uninstallWindowsAutostart", () => {
+  it("deletes the task and removes ps1 + xml files", () => {
+    const { deps, ran, removed } = uninstallWinDeps(true, true);
+    const report = uninstallWindowsAutostart({ ps1Path: PS1, taskName: TASK, deps });
+    expect(report.kind).toBe("uninstalled");
+    expect(ran).toContainEqual(["schtasks.exe", "/delete", "/tn", TASK, "/f"]);
+    expect(removed).toContain(PS1);
+    expect(removed).toContain(`${PS1}.task.xml`);
+  });
+
+  it("is already-uninstalled when neither task nor ps1 is present", () => {
+    const { deps, ran, removed } = uninstallWinDeps(false, false);
+    const report = uninstallWindowsAutostart({ ps1Path: PS1, taskName: TASK, deps });
+    expect(report.kind).toBe("already-uninstalled");
+    expect(ran).toHaveLength(0);
+    expect(removed).toHaveLength(0);
+  });
+});
+
 function queryWinDeps(taskExists: boolean, queryStdout: string): { deps: WindowsDeps } {
   const deps: WindowsDeps = {
     readFile: () => null,
     writeFile: () => {},
     mkdirp: () => {},
+    rm: () => {},
     taskExists: () => taskExists,
     run: () => ({ status: 0, stdout: queryStdout, stderr: "" }),
   };

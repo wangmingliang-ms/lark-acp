@@ -3,6 +3,8 @@ import {
   detectAutostartTarget,
   ensureAutostart,
   disableAutostart,
+  enableAutostart,
+  uninstallAutostart,
   queryAutostart,
   type AutostartRuntime,
 } from "./autostart.js";
@@ -36,6 +38,10 @@ function baseRuntime(overrides: Partial<AutostartRuntime>): AutostartRuntime {
     installWindows: () => ({ kind: "installed", mechanism: "windows-task", path: "task" }),
     disableSystemd: () => ({ kind: "disabled", mechanism: "systemd", path: "/unit" }),
     disableWindows: () => ({ kind: "disabled", mechanism: "windows-task", path: "task" }),
+    enableSystemd: () => ({ kind: "enabled", mechanism: "systemd", path: "/unit" }),
+    enableWindows: () => ({ kind: "enabled", mechanism: "windows-task", path: "task" }),
+    uninstallSystemd: () => ({ kind: "uninstalled", mechanism: "systemd", path: "/unit" }),
+    uninstallWindows: () => ({ kind: "uninstalled", mechanism: "windows-task", path: "task" }),
     querySystemd: () => ({ kind: "enabled", mechanism: "systemd", path: "/unit" }),
     queryWindows: () => ({ kind: "enabled", mechanism: "windows-task", path: "task" }),
     ...overrides,
@@ -81,6 +87,48 @@ describe("disableAutostart", () => {
 
   it("skips with a reason on unsupported platform", () => {
     const report = disableAutostart(
+      baseRuntime({ env: { platform: "darwin", systemdAvailable: false } }),
+    );
+    expect(report.kind).toBe("skipped");
+  });
+});
+
+describe("enableAutostart", () => {
+  it("dispatches to systemd enabler on linux", () => {
+    const report = enableAutostart(baseRuntime({}));
+    expect(report).toEqual({ kind: "enabled", mechanism: "systemd", path: "/unit" });
+  });
+
+  it("dispatches to windows enabler on win32", () => {
+    const report = enableAutostart(
+      baseRuntime({ env: { platform: "win32", systemdAvailable: false } }),
+    );
+    expect(report).toHaveProperty("mechanism", "windows-task");
+  });
+
+  it("skips on unsupported platform", () => {
+    const report = enableAutostart(
+      baseRuntime({ env: { platform: "darwin", systemdAvailable: false } }),
+    );
+    expect(report.kind).toBe("skipped");
+  });
+});
+
+describe("uninstallAutostart", () => {
+  it("dispatches to systemd uninstaller on linux", () => {
+    const report = uninstallAutostart(baseRuntime({}));
+    expect(report).toEqual({ kind: "uninstalled", mechanism: "systemd", path: "/unit" });
+  });
+
+  it("dispatches to windows uninstaller on win32", () => {
+    const report = uninstallAutostart(
+      baseRuntime({ env: { platform: "win32", systemdAvailable: false } }),
+    );
+    expect(report).toHaveProperty("mechanism", "windows-task");
+  });
+
+  it("skips on unsupported platform", () => {
+    const report = uninstallAutostart(
       baseRuntime({ env: { platform: "darwin", systemdAvailable: false } }),
     );
     expect(report.kind).toBe("skipped");
