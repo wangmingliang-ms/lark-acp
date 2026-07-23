@@ -3,6 +3,7 @@ import {
   detectAutostartTarget,
   ensureAutostart,
   disableAutostart,
+  queryAutostart,
   type AutostartRuntime,
 } from "./autostart.js";
 
@@ -35,6 +36,8 @@ function baseRuntime(overrides: Partial<AutostartRuntime>): AutostartRuntime {
     installWindows: () => ({ kind: "installed", mechanism: "windows-task", path: "task" }),
     disableSystemd: () => ({ kind: "disabled", mechanism: "systemd", path: "/unit" }),
     disableWindows: () => ({ kind: "disabled", mechanism: "windows-task", path: "task" }),
+    querySystemd: () => ({ kind: "enabled", mechanism: "systemd", path: "/unit" }),
+    queryWindows: () => ({ kind: "enabled", mechanism: "windows-task", path: "task" }),
     ...overrides,
   };
 }
@@ -81,5 +84,26 @@ describe("disableAutostart", () => {
       baseRuntime({ env: { platform: "darwin", systemdAvailable: false } }),
     );
     expect(report.kind).toBe("skipped");
+  });
+});
+
+describe("queryAutostart", () => {
+  it("dispatches to systemd query on linux", () => {
+    const status = queryAutostart(baseRuntime({}));
+    expect(status).toEqual({ kind: "enabled", mechanism: "systemd", path: "/unit" });
+  });
+
+  it("dispatches to windows query on win32", () => {
+    const status = queryAutostart(
+      baseRuntime({ env: { platform: "win32", systemdAvailable: false } }),
+    );
+    expect(status).toHaveProperty("mechanism", "windows-task");
+  });
+
+  it("reports unsupported on darwin", () => {
+    const status = queryAutostart(
+      baseRuntime({ env: { platform: "darwin", systemdAvailable: false } }),
+    );
+    expect(status.kind).toBe("unsupported");
   });
 });

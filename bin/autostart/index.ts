@@ -1,6 +1,12 @@
-export { ensureAutostart, disableAutostart, detectAutostartTarget } from "./autostart.js";
+export {
+  ensureAutostart,
+  disableAutostart,
+  queryAutostart,
+  detectAutostartTarget,
+} from "./autostart.js";
 export type {
   AutostartReport,
+  AutostartStatus,
   AutostartMechanism,
   AutostartRuntime,
   AutostartEnv,

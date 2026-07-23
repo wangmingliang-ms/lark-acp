@@ -4,6 +4,7 @@ import {
   renderTaskXml,
   installWindowsAutostart,
   disableWindowsAutostart,
+  queryWindowsAutostart,
   type WindowsDeps,
 } from "./windows-installer.js";
 
@@ -115,5 +116,36 @@ describe("disableWindowsAutostart", () => {
     const report = disableWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
     expect(report.kind).toBe("already-disabled");
     expect(ran).toHaveLength(0);
+  });
+});
+
+function queryWinDeps(taskExists: boolean, queryStdout: string): { deps: WindowsDeps } {
+  const deps: WindowsDeps = {
+    readFile: () => null,
+    writeFile: () => {},
+    mkdirp: () => {},
+    taskExists: () => taskExists,
+    run: () => ({ status: 0, stdout: queryStdout, stderr: "" }),
+  };
+  return { deps };
+}
+
+describe("queryWindowsAutostart", () => {
+  it("reports not-installed when the task is absent", () => {
+    const { deps } = queryWinDeps(false, "");
+    const status = queryWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
+    expect(status.kind).toBe("not-installed");
+  });
+
+  it("reports enabled when the task state is Ready", () => {
+    const { deps } = queryWinDeps(true, "  Scheduled Task State:      Enabled\r\n");
+    const status = queryWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
+    expect(status.kind).toBe("enabled");
+  });
+
+  it("reports installed-disabled when the task state is Disabled", () => {
+    const { deps } = queryWinDeps(true, "  Scheduled Task State:      Disabled\r\n");
+    const status = queryWindowsAutostart({ taskName: "Humming Gateway Autostart", deps });
+    expect(status.kind).toBe("installed-disabled");
   });
 });

@@ -1,4 +1,4 @@
-import type { AutostartReport } from "./autostart.js";
+import type { AutostartReport, AutostartStatus } from "./autostart.js";
 
 /** Inputs for the persistent systemd user unit that boots the gateway. */
 export interface SystemdUnitSpec {
@@ -115,4 +115,27 @@ export function disableSystemdAutostart(args: SystemdDisableArgs): AutostartRepo
   }
   runOrThrow(args.deps, "systemctl", ["--user", "disable", args.unitName]);
   return { kind: "disabled", mechanism: "systemd", path: args.unitPath };
+}
+
+/** Everything needed to query the persistent unit's status. */
+export interface SystemdQueryArgs {
+  readonly unitPath: string;
+  readonly unitName: string;
+  readonly deps: SystemdDeps;
+}
+
+/**
+ * Report whether the boot unit is installed and enabled. Read-only: never
+ * mutates state and never throws for a missing/disabled unit.
+ */
+export function querySystemdAutostart(args: SystemdQueryArgs): AutostartStatus {
+  const present = args.deps.readFile(args.unitPath) !== null;
+  if (!present) {
+    return { kind: "not-installed", mechanism: "systemd", path: args.unitPath };
+  }
+  const state = args.deps.run("systemctl", ["--user", "is-enabled", args.unitName]).stdout.trim();
+  if (state === "enabled") {
+    return { kind: "enabled", mechanism: "systemd", path: args.unitPath };
+  }
+  return { kind: "installed-disabled", mechanism: "systemd", path: args.unitPath };
 }

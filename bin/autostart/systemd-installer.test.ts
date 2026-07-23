@@ -3,6 +3,7 @@ import {
   renderSystemdUnit,
   installSystemdAutostart,
   disableSystemdAutostart,
+  querySystemdAutostart,
   type SystemdDeps,
 } from "./systemd-installer.js";
 
@@ -148,5 +149,37 @@ describe("disableSystemdAutostart", () => {
     });
     expect(report.kind).toBe("already-disabled");
     expect(ran.some((r) => r.includes("disable"))).toBe(false);
+  });
+});
+
+describe("querySystemdAutostart", () => {
+  it("reports not-installed when the unit file is absent", () => {
+    const { deps } = disableDeps(false, "enabled");
+    const status = querySystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(status.kind).toBe("not-installed");
+  });
+
+  it("reports enabled when the unit is present and enabled", () => {
+    const { deps } = disableDeps(true, "enabled");
+    const status = querySystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(status.kind).toBe("enabled");
+  });
+
+  it("reports installed-disabled when present but not enabled", () => {
+    const { deps } = disableDeps(true, "disabled");
+    const status = querySystemdAutostart({
+      unitPath: "/home/u/.config/systemd/user/humming.service",
+      unitName: "humming.service",
+      deps,
+    });
+    expect(status.kind).toBe("installed-disabled");
   });
 });

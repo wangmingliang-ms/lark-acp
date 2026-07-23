@@ -1,4 +1,4 @@
-import type { AutostartReport } from "./autostart.js";
+import type { AutostartReport, AutostartStatus } from "./autostart.js";
 import type { RunResult } from "./systemd-installer.js";
 
 /** Inputs for the PowerShell autostart script. */
@@ -125,4 +125,31 @@ export function disableWindowsAutostart(args: WindowsDisableArgs): AutostartRepo
   }
   runOrThrow(args.deps, "schtasks.exe", ["/change", "/tn", args.taskName, "/disable"]);
   return { kind: "disabled", mechanism: "windows-task", path: args.taskName };
+}
+
+/** Everything needed to query the Windows autostart task's status. */
+export interface WindowsQueryArgs {
+  readonly taskName: string;
+  readonly deps: WindowsDeps;
+}
+
+/**
+ * Report whether the boot task exists and is enabled. Read-only. Parses the
+ * "Scheduled Task State:" line from `schtasks /query /fo LIST /v`; treats an
+ * unreadable/absent state line as disabled rather than throwing.
+ */
+export function queryWindowsAutostart(args: WindowsQueryArgs): AutostartStatus {
+  if (!args.deps.taskExists(args.taskName)) {
+    return { kind: "not-installed", mechanism: "windows-task", path: args.taskName };
+  }
+  const out = args.deps.run("schtasks.exe", ["/query", "/tn", args.taskName, "/fo", "LIST", "/v"]);
+  const stateLine = out.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("Scheduled Task State:"));
+  const enabled = stateLine?.toLowerCase().includes("enabled") ?? false;
+  if (enabled) {
+    return { kind: "enabled", mechanism: "windows-task", path: args.taskName };
+  }
+  return { kind: "installed-disabled", mechanism: "windows-task", path: args.taskName };
 }

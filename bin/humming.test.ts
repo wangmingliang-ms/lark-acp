@@ -91,7 +91,9 @@ describe("program construction", () => {
     );
 
     const autostart = program.commands.find((cmd) => cmd.name() === "autostart");
-    expect(autostart?.commands.map((c) => c.name()).sort()).toEqual(["install", "disable"].sort());
+    expect(autostart?.commands.map((c) => c.name()).sort()).toEqual(
+      ["install", "disable", "status"].sort(),
+    );
 
     const agent = program.commands.find((cmd) => cmd.name() === "agent");
     expect(agent?.commands.map((c) => c.name()).sort()).toEqual(

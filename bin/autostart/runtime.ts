@@ -13,19 +13,23 @@ import { isUserSystemdAvailable, gatewayUnitName } from "../process-control.js";
 import {
   installSystemdAutostart,
   disableSystemdAutostart,
+  querySystemdAutostart,
   type RunResult,
   type SystemdDeps,
 } from "./systemd-installer.js";
 import {
   installWindowsAutostart,
   disableWindowsAutostart,
+  queryWindowsAutostart,
   renderTaskXml,
   type WindowsDeps,
 } from "./windows-installer.js";
 import {
   ensureAutostart,
   disableAutostart,
+  queryAutostart,
   type AutostartReport,
+  type AutostartStatus,
   type AutostartRuntime,
 } from "./autostart.js";
 
@@ -119,6 +123,11 @@ export function buildAutostartRuntime(homeDir: string, selfPath: string): Autost
     },
     disableWindows: () =>
       disableWindowsAutostart({ taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
+    querySystemd: () => {
+      const { unitName, unitPath } = systemdPaths(homeDir);
+      return querySystemdAutostart({ unitPath, unitName, deps: fsDeps });
+    },
+    queryWindows: () => queryWindowsAutostart({ taskName: WINDOWS_TASK_NAME, deps: windowsDeps() }),
   };
 }
 
@@ -130,4 +139,9 @@ export function ensureAutostartForHome(homeDir: string, selfPath: string): Autos
 /** Convenience: build the real runtime and run the disable dispatcher. */
 export function disableAutostartForHome(homeDir: string): AutostartReport {
   return disableAutostart(buildAutostartRuntime(homeDir, ""));
+}
+
+/** Convenience: build the real runtime and query the current autostart status. */
+export function queryAutostartForHome(homeDir: string): AutostartStatus {
+  return queryAutostart(buildAutostartRuntime(homeDir, ""));
 }

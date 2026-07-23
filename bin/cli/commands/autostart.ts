@@ -1,13 +1,18 @@
 /**
- * `humming autostart install|disable` — manage OS-native boot autostart for
- * the gateway. `install` is also invoked by init/update; `disable` stops the
- * autostart without deleting its unit/task (reversible).
+ * `humming autostart install|disable|status` — manage OS-native boot autostart
+ * for the gateway. `install` is also invoked by init/update; `disable` stops
+ * the autostart without deleting its unit/task (reversible); `status` reports
+ * the current state read-only.
  */
 import process from "node:process";
 import { Command } from "commander";
 import { resolveHomeDir } from "../config/load.js";
-import { ensureAutostartForHome, disableAutostartForHome } from "../../autostart/runtime.js";
-import type { AutostartReport } from "../../autostart/index.js";
+import {
+  ensureAutostartForHome,
+  disableAutostartForHome,
+  queryAutostartForHome,
+} from "../../autostart/runtime.js";
+import type { AutostartReport, AutostartStatus } from "../../autostart/index.js";
 import type { GlobalOptions } from "../context.js";
 
 /** Human-readable one-liner for a report. */
@@ -23,6 +28,20 @@ export function formatAutostartReport(report: AutostartReport): string {
       return `autostart already disabled (${report.mechanism}) at ${report.path}`;
     case "skipped":
       return `autostart skipped: ${report.reason}`;
+  }
+}
+
+/** Human-readable one-liner for a status query. */
+export function formatAutostartStatus(status: AutostartStatus): string {
+  switch (status.kind) {
+    case "enabled":
+      return `autostart enabled (${status.mechanism}) at ${status.path}`;
+    case "installed-disabled":
+      return `autostart installed but disabled (${status.mechanism}) at ${status.path}`;
+    case "not-installed":
+      return `autostart not installed (${status.mechanism}) at ${status.path}`;
+    case "unsupported":
+      return `autostart unsupported: ${status.reason}`;
   }
 }
 
@@ -53,5 +72,15 @@ export function registerAutostartCommand(program: Command, opts: RegisterAutosta
       const homeDir = resolveHomeDir(globals.home);
       const report = disableAutostartForHome(homeDir);
       process.stdout.write(`${formatAutostartReport(report)}\n`);
+    });
+
+  autostart
+    .command("status")
+    .description("report the current boot autostart status (read-only)")
+    .action(function (this: Command) {
+      const globals = this.optsWithGlobals<GlobalOptions>();
+      const homeDir = resolveHomeDir(globals.home);
+      const status = queryAutostartForHome(homeDir);
+      process.stdout.write(`${formatAutostartStatus(status)}\n`);
     });
 }

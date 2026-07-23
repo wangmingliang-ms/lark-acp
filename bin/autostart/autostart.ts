@@ -26,6 +26,21 @@ export type AutostartReport =
     }
   | { readonly kind: "skipped"; readonly reason: string };
 
+/** Result of a `queryAutostart` call: what's installed and whether it's active. */
+export type AutostartStatus =
+  | { readonly kind: "enabled"; readonly mechanism: AutostartMechanism; readonly path: string }
+  | {
+      readonly kind: "installed-disabled";
+      readonly mechanism: AutostartMechanism;
+      readonly path: string;
+    }
+  | {
+      readonly kind: "not-installed";
+      readonly mechanism: AutostartMechanism;
+      readonly path: string;
+    }
+  | { readonly kind: "unsupported"; readonly reason: string };
+
 /** Inputs to platform detection (injected for tests). */
 export interface AutostartEnv {
   readonly platform: NodeJS.Platform;
@@ -56,6 +71,8 @@ export interface AutostartRuntime {
   readonly installWindows: () => AutostartReport;
   readonly disableSystemd: () => AutostartReport;
   readonly disableWindows: () => AutostartReport;
+  readonly querySystemd: () => AutostartStatus;
+  readonly queryWindows: () => AutostartStatus;
 }
 
 /** Detect the platform and run the matching installer, else skip. */
@@ -72,4 +89,12 @@ export function disableAutostart(runtime: AutostartRuntime): AutostartReport {
   if (target === "systemd") return runtime.disableSystemd();
   if (target === "windows-task") return runtime.disableWindows();
   return { kind: "skipped", reason: target.unsupported };
+}
+
+/** Detect the platform and report the current autostart status. */
+export function queryAutostart(runtime: AutostartRuntime): AutostartStatus {
+  const target = detectAutostartTarget(runtime.env);
+  if (target === "systemd") return runtime.querySystemd();
+  if (target === "windows-task") return runtime.queryWindows();
+  return { kind: "unsupported", reason: target.unsupported };
 }
