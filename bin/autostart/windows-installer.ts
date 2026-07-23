@@ -57,13 +57,12 @@ export interface TaskXmlSpec {
 
 /** Render schtasks-compatible task XML (pure).
  *
- * Registers two independent triggers so autostart survives either path:
- * - LogonTrigger fires when {@link TaskXmlSpec.userId} logs on. This is the
- *   reliable one under `InteractiveToken`, which needs a live interactive
- *   session that only exists after logon.
- * - BootTrigger fires at boot, covering fast restarts where the user is
- *   already logged in. `MultipleInstancesPolicy=IgnoreNew` makes a redundant
- *   fire a no-op rather than launching a second gateway.
+ * Uses a LogonTrigger (not BootTrigger) so the task registers and runs entirely
+ * as the current user without administrator rights — mirroring the Linux
+ * systemd *user* service. A BootTrigger would require elevation to register and
+ * would run before logon under a non-interactive session; the gateway only
+ * needs to be up while the user is active, so logon-time start is sufficient
+ * and keeps the whole install/enable/disable/uninstall lifecycle admin-free.
  */
 export function renderTaskXml(spec: TaskXmlSpec): string {
   return `<?xml version="1.0" encoding="UTF-16"?>
@@ -87,9 +86,6 @@ export function renderTaskXml(spec: TaskXmlSpec): string {
       <Enabled>true</Enabled>
       <UserId>${spec.userId}</UserId>
     </LogonTrigger>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-    </BootTrigger>
   </Triggers>
   <Actions Context="Author">
     <Exec>

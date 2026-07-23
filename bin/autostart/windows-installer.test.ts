@@ -45,7 +45,7 @@ describe("renderAutostartPs1", () => {
 });
 
 describe("renderTaskXml", () => {
-  it("renders both a LogonTrigger and a BootTrigger invoking pwsh with the ps1", () => {
+  it("renders a LogonTrigger task (no BootTrigger) invoking pwsh with the ps1", () => {
     const xml = renderTaskXml({
       description: "Humming gateway autostart",
       pwshPath: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
@@ -53,8 +53,9 @@ describe("renderTaskXml", () => {
       userId: "MACHINE\\u",
     });
     expect(xml).toContain("<LogonTrigger>");
-    expect(xml).toContain("<BootTrigger>");
-    // LogonTrigger must be scoped to the same user so it fires only on that logon.
+    // BootTrigger would force admin rights to register; we deliberately avoid it.
+    expect(xml).not.toContain("<BootTrigger>");
+    // Principal + LogonTrigger both scope to the same user (fires only on that logon).
     expect(xml.match(/<UserId>MACHINE\\u<\/UserId>/g)).toHaveLength(2);
     expect(xml).toContain("<StartWhenAvailable>true</StartWhenAvailable>");
     expect(xml).toContain("pwsh.exe");

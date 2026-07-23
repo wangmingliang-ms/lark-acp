@@ -42,7 +42,9 @@ humming autostart status        # 只读查询：已安装/已启用状态
 
 - **开机自启**：`humming autostart install` 按当前 OS 幂等安装——Linux 写持久化 systemd
   user service（`~/.config/systemd/user/<unit>-boot.service` + `enable` + `enable-linger`）；
-  Windows 注册 Task Scheduler 开机（BootTrigger）任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
+  Windows 注册 Task Scheduler **登录触发（LogonTrigger）**任务，执行 `pwsh -File <home>\autostart\humming-autostart.ps1`。
+  用 LogonTrigger 而非 BootTrigger 是为了**全程免管理员**——和 Linux 的 systemd _user_ service 对齐；
+  代价是"开机但没人登录"时不自启（桌面场景无感）。install/enable/disable/uninstall 均不需要提权。
   `humming init` / `humming update` 末尾也会自动调用 install；不支持的平台（如 macOS）静默跳过。
   四个动词按"是否碰文件"分成两组：**install/uninstall 管文件的增删**（install 写 unit/task 并启用；
   uninstall 删 unit/task 及脚本），**enable/disable 只翻启用状态、不碰文件**（Linux
