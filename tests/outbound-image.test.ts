@@ -1,11 +1,12 @@
 /**
- * Integration test for the outbound image pipeline (Agent → Lark).
+ * Integration test for the inline-image pipeline (Agent → Lark card).
  *
- * Exercises the same composition `chat-runtime.runPrompt` performs: collect ACP
- * `image` blocks + extract markdown-embedded images from the finalized agent
- * text, then resolve each source to bytes and deliver it as a standalone image
- * message. Covers all three source forms (ACP block, local file, remote URL)
- * plus the text-placeholder fallback when a source can't be resolved/uploaded.
+ * Exercises the resolve→upload step `chat-runtime.resolveInlineImages` performs:
+ * each collected image source (ACP block, local file, remote URL) is resolved to
+ * bytes and uploaded to an `img_key` for an inline card `img` element; a source
+ * that can't be resolved or uploaded patches to a text placeholder instead.
+ * Also covers `extractMarkdownImages` (used to pull file/URL images out of the
+ * finalized agent text) and its chunk-split robustness.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -24,29 +25,31 @@ import { resolveImageBytes } from "../src/gateway/outbound-image-loader.js";
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
 
-/** A presenter double capturing image sends and text fallbacks in order. */
-interface DeliveryLog {
-  readonly kind: "image" | "text";
-  readonly detail: string;
-}
+/** Terminal state of an inline image entry after its upload settles. */
+type InlineResult =
+  | { readonly status: "ready"; readonly imgKey: string }
+  | { readonly status: "failed"; readonly fallback: string };
 
-/** Mirror of `chat-runtime.deliverOutboundImages`, driven against test doubles. */
-async function deliverAll(
+/** Mirror of `chat-runtime.resolveInlineImages`, driven against test doubles. */
+async function resolveAll(
   sources: readonly OutboundImageSource[],
-  replyImage: (bytes: Buffer) => Promise<boolean>,
-): Promise<DeliveryLog[]> {
-  const log: DeliveryLog[] = [];
+  uploadCardImage: (bytes: Buffer) => Promise<string | null>,
+): Promise<InlineResult[]> {
+  const out: InlineResult[] = [];
   for (const source of sources) {
     try {
       const { bytes } = await resolveImageBytes(source);
-      const ok = await replyImage(bytes);
-      if (ok) log.push({ kind: "image", detail: `${String(bytes.length)}B` });
-      else log.push({ kind: "text", detail: outboundImagePlaceholder(source) });
+      const imgKey = await uploadCardImage(bytes);
+      if (imgKey === null) {
+        out.push({ status: "failed", fallback: outboundImagePlaceholder(source) });
+      } else {
+        out.push({ status: "ready", imgKey });
+      }
     } catch {
-      log.push({ kind: "text", detail: outboundImagePlaceholder(source) });
+      out.push({ status: "failed", fallback: outboundImagePlaceholder(source) });
     }
   }
-  return log;
+  return out;
 }
 
 describe("outbound image pipeline", () => {
@@ -84,7 +87,7 @@ describe("outbound image pipeline", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("delivers all three source forms as independent images, in order", async () => {
+  it("resolves all three source forms to img_keys, in order", async () => {
     // Simulate the collected turn: one ACP image block, plus finalized text
     // carrying a local file image and a remote URL image.
     const acpBlock: OutboundImageSource = {
@@ -103,15 +106,22 @@ describe("outbound image pipeline", () => {
     const all = [acpBlock, ...markdownSources];
     expect(all.map((s) => s.kind)).toEqual(["acp-image", "local-file", "remote-url"]);
 
-    const log = await deliverAll(all, async () => true);
-    expect(log.map((l) => l.kind)).toEqual(["image", "image", "image"]);
+    let counter = 0;
+    const results = await resolveAll(all, async () => `img_key_${String(++counter)}`);
+    expect(results).toEqual([
+      { status: "ready", imgKey: "img_key_1" },
+      { status: "ready", imgKey: "img_key_2" },
+      { status: "ready", imgKey: "img_key_3" },
+    ]);
   });
 
   it("falls back to a text placeholder when a remote source is not an image", async () => {
     const text = `broken ![x](${baseUrl}/notimage.html)`;
     const { sources } = extractMarkdownImages(text);
-    const log = await deliverAll(sources, async () => true);
-    expect(log).toEqual([{ kind: "text", detail: `[图片下载失败: ${baseUrl}/notimage.html]` }]);
+    const results = await resolveAll(sources, async () => "img_key");
+    expect(results).toEqual([
+      { status: "failed", fallback: `[图片下载失败: ${baseUrl}/notimage.html]` },
+    ]);
   });
 
   it("falls back to a text placeholder when upload fails", async () => {
@@ -120,8 +130,8 @@ describe("outbound image pipeline", () => {
       base64: PNG_BYTES.toString("base64"),
       mimeType: "image/png",
     };
-    const log = await deliverAll([acpBlock], async () => false);
-    expect(log).toEqual([{ kind: "text", detail: "[图片发送失败]" }]);
+    const results = await resolveAll([acpBlock], async () => null);
+    expect(results).toEqual([{ status: "failed", fallback: "[图片发送失败]" }]);
   });
 
   it("handles chunk-split markdown once text is finalized", () => {

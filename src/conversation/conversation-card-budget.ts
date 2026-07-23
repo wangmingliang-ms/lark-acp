@@ -23,6 +23,10 @@ function entryBytes(entry: TimelineEntry): number {
       return utf8PartsByteLength([entry.text]);
     case "tool":
       return utf8PartsByteLength(["**tool**: ", entry.title]);
+    case "image":
+      // An uploaded image renders as a card `img` element and does not consume
+      // the markdown byte budget; only its alt/fallback text costs bytes.
+      return utf8PartsByteLength([entry.alt ?? entry.fallback ?? ""]);
   }
 }
 

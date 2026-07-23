@@ -121,7 +121,17 @@ export interface LarkPresenter {
    * `false` when upload or send fails (the caller degrades to a text
    * placeholder). Never throws.
    */
-  replyImage(messageId: string, bytes: Buffer, opts?: { replyInThread?: boolean }): Promise<boolean>;
+  replyImage(
+    messageId: string,
+    bytes: Buffer,
+    opts?: { replyInThread?: boolean },
+  ): Promise<boolean>;
+
+  /**
+   * Upload image bytes to Feishu and return the resulting `img_key` for use as
+   * an inline card `img` element, or `null` if the upload fails. Never throws.
+   */
+  uploadCardImage(bytes: Buffer): Promise<string | null>;
 
   /** Replace a permission card with a "no longer actionable" notice. */
   expirePermissionCard(messageId: string, reason: string): Promise<void>;

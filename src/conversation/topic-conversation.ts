@@ -50,6 +50,8 @@ export type ResponseCardReason =
   | "permission_continuation"
   | "transport_replacement";
 
+export type ImageEntryStatus = "uploading" | "ready" | "failed";
+
 export type TimelineEntry =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "thought"; readonly text: string }
@@ -60,10 +62,23 @@ export type TimelineEntry =
       readonly status:
         "pending" | "in_progress" | "continued" | "completed" | "failed" | "interrupted";
     }
+  | {
+      /** An inline image rendered as a Lark card `img` element. `imgKey` is set
+       *  once the bytes are uploaded (status "ready"); until then it renders a
+       *  placeholder, and "failed" renders a text fallback. */
+      readonly kind: "image";
+      readonly imageId: string;
+      readonly status: ImageEntryStatus;
+      readonly imgKey?: string;
+      readonly alt?: string;
+      /** Text fallback shown when status is "failed" (never leaks local paths). */
+      readonly fallback?: string;
+    }
   | { readonly kind: "notice"; readonly text: string };
 
 type TextTimelineEntry = Extract<TimelineEntry, { readonly kind: "text" | "thought" }>;
 type ToolTimelineEntry = Extract<TimelineEntry, { readonly kind: "tool" }>;
+type ImageTimelineEntry = Extract<TimelineEntry, { readonly kind: "image" }>;
 
 const DEFAULT_TOOL_TITLE = "Tool";
 
@@ -259,6 +274,29 @@ class ResponseCard<Id extends string = ResponseCardId> {
     return true;
   }
 
+  updateImage(
+    imageId: string,
+    update: {
+      readonly status?: ImageTimelineEntry["status"];
+      readonly imgKey?: string;
+      readonly fallback?: string;
+    },
+  ): boolean {
+    const index = this.timeline.findIndex(
+      (entry) => entry.kind === "image" && entry.imageId === imageId,
+    );
+    if (index < 0) return false;
+    const current = this.timeline[index];
+    if (current?.kind !== "image") throw new Error("image index no longer references an image");
+    this.timeline[index] = {
+      ...current,
+      ...(update.status === undefined ? {} : { status: update.status }),
+      ...(update.imgKey === undefined ? {} : { imgKey: update.imgKey }),
+      ...(update.fallback === undefined ? {} : { fallback: update.fallback }),
+    };
+    return true;
+  }
+
   sealRunningTools(status: "continued" | "interrupted" = "continued"): void {
     for (let index = 0; index < this.timeline.length; index += 1) {
       const entry = this.timeline[index];
@@ -407,6 +445,32 @@ class ResponseLifecycle {
       return true;
     }
     return this.terminalToolIds.has(toolCallId);
+  }
+
+  /**
+   * Patch an inline image entry by id. Unlike {@link updateTool} this is allowed
+   * after the response has sealed: image bytes upload asynchronously and the
+   * `img_key` often arrives after the turn's terminal seal, so the placeholder
+   * must still be replaceable to render the final picture. Searches response and
+   * supplement cards.
+   */
+  updateImage(
+    imageId: string,
+    update: {
+      readonly status?: ImageTimelineEntry["status"];
+      readonly imgKey?: string;
+      readonly fallback?: string;
+    },
+  ): boolean {
+    for (let index = this.responseCards.length - 1; index >= 0; index -= 1) {
+      const card = this.responseCards[index];
+      if (card?.updateImage(imageId, update)) return true;
+    }
+    for (let index = this.supplementCards.length - 1; index >= 0; index -= 1) {
+      const card = this.supplementCards[index];
+      if (card?.updateImage(imageId, update)) return true;
+    }
+    return false;
   }
 
   snapshot(): ResponseSnapshot {
@@ -757,6 +821,23 @@ export class TopicConversation {
   ): boolean {
     if (this.executionOwner !== responseId) throw new Error("only execution owner accepts updates");
     return this.response(responseId).updateTool(toolCallId, update);
+  }
+
+  /**
+   * Patch an inline image entry. No execution-owner guard: image uploads settle
+   * asynchronously and may land after the turn sealed and ownership moved on, so
+   * any response's image placeholder must remain patchable to its final key.
+   */
+  updateImage(
+    responseId: ResponseId,
+    imageId: string,
+    update: {
+      readonly status?: ImageTimelineEntry["status"];
+      readonly imgKey?: string;
+      readonly fallback?: string;
+    },
+  ): boolean {
+    return this.response(responseId).updateImage(imageId, update);
   }
 
   requestPermission(input: {

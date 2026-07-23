@@ -494,6 +494,50 @@ describe("LarkCardPresenter semantic conversation cards", () => {
     ]);
   });
 
+  it("renders inline image entries interleaved with text in one card", async () => {
+    const cards: CardWithConfig[] = [];
+    const presenter = makePresenter(cards);
+    const view: ConversationCardView = {
+      kind: "active",
+      header: "responding",
+      entries: [
+        { kind: "text", text: "before" },
+        { kind: "image", imageId: "img-1", status: "ready", imgKey: "img_v3_key", alt: "a cat" },
+        { kind: "text", text: "after" },
+        { kind: "image", imageId: "img-2", status: "uploading" },
+        { kind: "image", imageId: "img-3", status: "failed", fallback: "[图片发送失败]" },
+      ],
+      profile,
+      cancelAction: {
+        p: "prompt_1" as PromptToken,
+        s: "segment_1" as SegmentToken,
+        a: "action_1" as ActionToken,
+      },
+      route,
+    };
+
+    await presenter.sendConversationCard("om_1", view);
+    const elements = cards[0]?.body?.elements ?? [];
+    // A ready image becomes a native img element carrying its img_key + alt.
+    expect(elements).toContainEqual({
+      tag: "img",
+      img_key: "img_v3_key",
+      alt: { tag: "plain_text", content: "a cat" },
+    });
+    // Uploading and failed images degrade to markdown placeholders.
+    const markdowns = elements
+      .filter((el) => el.tag === "markdown")
+      .map((el) => (el as { content: string }).content);
+    expect(markdowns).toContain("before");
+    expect(markdowns).toContain("after");
+    expect(markdowns).toContain("🖼️ 图片上传中…");
+    expect(markdowns).toContain("[图片发送失败]");
+    // No dividers around inline images.
+    const readyIndex = elements.findIndex((el) => el.tag === "img");
+    expect(elements[readyIndex - 1]?.tag).not.toBe("hr");
+    expect(elements[readyIndex + 1]?.tag).not.toBe("hr");
+  });
+
   it("renders every semantic view kind through the public send and patch methods", async () => {
     const cards: CardWithConfig[] = [];
     const presenter = makePresenter(cards);

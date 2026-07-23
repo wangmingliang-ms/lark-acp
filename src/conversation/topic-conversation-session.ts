@@ -339,6 +339,41 @@ export class TopicConversationSession {
   }
 
   /**
+   * Append an inline image placeholder entry to the response's tail card and
+   * return its `imageId`. The bytes upload asynchronously; call
+   * {@link updateImageEntry} with the id once the `img_key` (or failure) is
+   * known. Rotates the card first if the new element would overflow the budget.
+   */
+  appendImageEntry(
+    responseId: ResponseId,
+    image: { readonly imageId: string; readonly alt?: string },
+  ): void {
+    const entry: TimelineEntry = {
+      kind: "image",
+      imageId: image.imageId,
+      status: "uploading",
+      ...(image.alt === undefined ? {} : { alt: image.alt }),
+    };
+    this.rotateBeforeElement(responseId, entry);
+    this.store.transaction((aggregate) => aggregate.append(responseId, entry));
+  }
+
+  /** Patch an inline image entry once its upload settles (ready or failed). */
+  updateImageEntry(
+    responseId: ResponseId,
+    imageId: string,
+    update: {
+      readonly status?: "uploading" | "ready" | "failed";
+      readonly imgKey?: string;
+      readonly fallback?: string;
+    },
+  ): boolean {
+    return this.store.transaction((aggregate) =>
+      aggregate.updateImage(responseId, imageId, update),
+    );
+  }
+
+  /**
    * Routes an ACP session update that arrived with no active Request routed
    * to it (i.e. after the owning Response's prompt route already closed).
    * Only the Response that just completed normally and still holds

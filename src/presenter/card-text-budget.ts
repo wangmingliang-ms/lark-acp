@@ -20,6 +20,8 @@ export function conversationEntryHasLeadingDivider(
   const previous = entries[index - 1];
   if (current === undefined || previous === undefined) return false;
   if (current.kind === "thought" || previous.kind === "thought") return false;
+  // Inline images flow with their surrounding prose; no divider on either side.
+  if (current.kind === "image" || previous.kind === "image") return false;
   return !(current.kind === "tool" && previous.kind === "tool");
 }
 

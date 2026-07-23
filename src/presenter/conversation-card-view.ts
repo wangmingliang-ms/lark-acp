@@ -36,6 +36,8 @@ export interface CancelActionPayloadV2 {
 export type ToolStatus =
   "pending" | "in_progress" | "continued" | "completed" | "failed" | "interrupted";
 
+export type ImageEntryStatus = "uploading" | "ready" | "failed";
+
 export type ConversationTimelineEntry =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "thought"; readonly text: string }
@@ -46,11 +48,19 @@ export type ConversationTimelineEntry =
       readonly toolKind: string;
       readonly status: ToolStatus;
       readonly detail?: string;
+    }
+  | {
+      readonly kind: "image";
+      readonly imageId: string;
+      readonly status: ImageEntryStatus;
+      readonly imgKey?: string;
+      readonly alt?: string;
+      readonly fallback?: string;
     };
 
 export type ActiveTimelineEntry = ConversationTimelineEntry;
 export type ArchivedTimelineEntry =
-  | Extract<ConversationTimelineEntry, { readonly kind: "text" | "thought" }>
+  | Extract<ConversationTimelineEntry, { readonly kind: "text" | "thought" | "image" }>
   | (Omit<Extract<ConversationTimelineEntry, { readonly kind: "tool" }>, "status"> & {
       readonly status: Exclude<ToolStatus, "pending" | "in_progress">;
     });

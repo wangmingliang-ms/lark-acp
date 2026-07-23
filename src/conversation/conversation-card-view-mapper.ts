@@ -65,6 +65,15 @@ function entries(items: readonly TimelineEntry[]): ConversationTimelineEntry[] {
           toolKind: "tool",
           status: toolStatus(entry.status),
         };
+      case "image":
+        return {
+          kind: "image",
+          imageId: entry.imageId,
+          status: entry.status,
+          ...(entry.imgKey === undefined ? {} : { imgKey: entry.imgKey }),
+          ...(entry.alt === undefined ? {} : { alt: entry.alt }),
+          ...(entry.fallback === undefined ? {} : { fallback: entry.fallback }),
+        };
     }
   });
 }
@@ -73,7 +82,9 @@ function summary(items: readonly ConversationTimelineEntry[]): string {
   const visible = items.find((entry) => entry.kind === "text" || entry.kind === "thought");
   if (visible?.kind === "text" || visible?.kind === "thought") return visible.text;
   const tool = items.find((entry) => entry.kind === "tool");
-  return tool?.kind === "tool" ? tool.title : "";
+  if (tool?.kind === "tool") return tool.title;
+  const image = items.find((entry) => entry.kind === "image");
+  return image !== undefined ? "[图片]" : "";
 }
 
 export class ConversationCardViewMapper {

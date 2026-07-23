@@ -494,6 +494,7 @@ function recordingPresenter(
   return {
     replyText: async () => {},
     replyImage: async () => true,
+    uploadCardImage: async () => "img_test_key",
     expirePermissionCard: async () => {},
     replyNoticeCard: async (_id, notice) => {
       notices.push({ title: notice.title, body: notice.body, template: notice.template });

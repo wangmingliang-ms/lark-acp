@@ -461,6 +461,49 @@ describe("TopicConversationSession", () => {
     });
   });
 
+  it("inserts inline image entries between text and patches them to ready", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "before" },
+    });
+    session.appendImageEntry(a.responseId, { imageId: "img-1", alt: "cat" });
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "after" },
+    });
+
+    const cardOf = (): readonly { kind: string }[] | undefined =>
+      session.snapshot.turns.find((turn) => turn.response.id === a.responseId)?.response.cards[0]
+        ?.entries;
+    // Image breaks text coalescing: [text, image(uploading), text] in order.
+    expect(cardOf()?.map((e) => e.kind)).toEqual(["text", "image", "text"]);
+    expect(cardOf()?.[1]).toEqual({
+      kind: "image",
+      imageId: "img-1",
+      status: "uploading",
+      alt: "cat",
+    });
+
+    // Patching by id flips it to ready with the img_key — allowed post-seal too.
+    const patched = session.updateImageEntry(a.responseId, "img-1", {
+      status: "ready",
+      imgKey: "img_v3_key",
+    });
+    expect(patched).toBe(true);
+    expect(cardOf()?.[1]).toEqual({
+      kind: "image",
+      imageId: "img-1",
+      status: "ready",
+      alt: "cat",
+      imgKey: "img_v3_key",
+    });
+  });
+
   it("does not rotate at 8 KiB until the 20 KB hard limit requires a split", async () => {
     const { session } = fixture();
     const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });

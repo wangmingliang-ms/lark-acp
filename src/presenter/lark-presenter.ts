@@ -319,9 +319,32 @@ function semanticEntryToCardElement(entry: ConversationTimelineEntry): object {
         content: stripCardImageMarkdown(entry.detail ? `${head}\n\n${entry.detail}` : head),
       };
     }
+    case "image":
+      return semanticImageToCardElement(entry);
     default:
       return assertNeverConversationEntry(entry);
   }
+}
+
+/**
+ * Render an inline image entry. A "ready" image becomes a native card `img`
+ * element; while uploading it shows a placeholder, and on failure a text
+ * fallback (which never contains a local filesystem path).
+ */
+function semanticImageToCardElement(
+  entry: Extract<ConversationTimelineEntry, { readonly kind: "image" }>,
+): object {
+  if (entry.status === "ready" && entry.imgKey !== undefined) {
+    return {
+      tag: "img",
+      img_key: entry.imgKey,
+      alt: { tag: "plain_text", content: entry.alt ?? "" },
+    };
+  }
+  if (entry.status === "failed") {
+    return { tag: "markdown", content: entry.fallback ?? "[图片发送失败]" };
+  }
+  return { tag: "markdown", content: "🖼️ 图片上传中…" };
 }
 
 function assertNeverConversationEntry(entry: never): never {
@@ -687,6 +710,15 @@ function isTimelineEntry(value: unknown): boolean {
         ) &&
         (value.detail === undefined || typeof value.detail === "string")
       );
+    case "image":
+      return (
+        hasOnlyKeys(value, ["kind", "imageId", "status", "imgKey", "alt", "fallback"]) &&
+        typeof value.imageId === "string" &&
+        ["uploading", "ready", "failed"].includes(value.status as string) &&
+        (value.imgKey === undefined || typeof value.imgKey === "string") &&
+        (value.alt === undefined || typeof value.alt === "string") &&
+        (value.fallback === undefined || typeof value.fallback === "string")
+      );
     default:
       return false;
   }
@@ -946,6 +978,15 @@ export class LarkCardPresenter implements LarkPresenter {
     } catch (err) {
       this.logger.warn({ err: conciseError(err), messageId }, "replyImage failed");
       return false;
+    }
+  }
+
+  async uploadCardImage(bytes: Buffer): Promise<string | null> {
+    try {
+      return await this.http.uploadImage(bytes);
+    } catch (err) {
+      this.logger.warn({ err: conciseError(err) }, "uploadCardImage failed");
+      return null;
     }
   }
 
