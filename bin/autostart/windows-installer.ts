@@ -55,7 +55,16 @@ export interface TaskXmlSpec {
   readonly userId: string;
 }
 
-/** Render schtasks-compatible task XML with a BootTrigger (pure). */
+/** Render schtasks-compatible task XML (pure).
+ *
+ * Registers two independent triggers so autostart survives either path:
+ * - LogonTrigger fires when {@link TaskXmlSpec.userId} logs on. This is the
+ *   reliable one under `InteractiveToken`, which needs a live interactive
+ *   session that only exists after logon.
+ * - BootTrigger fires at boot, covering fast restarts where the user is
+ *   already logged in. `MultipleInstancesPolicy=IgnoreNew` makes a redundant
+ *   fire a no-op rather than launching a second gateway.
+ */
 export function renderTaskXml(spec: TaskXmlSpec): string {
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -74,6 +83,10 @@ export function renderTaskXml(spec: TaskXmlSpec): string {
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
   </Settings>
   <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${spec.userId}</UserId>
+    </LogonTrigger>
     <BootTrigger>
       <Enabled>true</Enabled>
     </BootTrigger>

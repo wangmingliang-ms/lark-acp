@@ -45,18 +45,20 @@ describe("renderAutostartPs1", () => {
 });
 
 describe("renderTaskXml", () => {
-  it("renders a BootTrigger task invoking pwsh with the ps1", () => {
+  it("renders both a LogonTrigger and a BootTrigger invoking pwsh with the ps1", () => {
     const xml = renderTaskXml({
       description: "Humming gateway autostart",
       pwshPath: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
       ps1Path: "C:\\Users\\u\\.humming\\autostart\\humming-autostart.ps1",
       userId: "MACHINE\\u",
     });
+    expect(xml).toContain("<LogonTrigger>");
     expect(xml).toContain("<BootTrigger>");
+    // LogonTrigger must be scoped to the same user so it fires only on that logon.
+    expect(xml.match(/<UserId>MACHINE\\u<\/UserId>/g)).toHaveLength(2);
     expect(xml).toContain("<StartWhenAvailable>true</StartWhenAvailable>");
     expect(xml).toContain("pwsh.exe");
     expect(xml).toContain("humming-autostart.ps1");
-    expect(xml).toContain("<UserId>MACHINE\\u</UserId>");
   });
 });
 
