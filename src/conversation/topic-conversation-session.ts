@@ -374,6 +374,22 @@ export class TopicConversationSession {
   }
 
   /**
+   * Expand the response's `text` timeline entries in place, replacing each with
+   * the entries `expandText` derives from it (used at finalize to split text
+   * around inline markdown images). Non-text entries pass through unchanged.
+   */
+  expandTextEntries(
+    responseId: ResponseId,
+    expandText: (text: string) => readonly TimelineEntry[],
+  ): void {
+    this.store.transaction((aggregate) =>
+      aggregate.rewriteResponseTimeline(responseId, (entry) =>
+        entry.kind === "text" ? expandText(entry.text) : [entry],
+      ),
+    );
+  }
+
+  /**
    * Routes an ACP session update that arrived with no active Request routed
    * to it (i.e. after the owning Response's prompt route already closed).
    * Only the Response that just completed normally and still holds

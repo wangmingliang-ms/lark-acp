@@ -34,6 +34,63 @@ export interface ExtractedImages {
 }
 
 /**
+ * An ordered piece of an agent message: either a run of text (markdown) or a
+ * single image reference. Concatenating the `text` pieces with the images
+ * removed reproduces the original document order — this is what lets the card
+ * interleave `markdown` and `img` elements in place.
+ */
+export type MarkdownSegment =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "image"; readonly source: OutboundImageSource };
+
+/**
+ * Split agent markdown into an ordered list of text/image segments, preserving
+ * the position of each image relative to its surrounding prose. Uses the
+ * `marked` AST to locate real image tokens (so `![]` inside a code block is not
+ * mistaken for an image), then slices the source text at each image's raw span.
+ *
+ * Pure and total. Text with no images yields a single text segment (or none for
+ * empty input). Adjacent/empty text runs are dropped so the result contains no
+ * empty text segments.
+ */
+export function splitMarkdownIntoSegments(text: string): readonly MarkdownSegment[] {
+  if (text.length === 0) return [];
+
+  const images: { readonly source: OutboundImageSource; readonly raw: string }[] = [];
+  collectImageTokensWithRaw(marked.lexer(text), images);
+  if (images.length === 0) return [{ kind: "text", text }];
+
+  const segments: MarkdownSegment[] = [];
+  let cursor = 0;
+  for (const image of images) {
+    const at = text.indexOf(image.raw, cursor);
+    if (at < 0) continue; // raw not found (shouldn't happen) — skip, keep order
+    if (at > cursor) segments.push({ kind: "text", text: text.slice(cursor, at) });
+    segments.push({ kind: "image", source: image.source });
+    cursor = at + image.raw.length;
+  }
+  if (cursor < text.length) segments.push({ kind: "text", text: text.slice(cursor) });
+  return segments.filter((segment) => segment.kind !== "text" || segment.text.length > 0);
+}
+
+/** Walk the token tree in document order, recording each image's source + raw span. */
+function collectImageTokensWithRaw(
+  tokens: readonly Token[],
+  out: { source: OutboundImageSource; raw: string }[],
+): void {
+  for (const token of tokens) {
+    if (token.type === "image") {
+      const image = token as Tokens.Image;
+      const source = classifyImageHref(image.href, image.text);
+      if (source !== null) out.push({ source, raw: image.raw });
+      continue;
+    }
+    const nested = (token as { tokens?: readonly Token[] }).tokens;
+    if (nested !== undefined) collectImageTokensWithRaw(nested, out);
+  }
+}
+
+/**
  * Extract image references from `text` and return them alongside a `cleaned`
  * copy with those references stripped. Classifies each `![alt](href)` by the
  * href scheme: `file:` and bare/relative paths become {@link local-file},

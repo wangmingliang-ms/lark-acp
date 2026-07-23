@@ -297,6 +297,16 @@ class ResponseCard<Id extends string = ResponseCardId> {
     return true;
   }
 
+  /**
+   * Replace this card's timeline by mapping each entry to zero or more entries,
+   * preserving order. Used to expand a text entry into interleaved text/image
+   * entries once inline image positions are known. Mutates in place.
+   */
+  rewriteTimeline(rewrite: (entry: TimelineEntry) => readonly TimelineEntry[]): void {
+    const next = this.timeline.flatMap((entry) => [...rewrite(entry)]);
+    this.timeline.splice(0, this.timeline.length, ...next);
+  }
+
   sealRunningTools(status: "continued" | "interrupted" = "continued"): void {
     for (let index = 0; index < this.timeline.length; index += 1) {
       const entry = this.timeline[index];
@@ -471,6 +481,16 @@ class ResponseLifecycle {
       if (card?.updateImage(imageId, update)) return true;
     }
     return false;
+  }
+
+  /**
+   * Expand this response's timeline entries in place (all response cards),
+   * mapping each entry to zero or more entries. Owner-free: runs at finalize to
+   * split text entries into interleaved text/image entries once image positions
+   * are known.
+   */
+  rewriteTimeline(rewrite: (entry: TimelineEntry) => readonly TimelineEntry[]): void {
+    for (const card of this.responseCards) card.rewriteTimeline(rewrite);
   }
 
   snapshot(): ResponseSnapshot {
@@ -838,6 +858,14 @@ export class TopicConversation {
     },
   ): boolean {
     return this.response(responseId).updateImage(imageId, update);
+  }
+
+  /** Expand a response's timeline entries in place (owner-free, finalize use). */
+  rewriteResponseTimeline(
+    responseId: ResponseId,
+    rewrite: (entry: TimelineEntry) => readonly TimelineEntry[],
+  ): void {
+    this.response(responseId).rewriteTimeline(rewrite);
   }
 
   requestPermission(input: {

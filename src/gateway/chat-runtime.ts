@@ -34,7 +34,7 @@ import type { PromptToken } from "../presenter/conversation-card-view.js";
 import crypto from "node:crypto";
 import type { LifecycleIntent } from "../../bin/lifecycle-coordinator.js";
 import {
-  extractMarkdownImages,
+  splitMarkdownIntoSegments,
   outboundImagePlaceholder,
   type OutboundImageSource,
 } from "./outbound-image.js";
@@ -63,22 +63,17 @@ function renderableAgentUpdateKind(
 }
 
 /**
- * Pull user-facing content out of an agent message chunk. Text is forwarded to
- * `onText` (accumulated for later markdown-image extraction); an ACP `image`
- * block is forwarded to `onImage` so the caller can insert an inline image
- * entry at its true stream position. Thoughts/tools carry no outbound image.
+ * Forward an ACP `image` content block from an agent message chunk to `onImage`
+ * so the caller can insert an inline image entry at its true stream position.
+ * Text chunks and thoughts/tools carry no ACP image and are ignored here — the
+ * card renders text itself; markdown-embedded images are handled at finalize.
  */
 function collectOutboundImageContent(
   update: acp.SessionUpdate,
-  onText: (text: string) => void,
   onImage: (source: Extract<OutboundImageSource, { kind: "acp-image" }>) => void,
 ): void {
   if (update.sessionUpdate !== "agent_message_chunk") return;
   const content = update.content;
-  if (content.type === "text") {
-    onText(content.text);
-    return;
-  }
   if (content.type === "image" && content.data.length > 0) {
     onImage({ kind: "acp-image", base64: content.data, mimeType: content.mimeType });
   }
@@ -1481,14 +1476,12 @@ export class ChatRuntime {
       },
       "prompt dispatch started",
     );
-    // Inline images the agent emitted this turn, each a placeholder entry
-    // already positioned in the card, awaiting async upload. ACP `image` blocks
-    // are inserted at their true stream position as they arrive; markdown
-    // file/URL images are extracted from the finalized text after the turn seals
-    // (extracting mid-stream would risk splitting a `![](...)` span across chunk
-    // boundaries) and appended in order.
+    // Inline images the agent emitted this turn, each a placeholder entry in the
+    // card awaiting async upload. ACP `image` blocks are inserted at their true
+    // stream position as they arrive; markdown file/URL images are split out of
+    // the streamed text entries at finalize (see expandTextEntries below), where
+    // the full text is known and chunk boundaries can't split a `![](...)` span.
     const pendingImages: PendingInlineImage[] = [];
-    let agentMessageText = "";
     const insertInlineImage = (source: OutboundImageSource, alt?: string): void => {
       const imageId = crypto.randomUUID();
       this.conversation.appendImageEntry(response.responseId, {
@@ -1501,13 +1494,7 @@ export class ChatRuntime {
       sessionUpdate: async (params) => {
         observeAgentEvent(params.update.sessionUpdate);
         await response.applyAgentUpdate(params.update);
-        collectOutboundImageContent(
-          params.update,
-          (text) => {
-            agentMessageText += text;
-          },
-          (source) => insertInlineImage(source),
-        );
+        collectOutboundImageContent(params.update, (source) => insertInlineImage(source));
         const renderableKind = renderableAgentUpdateKind(params.update, {
           showThoughts: this.opts.showThoughts,
           showTools: this.opts.showTools,
@@ -1557,6 +1544,25 @@ export class ChatRuntime {
 
     this.logger.info({ stopReason: result.stopReason, usage: result.usage ?? null }, "prompt done");
     const status = stopReasonToStatus(result.stopReason);
+    // Expand each streamed text entry in place, splitting it around inline
+    // markdown images (file:// / https://) so the picture lands at its true
+    // position in the prose rather than trailing after all text. ACP-block
+    // images are already positioned inline during streaming. Uploads settle
+    // after the seal and patch each placeholder via the owner-free path.
+    this.conversation.expandTextEntries(response.responseId, (text) =>
+      splitMarkdownIntoSegments(text).map((segment) => {
+        if (segment.kind === "text") return { kind: "text", text: segment.text };
+        const imageId = crypto.randomUUID();
+        const alt = "alt" in segment.source ? segment.source.alt : undefined;
+        pendingImages.push({ imageId, source: segment.source });
+        return {
+          kind: "image",
+          imageId,
+          status: "uploading",
+          ...(alt === undefined ? {} : { alt }),
+        };
+      }),
+    );
     if (this.topicCancelRequested) {
       await this.conversation.confirmTopicCancel();
     } else {
@@ -1575,15 +1581,9 @@ export class ChatRuntime {
         (handoff) => this.commitPendingCarrier(handoff),
       );
     }
-    // Append markdown-embedded images (file:// / https://) as inline entries in
-    // order, after the finalized text. ACP-block images are already positioned.
-    const { sources: markdownImages } = extractMarkdownImages(agentMessageText);
-    for (const source of markdownImages) {
-      const alt = "alt" in source ? source.alt : undefined;
-      insertInlineImage(source, alt);
-    }
-    // Upload every pending image concurrently and patch its placeholder entry to
-    // the final img_key (or a text fallback on failure). Then flush so the card
+    // Upload every pending image and patch its placeholder entry to the final
+    // img_key (or a text fallback on failure). Runs after the seal — updateImage
+    // is owner-free, so post-seal patches are allowed. Then flush so the card
     // lands with real pictures. Never throws into finalize.
     await this.resolveInlineImages(response.responseId, pendingImages);
     await this.conversation.flushPresentation();

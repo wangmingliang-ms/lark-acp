@@ -489,7 +489,9 @@ describe("TopicConversationSession", () => {
       alt: "cat",
     });
 
-    // Patching by id flips it to ready with the img_key — allowed post-seal too.
+    // Seal the turn, then patch: uploads settle after finishOwner, so the
+    // placeholder must remain patchable on a terminal response (no owner guard).
+    await session.finishOwner("complete");
     const patched = session.updateImageEntry(a.responseId, "img-1", {
       status: "ready",
       imgKey: "img_v3_key",
@@ -502,6 +504,37 @@ describe("TopicConversationSession", () => {
       alt: "cat",
       imgKey: "img_v3_key",
     });
+  });
+
+  it("expands a text entry into interleaved text/image entries in place", async () => {
+    const { session } = fixture();
+    const a = session.accept({ sourceMessageId: "message-a", content: "A", profile });
+    await session.prepare(a.responseId, profile);
+    await session.activate(a.responseId);
+    await session.applyAgentUpdate(a.responseId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "one IMG two IMG three" },
+    });
+
+    // Split "one IMG two IMG three" into text/image runs, minting placeholders.
+    let n = 0;
+    session.expandTextEntries(a.responseId, (text) =>
+      text.split("IMG").flatMap((piece, index) => {
+        const textPart = piece.length > 0 ? [{ kind: "text" as const, text: piece }] : [];
+        if (index === text.split("IMG").length - 1) return textPart;
+        return [
+          ...textPart,
+          { kind: "image" as const, imageId: `img-${String(++n)}`, status: "uploading" as const },
+        ];
+      }),
+    );
+
+    const entries = session.snapshot.turns.find((turn) => turn.response.id === a.responseId)
+      ?.response.cards[0]?.entries;
+    expect(entries?.map((e) => e.kind)).toEqual(["text", "image", "text", "image", "text"]);
+    expect(entries?.[0]).toEqual({ kind: "text", text: "one " });
+    expect(entries?.[2]).toEqual({ kind: "text", text: " two " });
+    expect(entries?.[4]).toEqual({ kind: "text", text: " three" });
   });
 
   it("does not rotate at 8 KiB until the 20 KB hard limit requires a split", async () => {
