@@ -1616,9 +1616,9 @@ export class ChatRuntime {
 
   /**
    * Upload each pending inline image and patch its card entry to `ready` (with
-   * the img_key) or `failed` (with a text fallback). Runs uploads concurrently,
-   * each independently guarded; a single failure never blocks the others or the
-   * turn. Never throws.
+   * the img_key) or `failed` (with a text fallback). Uploads run sequentially
+   * (image counts per turn are small); each is independently guarded so a single
+   * failure never blocks the others or the turn. Never throws.
    */
   private async resolveInlineImages(
     responseId: ResponseId,

@@ -25,4 +25,41 @@ describe("conversationCardBudget", () => {
     expect(utf8ByteLength(prefix + "界")).toBeGreaterThan(conversationCardBudget.maxContentBytes);
     expect(prefix + remainder).toBe(text);
   });
+
+  describe("foldImagesToFit", () => {
+    const chrome = { showCancelButton: true, profile: null };
+
+    it("keeps everything when the card already fits", () => {
+      const entries = [
+        { kind: "text" as const, text: "hi" },
+        { kind: "image" as const, imageId: "a", status: "uploading" as const },
+      ];
+      const { entries: out, droppedImageIds } = conversationCardBudget.foldImagesToFit(
+        entries,
+        chrome,
+      );
+      expect(out).toBe(entries);
+      expect(droppedImageIds).toEqual([]);
+    });
+
+    it("folds overflow images into a [图片] marker and stays within budget", () => {
+      const imgCount = conversationCardBudget.maxElements + 10;
+      const entries = [
+        { kind: "text" as const, text: "gallery" },
+        ...Array.from({ length: imgCount }, (_, i) => ({
+          kind: "image" as const,
+          imageId: `img-${String(i)}`,
+          status: "uploading" as const,
+        })),
+      ];
+      const { entries: out, droppedImageIds } = conversationCardBudget.foldImagesToFit(
+        entries,
+        chrome,
+      );
+      expect(conversationCardBudget.fits(out, chrome)).toBe(true);
+      expect(droppedImageIds.length).toBeGreaterThan(0);
+      expect(out.filter((e) => e.kind === "image").length).toBe(imgCount - droppedImageIds.length);
+      expect(out.some((e) => e.kind === "text" && e.text.includes("[图片]"))).toBe(true);
+    });
+  });
 });

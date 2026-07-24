@@ -376,78 +376,22 @@ export class TopicConversationSession {
   }
 
   /**
-   * Expand the response's `text` timeline entries in place, replacing each with
-   * the entries `expandText` derives from it (used at finalize to split text
-   * around inline markdown images). Non-text entries pass through unchanged.
-   *
-   * Budget-aware per card: if expansion would push a card past the element
-   * limit, overflow image placeholders are folded back into a compact `[图片]`
-   * text marker (zero extra elements) so the card is never rejected by Lark.
-   * Returns the ids of images that were dropped this way, so the caller can
-   * skip uploading them.
+   * Expand the response's `text` timeline entries in place, splitting each around
+   * its inline markdown images (via `expandText`), then folding any overflow
+   * images so the card fits Lark's element budget. Returns the ids of images
+   * folded away, so the caller can skip uploading them.
    */
   expandTextEntries(
     responseId: ResponseId,
     expandText: (text: string) => readonly TimelineEntry[],
   ): readonly string[] {
-    const droppedImageIds: string[] = [];
-    this.store.transaction((aggregate) =>
-      aggregate.mapResponseTimeline(responseId, (entries) => {
-        const expanded = entries.flatMap((entry) =>
-          entry.kind === "text" ? [...expandText(entry.text)] : [entry],
-        );
-        return this.enforceElementBudget(responseId, expanded, droppedImageIds);
-      }),
-    );
-    return droppedImageIds;
-  }
-
-  /**
-   * Cap a card's entries at the element budget by folding overflow image
-   * placeholders into a `[图片]` marker appended to the previous text entry (or
-   * a standalone one if none precedes). Non-image entries are always kept.
-   */
-  private enforceElementBudget(
-    responseId: ResponseId,
-    entries: readonly TimelineEntry[],
-    droppedImageIds: string[],
-  ): readonly TimelineEntry[] {
     const chrome = {
       showCancelButton: this.options.showCancelButton,
       profile: this.response(responseId).profile,
     };
-    // Fast path: the whole expansion already fits.
-    if (conversationCardBudget.fits(entries, chrome)) return entries;
-
-    const marker = "[图片]";
-    const result: TimelineEntry[] = [];
-    let folding = false;
-    for (const entry of entries) {
-      if (entry.kind !== "image") {
-        result.push(entry);
-        continue;
-      }
-      // Keep the image only while the card still fits WITH ROOM for the eventual
-      // fold marker (a single text element that must itself fit the budget).
-      // Once folding starts, every remaining image folds into that one marker,
-      // adding zero further elements.
-      if (
-        !folding &&
-        conversationCardBudget.fits([...result, entry, { kind: "text", text: marker }], chrome)
-      ) {
-        result.push(entry);
-        continue;
-      }
-      folding = true;
-      droppedImageIds.push(entry.imageId);
-      const last = result.at(-1);
-      if (last?.kind === "text") {
-        result[result.length - 1] = { kind: "text", text: `${last.text}${marker}` };
-      } else {
-        result.push({ kind: "text", text: marker });
-      }
-    }
-    return result;
+    return this.store.transaction((aggregate) =>
+      aggregate.expandTextEntries(responseId, expandText, chrome),
+    );
   }
 
   /**

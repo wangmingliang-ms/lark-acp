@@ -5,8 +5,8 @@
  * each collected image source (ACP block, local file, remote URL) is resolved to
  * bytes and uploaded to an `img_key` for an inline card `img` element; a source
  * that can't be resolved or uploaded patches to a text placeholder instead.
- * Also covers `extractMarkdownImages` (used to pull file/URL images out of the
- * finalized agent text) and its chunk-split robustness.
+ * Also covers `splitMarkdownIntoSegments` (used to pull file/URL images out of
+ * the finalized agent text in document order) and its chunk-split robustness.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -17,11 +17,18 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  extractMarkdownImages,
+  splitMarkdownIntoSegments,
   outboundImagePlaceholder,
   type OutboundImageSource,
 } from "../src/gateway/outbound-image.js";
 import { resolveImageBytes } from "../src/gateway/outbound-image-loader.js";
+
+/** Extract just the image sources from a markdown split, in document order. */
+function markdownImageSources(text: string): OutboundImageSource[] {
+  return splitMarkdownIntoSegments(text).flatMap((segment) =>
+    segment.kind === "image" ? [segment.source] : [],
+  );
+}
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
 
@@ -97,11 +104,7 @@ describe("outbound image pipeline", () => {
     };
     const fileUrl = pathToFileURL(localImagePath).href;
     const text = `Here is the screenshot ![local](${fileUrl}) and the download ![remote](${baseUrl}/ok.png).`;
-    const { sources: markdownSources, cleaned } = extractMarkdownImages(text);
-
-    // Text is stripped of the image markdown for the card.
-    expect(cleaned).not.toContain("![");
-    expect(cleaned).toContain("Here is the screenshot");
+    const markdownSources = markdownImageSources(text);
 
     const all = [acpBlock, ...markdownSources];
     expect(all.map((s) => s.kind)).toEqual(["acp-image", "local-file", "remote-url"]);
@@ -117,8 +120,7 @@ describe("outbound image pipeline", () => {
 
   it("falls back to a text placeholder when a remote source is not an image", async () => {
     const text = `broken ![x](${baseUrl}/notimage.html)`;
-    const { sources } = extractMarkdownImages(text);
-    const results = await resolveAll(sources, async () => "img_key");
+    const results = await resolveAll(markdownImageSources(text), async () => "img_key");
     expect(results).toEqual([
       { status: "failed", fallback: `[图片下载失败: ${baseUrl}/notimage.html]` },
     ]);
@@ -139,7 +141,8 @@ describe("outbound image pipeline", () => {
     // reassembled text, so the reference is still found.
     const chunks = ["look ![cat](", `${baseUrl}/ok.png`, ") done"];
     const finalized = chunks.join("");
-    const { sources } = extractMarkdownImages(finalized);
-    expect(sources).toEqual([{ kind: "remote-url", url: `${baseUrl}/ok.png`, alt: "cat" }]);
+    expect(markdownImageSources(finalized)).toEqual([
+      { kind: "remote-url", url: `${baseUrl}/ok.png`, alt: "cat" },
+    ]);
   });
 });

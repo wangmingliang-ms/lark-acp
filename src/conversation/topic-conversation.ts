@@ -1,4 +1,5 @@
 import type { SessionCardMeta } from "../presenter/presenter.js";
+import { conversationCardBudget, type CardChrome } from "./conversation-card-budget.js";
 
 export type TurnId = string & { readonly __brand: "TurnId" };
 export type RequestId = string & { readonly __brand: "RequestId" };
@@ -298,14 +299,27 @@ class ResponseCard<Id extends string = ResponseCardId> {
   }
 
   /**
-   * Replace this card's whole timeline with the result of `transform`, which
-   * receives the current entries. Lets callers apply budget-aware, whole-card
-   * rewrites (e.g. expand text around images while capping element count).
-   * Mutates in place.
+   * Expand each `text` entry via `perText`, replacing it with the entries it
+   * yields. Non-text entries pass through untouched — this cannot corrupt tool
+   * or image entries the way a raw whole-timeline rewrite could. Used at
+   * finalize to split streamed text around its inline markdown images.
    */
-  mapTimeline(transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[]): void {
-    const next = transform(this.timeline);
+  expandTextEntries(perText: (text: string) => readonly TimelineEntry[]): void {
+    const next = this.timeline.flatMap((entry) =>
+      entry.kind === "text" ? [...perText(entry.text)] : [entry],
+    );
     this.timeline.splice(0, this.timeline.length, ...next);
+  }
+
+  /**
+   * Fold overflow inline images into a `[图片]` marker so this card fits the
+   * element budget (see {@link conversationCardBudget.foldImagesToFit}). Returns
+   * the ids of images that were folded away.
+   */
+  foldImagesToFit(chrome: CardChrome): readonly string[] {
+    const folded = conversationCardBudget.foldImagesToFit(this.timeline, chrome);
+    this.timeline.splice(0, this.timeline.length, ...folded.entries);
+    return folded.droppedImageIds;
   }
 
   sealRunningTools(status: "continued" | "interrupted" = "continued"): void {
@@ -496,11 +510,22 @@ class ResponseLifecycle {
     return false;
   }
 
-  /** Apply a budget-aware whole-card timeline transform to every response card.
-   *  Owner-free: runs at finalize to expand text entries into interleaved
-   *  text/image entries once image positions are known. */
-  mapTimeline(transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[]): void {
-    for (const card of this.responseCards) card.mapTimeline(transform);
+  /**
+   * Expand `text` entries across all response cards via `perText`, then fold any
+   * overflow inline images so each card fits the element budget. Owner-free:
+   * runs at finalize once image positions are known. Returns the ids of images
+   * folded away (so the caller skips uploading them).
+   */
+  expandTextEntries(
+    perText: (text: string) => readonly TimelineEntry[],
+    chrome: CardChrome,
+  ): readonly string[] {
+    const dropped: string[] = [];
+    for (const card of this.responseCards) {
+      card.expandTextEntries(perText);
+      dropped.push(...card.foldImagesToFit(chrome));
+    }
+    return dropped;
   }
 
   snapshot(): ResponseSnapshot {
@@ -879,12 +904,17 @@ export class TopicConversation {
     return this.response(responseId).updateImage(imageId, update);
   }
 
-  /** Apply a budget-aware whole-card timeline transform to a response's cards. */
-  mapResponseTimeline(
+  /**
+   * Expand a response's `text` entries around inline images, then fold overflow
+   * images to fit the element budget. Owner-free (finalize use). Returns the ids
+   * of images folded away.
+   */
+  expandTextEntries(
     responseId: ResponseId,
-    transform: (entries: readonly TimelineEntry[]) => readonly TimelineEntry[],
-  ): void {
-    this.response(responseId).mapTimeline(transform);
+    perText: (text: string) => readonly TimelineEntry[],
+    chrome: CardChrome,
+  ): readonly string[] {
+    return this.response(responseId).expandTextEntries(perText, chrome);
   }
 
   requestPermission(input: {

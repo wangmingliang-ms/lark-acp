@@ -1,16 +1,13 @@
 /**
- * Outbound image extraction — the pure counterpart of {@link outbound-image-loader}.
+ * Outbound image parsing — the pure counterpart of {@link outbound-image-loader}.
  *
- * Agents emit images in three forms: ACP `image` content blocks (handled at the
- * session layer), and two markdown-embedded forms — local files (`![](file://…)`
- * or a bare path) and remote URLs (`![](https://…)`). Feishu renders images only
- * as uploaded `image_key`s, so the gateway pulls image references *out* of the
- * agent's text and sends them as standalone `image` messages.
- *
- * This module walks the `marked` inline token tree to find image references and
- * returns both the classified {@link OutboundImageSource}s and a `cleaned` copy
- * of the text with those references removed (so the text card stays clean rather
- * than degrading images to `[图片](href)` links). Pure and total — never throws.
+ * Agents emit images in three forms: ACP `image` content blocks (inserted inline
+ * during streaming), and two markdown-embedded forms — local files
+ * (`![](file://…)` or a bare path) and remote URLs (`![](https://…)`). This
+ * module walks the `marked` token tree to split agent text into an ordered list
+ * of text/image segments ({@link splitMarkdownIntoSegments}), so the card can
+ * interleave `markdown` and `img` elements in their true document position.
+ * Pure and total — never throws.
  */
 
 import { fileURLToPath } from "node:url";
@@ -19,19 +16,12 @@ import { marked, type Token, type Tokens } from "marked";
 /**
  * A resolvable outbound image reference, discriminated by where its bytes live.
  * `acp-image` originates from an ACP `image` content block; the other two are
- * extracted from agent markdown by {@link extractMarkdownImages}.
+ * extracted from agent markdown by {@link splitMarkdownIntoSegments}.
  */
 export type OutboundImageSource =
   | { readonly kind: "acp-image"; readonly base64: string; readonly mimeType: string }
   | { readonly kind: "local-file"; readonly path: string; readonly alt?: string }
   | { readonly kind: "remote-url"; readonly url: string; readonly alt?: string };
-
-/** Result of pulling image references out of a block of agent markdown. */
-export interface ExtractedImages {
-  readonly sources: readonly OutboundImageSource[];
-  /** The input text with every extracted image reference removed. */
-  readonly cleaned: string;
-}
 
 /**
  * An ordered piece of an agent message: either a run of text (markdown) or a
@@ -120,39 +110,6 @@ function walkLeafTokens(
 }
 
 /**
- * Extract image references from `text` and return them alongside a `cleaned`
- * copy with those references stripped. Classifies each `![alt](href)` by the
- * href scheme: `file:` and bare/relative paths become {@link local-file},
- * `http(s):` becomes {@link remote-url}. Order of appearance is preserved.
- *
- * Pure and total — malformed markdown simply yields no sources.
- */
-export function extractMarkdownImages(text: string): ExtractedImages {
-  if (text.length === 0) return { sources: [], cleaned: text };
-
-  const sources: OutboundImageSource[] = [];
-  const tokens = marked.lexer(text);
-  collectImageTokens(tokens, sources);
-
-  if (sources.length === 0) return { sources: [], cleaned: text };
-
-  return { sources, cleaned: stripImageMarkdown(text) };
-}
-
-/** Recursively walk the token tree, appending a source for each image token. */
-function collectImageTokens(tokens: readonly Token[], out: OutboundImageSource[]): void {
-  for (const token of tokens) {
-    if (token.type === "image") {
-      const source = classifyImageHref((token as Tokens.Image).href, (token as Tokens.Image).text);
-      if (source !== null) out.push(source);
-      continue;
-    }
-    const nested = (token as { tokens?: readonly Token[] }).tokens;
-    if (nested !== undefined) collectImageTokens(nested, out);
-  }
-}
-
-/**
  * Classify a markdown image href into a loadable source. Returns `null` for
  * hrefs we can't resolve to bytes (e.g. `data:` URIs are already inline; an
  * empty href is meaningless).
@@ -186,16 +143,6 @@ function safeFileUrlToPath(fileUrl: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** Regex matching a markdown image span `![alt](href)` (alt/href may be empty). */
-const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
-/** Collapse 3+ consecutive newlines left behind after stripping images. */
-const EXCESS_BLANK_LINES_RE = /\n{3,}/g;
-
-/** Remove every markdown image span from `text` and tidy leftover blank lines. */
-function stripImageMarkdown(text: string): string {
-  return text.replaceAll(MARKDOWN_IMAGE_RE, "").replace(EXCESS_BLANK_LINES_RE, "\n\n").trim();
 }
 
 /**
