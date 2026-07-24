@@ -1586,6 +1586,13 @@ export class ChatRuntime {
         if (item !== undefined && dropped.has(item.imageId)) pendingImages.splice(i, 1);
       }
     }
+    // Upload every pending image and patch its placeholder to the final img_key
+    // (or a text fallback) BEFORE sealing the turn. The seal delivers a terminal
+    // card, and the reconciler treats a delivered terminal card as immutable —
+    // any patch after that is dropped, which would strand the image at
+    // "上传中" forever (seen on slower hosts). Resolving first means the terminal
+    // card is delivered once, already showing the real pictures. Never throws.
+    await this.resolveInlineImages(response.responseId, pendingImages);
     if (this.topicCancelRequested) {
       await this.conversation.confirmTopicCancel();
     } else {
@@ -1604,11 +1611,6 @@ export class ChatRuntime {
         (handoff) => this.commitPendingCarrier(handoff),
       );
     }
-    // Upload every pending image and patch its placeholder entry to the final
-    // img_key (or a text fallback on failure). Runs after the seal — updateImage
-    // is owner-free, so post-seal patches are allowed. Then flush so the card
-    // lands with real pictures. Never throws into finalize.
-    await this.resolveInlineImages(response.responseId, pendingImages);
     await this.conversation.flushPresentation();
     await this.persistSession(state.agent.sessionId);
     await this.opts.onTurnComplete?.(pending.messageId);
